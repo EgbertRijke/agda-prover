@@ -36,6 +36,24 @@ The adapter works alongside Agda language extensions.
 Editor integrations check that your source has not changed before applying a
 returned edit.
 
+## Try an example
+
+[Eckmann–Hilton](examples/EckmannHilton.agda) is a self-contained example with
+12 open goals, ending in commutativity of two-dimensional loops. No external
+Agda library or NNUE model is needed.
+
+In Emacs, open the file, load it with `C-c C-l`, place the cursor outside any
+goal, and press `C-c C-x C-p` to solve the whole file. From this checkout:
+
+```sh
+.venv/bin/agda-prover prove-prefix examples/EckmannHilton.agda
+```
+
+The command returns a freshly checked completion without overwriting the example.
+Wheel installations also include the file under
+`share/agda-prover/examples/` inside the installation prefix; copy it to a
+working directory before editing it.
+
 ## Use it from the command line
 
 ```sh

@@ -4,6 +4,7 @@ recursive-include editor *.el *.js *.json *.md
 recursive-include tests *.py
 recursive-include tests *.agda *.lagda.md
 recursive-include docs *.md
+recursive-include examples *.agda
 recursive-include schemas *.md *.json
 include THIRD_PARTY_NOTICES.md
 include LICENSE AUTHORS.md
