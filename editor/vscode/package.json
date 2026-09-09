@@ -38,7 +38,7 @@
   "main": "./extension.js",
   "scripts": {
     "check": "node --check core.js && node --check extension.js && node --check test/core.test.js",
-    "test": "node --test test"
+    "test": "node --test test/core.test.js"
   },
   "contributes": {
     "commands": [
