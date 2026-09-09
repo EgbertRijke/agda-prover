@@ -174,6 +174,9 @@ class CaseBatchStats(ScopedRetrievalStats):
     recursive_proof_checks: int = 0
     local_refinement_candidates: int = 0
     local_refinement_queries: int = 0
+    evidence_inference_queries: int = 0
+    evidence_terms: int = 0
+    evidence_path_queries: int = 0
     skeleton_queries: int = 0
     skeleton_candidates: int = 0
     skeleton_frontier_peak: int = 0
@@ -752,6 +755,9 @@ def batched_case_prove(
         stats.premise_queries += nested.premise_queries
         stats.premise_refinement_queries += nested.premise_refinement_queries
         stats.premise_candidates += nested.premise_candidates
+        stats.evidence_inference_queries += nested.evidence_inference_queries
+        stats.evidence_terms += nested.evidence_terms
+        stats.evidence_path_queries += nested.evidence_path_queries
         remaining_premise_slots = max(
             0, _MAX_RECORDED_PREMISE_ATTEMPTS - len(stats.premise_attempts)
         )
@@ -5335,9 +5341,12 @@ def batched_case_prove(
                             len(_HOLE.findall(clause))
                             for clause in checked_case.clauses
                         )
-                        proposed_edit = reconstruct_case_split(
-                            current_source, goal, checked_case.clauses
-                        )
+                        try:
+                            proposed_edit = reconstruct_case_split(
+                                current_source, goal, checked_case.clauses
+                            )
+                        except ValueError:
+                            continue
                         accepted_cases.append((proposed_edit, case_action, subgoals))
                         if subgoals == 0:
                             stats.zero_constructor_closures += 1

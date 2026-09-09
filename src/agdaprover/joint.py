@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -44,7 +46,7 @@ from .presentation import (
     reconstruct_case_split,
     reconstruct_checked_clause_completion,
     reconstruct_hole_completion,
-    reconstruct_intro_as_clause,
+    reconstruct_intro,
     reconstruct_joint_completion,
     reconstruct_term_as_clause,
 )
@@ -62,6 +64,7 @@ from .project.sources import mask_literate_markdown
 from .ranking.protocol import ProofTermRanker
 from .ranking.runtime import configured_model_ids, load_proof_models
 from .reasoning.classifications import has_relational_elimination_shape
+from .reasoning.evidence import has_structured_builder, telescope_introduction
 from .relation_path import RelationView, explicit_arity, parse_relation
 from .resource_budget import ResourceLimitError, ResourceScope, charge_io
 from .retrieval_stats import ScopedRetrievalStats
@@ -157,6 +160,9 @@ class JointStats(ScopedRetrievalStats):
     relation_saturation_actions: list[dict[str, object]] = field(default_factory=list)
     local_refinement_candidates: int = 0
     local_refinement_queries: int = 0
+    evidence_inference_queries: int = 0
+    evidence_terms: int = 0
+    evidence_path_queries: int = 0
     skeleton_queries: int = 0
     skeleton_candidates: int = 0
     skeleton_frontier_peak: int = 0
@@ -172,6 +178,9 @@ class JointStats(ScopedRetrievalStats):
     observed_equation_candidates: int = 0
     progressive_widening_fallbacks: int = 0
     constraint_widening_fallbacks: int = 0
+    budget_widening_fallbacks: int = 0
+    budget_widening_enabled: bool = True
+    contextual_evidence_enabled: bool = True
     max_dependency_depth: int = 0
     proof_relevant_nodes_observed: int = 0
     parallel_inhabitants_observed: int = 0
@@ -202,13 +211,39 @@ class _State:
         default_factory=frozenset,
         compare=False,
     )
+    budget_widened: bool = field(default=False, compare=False)
+
+
+@dataclass(frozen=True)
+class _DeferredBudgetWidening:
+    state: _State
+    source: str
+    region_end: int
+    remaining_goals: int
+    action_start: int
+    action_limit: int
+
+    def exhausted(self, actions_considered: int) -> bool:
+        return actions_considered - self.action_start >= self.action_limit
+
+
+def _can_amortize_budget_widening(remaining_actions: int, remaining_goals: int) -> bool:
+    """Do not add restart work to a run already short of one slice per goal."""
+    return remaining_actions > 160 * max(1, remaining_goals)
 
 
 def _search_state_digest(
     replacement: str,
     widened_declarations: frozenset[str],
+    budget_widened: bool = False,
 ) -> str:
-    payload = "\0".join((replacement, *sorted(widened_declarations)))
+    # Keep the budget tier distinct from source/declaration text, including
+    # declarations whose valid names happen to resemble an internal marker.
+    payload = json.dumps(
+        (replacement, sorted(widened_declarations), budget_widened),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -270,6 +305,9 @@ def _accumulate_case_stats(target: JointStats, source: CaseBatchStats) -> int:
     target.premise_queries += source.premise_queries
     target.premise_refinement_queries += source.premise_refinement_queries
     target.premise_candidates += source.premise_candidates
+    target.evidence_inference_queries += source.evidence_inference_queries
+    target.evidence_terms += source.evidence_terms
+    target.evidence_path_queries += source.evidence_path_queries
     remaining_premise_slots = max(
         0, _MAX_RECORDED_PREMISE_ATTEMPTS - len(target.premise_attempts)
     )
@@ -387,6 +425,8 @@ def _accumulate_case_stats(target: JointStats, source: CaseBatchStats) -> int:
         + source.recursive_composition_inference_queries
         + source.recursive_lift_inference_queries
         + source.recursive_function_lift_queries
+        + source.evidence_inference_queries
+        + source.evidence_path_queries
     )
 
 
@@ -1009,7 +1049,15 @@ def prove_joint_prefix(
         ranker=task.ranker,
         policy_profile="p0-joint-prefix-search-v1",
     )
-    stats = JointStats(depth_limit=task.max_depth)
+    stats = JointStats(
+        depth_limit=task.max_depth,
+        budget_widening_enabled=os.environ.get("AGDAPROVER_JOINT_BUDGET_WIDENING", "1")
+        != "0",
+        contextual_evidence_enabled=os.environ.get(
+            "AGDAPROVER_CONTEXTUAL_EVIDENCE", "1"
+        )
+        != "0",
+    )
     policy_router: ORPolicyRouter | None = None
     focused_policy = None
     call_scope = VerifierCallScope()
@@ -1184,10 +1232,13 @@ def prove_joint_prefix(
                     *,
                     priority_bias: int = 0,
                     widened_declarations: frozenset[str] = frozenset(),
+                    budget_widened: bool = False,
                 ) -> None:
                     nonlocal saw_exhaustion, sequence
                     replacement = state_source[region_start:state_region_end]
-                    digest = _search_state_digest(replacement, widened_declarations)
+                    digest = _search_state_digest(
+                        replacement, widened_declarations, budget_widened
+                    )
                     if digest in seen or digest in queued:
                         stats.transposition_hits += 1
                         return
@@ -1205,6 +1256,7 @@ def prove_joint_prefix(
                         depth,
                         steps,
                         widened_declarations,
+                        budget_widened,
                     )
                     queue.push(next_state.priority, next_state.sequence, next_state)
                     stats.states_enqueued += 1
@@ -1293,7 +1345,28 @@ def prove_joint_prefix(
                     stats.focused_batches += 1
                     stats.focused_batch_goals += len(batch_edits)
 
-                while queue:
+                pending_widening: _DeferredBudgetWidening | None = None
+                while queue or pending_widening is not None:
+                    if pending_widening is not None:
+                        previous = pending_widening
+                        pending_widening = None
+                        if previous.exhausted(stats.actions_considered):
+                            # Only a censored expansion needs a wider replay.
+                            # Replaying successful short expansions duplicates
+                            # work and can outrank their newly exposed children.
+                            enqueue(
+                                previous.source,
+                                previous.region_end,
+                                previous.state.depth,
+                                previous.remaining_goals,
+                                previous.state.steps,
+                                priority_bias=8,
+                                widened_declarations=previous.state.widened_declarations,
+                                budget_widened=True,
+                            )
+                            stats.budget_widening_fallbacks += 1
+                    if not queue:
+                        break
                     # Already-enqueued states may be terminal solutions, so an
                     # exhausted action allowance stops further expansion but
                     # does not prevent their final kernel load.
@@ -1302,7 +1375,9 @@ def prove_joint_prefix(
                         break
                     state = queue.pop()
                     digest = _search_state_digest(
-                        state.replacement, state.widened_declarations
+                        state.replacement,
+                        state.widened_declarations,
+                        state.budget_widened,
                     )
                     queued.discard(digest)
                     if digest in seen:
@@ -1477,11 +1552,34 @@ def prove_joint_prefix(
                         )
                         stats.constraint_widening_fallbacks += 1
                     goal_action_start = stats.actions_considered
+                    competing_alternatives = (
+                        stats.budget_widening_enabled
+                        and bool(queue)
+                        and not state.budget_widened
+                        and _can_amortize_budget_widening(
+                            budget.remaining_actions(), len(remaining_goals)
+                        )
+                    )
                     goal_action_limit = (
                         160
-                        if dependency_ready_selected and not fully_widened
+                        if (dependency_ready_selected and not fully_widened)
+                        or competing_alternatives
                         else task.max_candidates
                     )
+                    if (
+                        competing_alternatives
+                        and budget.remaining_actions() > goal_action_limit
+                    ):
+                        # Finalize at the next loop boundary, including paths
+                        # that finish early with a constructor or case proof.
+                        pending_widening = _DeferredBudgetWidening(
+                            state,
+                            state_source,
+                            state_region_end,
+                            len(remaining_goals),
+                            goal_action_start,
+                            goal_action_limit,
+                        )
 
                     def remaining_goal_actions(
                         current_goal_action_limit: int = goal_action_limit,
@@ -1858,6 +1956,26 @@ def prove_joint_prefix(
                         and has_relational_elimination_shape(goal.target)
                     )
                     progressive_alternatives_omitted = False
+                    ready_structured_builder = False
+                    if (
+                        not terms
+                        and stats.contextual_evidence_enabled
+                        and isinstance(session, ScopeDeclarationSession)
+                        and isinstance(session, TransactionalKernelSession)
+                    ):
+                        declarations, queries = visible_scope_declarations(
+                            session, session.current_state(), goal
+                        )
+                        stats.premise_catalog_queries += queries
+                        result.verifier_calls += queries
+                        owner = _owning_declaration_name(state_source, goal)
+                        ready_structured_builder = has_structured_builder(
+                            goal.target,
+                            tuple(e.type for e in goal.context if e.in_scope),
+                            tuple(
+                                (name, ty) for name, ty in declarations if name != owner
+                            ),
+                        )
                     if (
                         (
                             not terms
@@ -1865,6 +1983,21 @@ def prove_joint_prefix(
                             or relational_elimination_needs_alternative
                         )
                         and remaining_goal_actions() > 0
+                        and not ready_structured_builder
+                        # Introduce a displayed hidden telescope before case
+                        # synthesis, which otherwise auto-inserts inaccessible
+                        # endpoints. The ordinary case fallback remains below.
+                        and (
+                            not stats.contextual_evidence_enabled
+                            or telescope_introduction(
+                                goal.target,
+                                frozenset(
+                                    entry.name for entry in goal.context if entry.name
+                                ),
+                                trailing_only=True,
+                            )
+                            is None
+                        )
                         and (
                             function_needs_alternative
                             or relational_elimination_needs_alternative
@@ -2115,6 +2248,13 @@ def prove_joint_prefix(
                             constructor_stats.premise_refinement_queries
                         )
                         stats.premise_candidates += constructor_stats.premise_candidates
+                        stats.evidence_inference_queries += (
+                            constructor_stats.evidence_inference_queries
+                        )
+                        stats.evidence_terms += constructor_stats.evidence_terms
+                        stats.evidence_path_queries += (
+                            constructor_stats.evidence_path_queries
+                        )
                         remaining_premise_slots = max(
                             0,
                             _MAX_RECORDED_PREMISE_ATTEMPTS
@@ -2192,6 +2332,8 @@ def prove_joint_prefix(
                             + constructor_stats.recursive_inference_queries
                             + constructor_stats.recursive_catalog_queries
                             + constructor_stats.recursive_composition_inference_queries
+                            + constructor_stats.evidence_inference_queries
+                            + constructor_stats.evidence_path_queries
                         )
                         if constructor.status == "resource-exhausted":
                             saw_exhaustion = True
@@ -2300,7 +2442,7 @@ def prove_joint_prefix(
                             except ValueError:
                                 arrow_goal = False
                             if arrow_goal:
-                                edit = reconstruct_intro_as_clause(
+                                edit = reconstruct_intro(
                                     state_source, goal, checked_refinement.preview
                                 )
                                 next_source = apply_source_edit(state_source, edit)
@@ -2401,9 +2543,12 @@ def prove_joint_prefix(
                                     outcome="invalid",
                                 )
                                 continue
-                            edit = reconstruct_case_split(
-                                state_source, goal, checked_case.clauses
-                            )
+                            try:
+                                edit = reconstruct_case_split(
+                                    state_source, goal, checked_case.clauses
+                                )
+                            except ValueError:
+                                continue
                             if not _edit_within_region(
                                 edit,
                                 region_start=region_start,
@@ -2491,6 +2636,8 @@ def prove_joint_prefix(
                 + stats.proof_checks
                 + stats.premise_catalog_queries
                 + stats.constructor_catalog_queries
+                + stats.evidence_inference_queries
+                + stats.evidence_path_queries
             ),
             candidate_terms_checked=stats.proof_checks,
             refinement_checks=stats.refinement_queries,

@@ -486,7 +486,9 @@ class AgdaSession:
                 self._budget,
                 interaction_id=InteractionId(goal_id),
             )
-        except BridgeError:
+        except BridgeError as error:
+            if error.failure != BridgeFailure.AGDA_REJECTION:
+                raise _p0_error(error) from error
             return None
         if not inferred.accepted or inferred.inferred_type is None:
             return None
@@ -517,7 +519,9 @@ class AgdaSession:
                 self._budget,
                 interaction_id=InteractionId(goal_id),
             )
-        except BridgeError:
+        except BridgeError as error:
+            if error.failure != BridgeFailure.AGDA_REJECTION:
+                raise _p0_error(error) from error
             return None
         if not inferred.accepted or inferred.inferred_type is None:
             return None

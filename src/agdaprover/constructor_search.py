@@ -31,7 +31,7 @@ from .kernel.protocol import (
     TermInferenceSession,
     TransactionalKernelSession,
 )
-from .notation import render_application, strip_outer_parentheses
+from .notation import binary_mixfix_head, render_application, strip_outer_parentheses
 from .or_policy import ORPolicyRouter, policy_candidate
 from .premise_search import (
     ScopePremiseAction,
@@ -59,6 +59,18 @@ from .reasoning.classifications import (
     has_relational_context_evidence,
     is_reflexive_relation_target,
 )
+from .reasoning.evidence import (
+    EvidenceTerm,
+    evidence_applications,
+    evidence_consequences,
+    explicit_domains,
+    family_names,
+    indexed_evidence_inputs,
+    is_family_transport,
+    structured_combinator_applications,
+    telescope_introduction,
+    transport_index_labels,
+)
 from .recursive_calls import (
     RecursiveCallAction,
     RecursiveCallSpec,
@@ -70,6 +82,7 @@ from .relation_path import (
     RelationHead,
     explicit_arity,
     parse_relation,
+    relation_operation_shape,
     solve_relation_path,
 )
 from .retrieval import (
@@ -291,6 +304,11 @@ class ProofPlan:
             matched = _LAMBDA.fullmatch(current.template)
             if matched is None:
                 break
+            if any(character in matched.group(1) for character in "{}⦃⦄()"):
+                # Clause reconstruction accepts ordinary identifier binders.
+                # Keep hidden, labelled or patterned lambdas intact instead
+                # of splitting their syntax into invalid clause identifiers.
+                break
             binders.extend(matched.group(1).split())
             current = current.children[0]
         return tuple(binders), current.render()
@@ -386,6 +404,10 @@ class ConstructorStats(ScopedRetrievalStats):
     premise_query_limit: int = _SCOPE_PREMISE_QUERY_LIMIT
     premise_candidates: int = 0
     relation_path: dict[str, object] = field(default_factory=dict)
+    evidence_inference_queries: int = 0
+    evidence_terms: int = 0
+    evidence_path_queries: int = 0
+    contextual_evidence_enabled: bool = True
     premise_attempts: list[dict[str, object]] = field(default_factory=list)
     premise_attempts_omitted: int = 0
     completion_queries: int = 0
@@ -465,7 +487,13 @@ class _ConstructorSearch:
         self.deadline = deadline
         self.max_depth = max_depth
         self.solution_limit = solution_limit
-        self.stats = ConstructorStats(depth_limit=max_depth)
+        self.contextual_evidence_enabled = (
+            os.environ.get("AGDAPROVER_CONTEXTUAL_EVIDENCE", "1") != "0"
+        )
+        self.stats = ConstructorStats(
+            depth_limit=max_depth,
+            contextual_evidence_enabled=self.contextual_evidence_enabled,
+        )
         self.policy_router = policy_router or ORPolicyRouter(
             focused_model=focused_model,
             refinement_model=refinement_model,
@@ -477,6 +505,13 @@ class _ConstructorSearch:
         self.preferred_constructor_arity = preferred_constructor_arity
         self.require_recursive_call = require_recursive_call
         self._scope_catalog: tuple[tuple[str, str], ...] | None = None
+        self._evidence_observations: dict[
+            tuple[StateToken, int], tuple[EvidenceTerm, ...]
+        ] = {}
+        self._evidence_heads: dict[
+            tuple[StateToken, int], tuple[RelationHead, ...]
+        ] = {}
+        self._active_evidence_eliminations: set[tuple[str, str]] = set()
         self._scoped_actions: dict[tuple[StateToken, int], _ScopedActions] = {}
         self._scoped_index_reuse_enabled = (
             os.environ.get("AGDAPROVER_SCOPED_INDEX_REUSE") == "1"
@@ -1696,6 +1731,577 @@ class _ConstructorSearch:
                     premise_query_stop,
                 )
 
+    def _solve_with_contextual_evidence(
+        self, state: StateToken, goal: GoalInfo
+    ) -> tuple[ConstructorSolution, ...]:
+        """Share kernel-inferred fields/applications with relation composition.
+
+        All observations and rejected proposals belong to this exact parent
+        and interaction. No result is published across siblings or sessions.
+        The micro-budget spends the caller's actions; a miss preserves every
+        existing fallback and never asserts that a premise is irrelevant.
+        """
+        if not self.contextual_evidence_enabled or not isinstance(
+            self.session, TermInferenceSession
+        ):
+            return ()
+        session = self.session
+        locals_ = tuple(
+            (entry.name, entry.type)
+            for entry in goal.context
+            if entry.in_scope and entry.name
+        )
+        families = family_names((*locals_, *(self._scope_catalog or ())))
+        target = parse_relation(goal.target, prefix_heads=families)
+        if _INTERNAL_META.search(goal.target) or (
+            target is None and not self._has_opaque_type_head(goal)
+        ):
+            return ()
+        # Existing direct-edge/higher-path search keeps its own scheduling.
+        # This lane is for information hidden behind functions or structures.
+        values = tuple(
+            EvidenceTerm(name, ty)
+            for name, ty in locals_
+            if top_level_arrow_count(ty)
+            or target is None
+            or parse_relation(
+                ty, expected_operator=target.operator, prefix_heads=families
+            )
+            is None
+        )
+        if not values:
+            return ()
+        actions = self._ordered_premise_actions(state, goal)
+        declarations = (*locals_, *((a.expression, a.type_text) for a in actions))
+        projections = tuple(
+            (a.expression, a.type_text)
+            for a in actions
+            if explicit_domains(a.type_text)
+            and (
+                explicit_domains(a.type_text)[0]
+                in premise_structured_result_domains(a.type_text)
+                or (
+                    target is not None
+                    and len(explicit_domains(a.type_text)) == 2
+                    and top_level_arrow_count(explicit_domains(a.type_text)[0])
+                    and parse_relation(
+                        explicit_domains(a.type_text)[1], prefix_heads=families
+                    )
+                    is not None
+                    and parse_relation(
+                        split_top_level_arrows(a.type_text)[-1], prefix_heads=families
+                    )
+                    is not None
+                )
+            )
+        )
+        endpoints = frozenset((target.left, target.right)) if target else frozenset()
+        edge_heads = frozenset((target.operator.split()[0],)) if target else frozenset()
+        proposals = evidence_applications(
+            values, projections, endpoint_terms=endpoints, relation_heads=edge_heads
+        )
+        if next(proposals, None) is None:
+            return ()
+        stop = min(self.action_budget - 1, self.stats.actions_considered + 48)
+        terms = list(values)
+        attempted = {term.expression for term in terms}
+        seeds: list[tuple[str, str]] = [
+            (name, ty)
+            for name, ty in locals_
+            if target is not None
+            and parse_relation(
+                ty, expected_operator=target.operator, prefix_heads=families
+            )
+            is not None
+        ]
+        collection_stop = (
+            stop - min(16, max(0, (stop - self.stats.actions_considered) // 2))
+            if target
+            else stop
+        )
+        solutions: list[ConstructorSolution] = []
+
+        def infer(expression: str) -> str | None:
+            if self.stats.actions_considered >= stop or not self._charge():
+                return None
+            self.stats.actions_generated += 1
+            self.stats.evidence_inference_queries += 1
+            return session.infer_type(
+                state, goal_id=goal.goal_id, expression=expression
+            )
+
+        def finish(solution: str) -> tuple[ConstructorSolution, ...]:
+            if not self._charge():
+                return ()
+            checked = self.session.commit_proof_action(
+                state, kind="give", goal_id=goal.goal_id, expression=solution
+            )
+            self.stats.proof_checks += 1
+            if checked.accepted and checked.child_state is not None:
+                return (ConstructorSolution(checked.child_state, ProofPlan(solution)),)
+            return ()
+
+        while self._available() and self.stats.actions_considered < collection_stop:
+            proposal = min(
+                (
+                    p
+                    for p in evidence_applications(
+                        tuple(terms),
+                        projections,
+                        endpoint_terms=endpoints,
+                        relation_heads=edge_heads,
+                    )
+                    if p.expression not in attempted
+                ),
+                key=lambda p: (p.depth, len(p.expression), p.expression),
+                default=None,
+            )
+            if proposal is None:
+                break
+            attempted.add(proposal.expression)
+            ty = infer(proposal.expression)
+            if ty is None or _INTERNAL_META.search(ty):
+                continue
+            self.stats.evidence_terms += 1
+            edge = (
+                parse_relation(
+                    ty, expected_operator=target.operator, prefix_heads=families
+                )
+                if target
+                else None
+            )
+            solution = (
+                proposal.expression
+                if normalize_type_text(ty) == normalize_type_text(goal.target)
+                else None
+            )
+            if edge is not None:
+                seeds.append((proposal.expression, ty))
+                if target is not None and edge.key == target.key:
+                    solution = proposal.expression
+            else:
+                terms.append(EvidenceTerm(proposal.expression, ty, proposal.depth))
+            if solution is not None:
+                if solved := finish(solution):
+                    solutions.extend(solved)
+                    if len(solutions) >= self.solution_limit:
+                        return tuple(solutions)
+        self._evidence_observations[(state, goal.goal_id)] = tuple(terms)
+        if target is None or not seeds:
+            return tuple(solutions)
+        observed: list[RelationHead] = []
+        for name, head_type in (
+            *((t.expression, t.type_text) for t in terms),
+            *declarations,
+        ):
+            domains = explicit_domains(head_type)
+            head_result = parse_relation(
+                split_top_level_arrows(head_type)[-1], prefix_heads=families
+            )
+            if (
+                head_result is None
+                or len(domains) not in (1, 2)
+                or not all(
+                    parse_relation(
+                        d, expected_operator=head_result.operator, prefix_heads=families
+                    )
+                    is not None
+                    for d in domains
+                )
+            ):
+                continue
+            # Reuse already normalized observations; ask the kernel only
+            # when an alias changes the displayed relation head.
+            canonical = (
+                head_type if head_result.operator == target.operator else infer(name)
+            )
+            if (
+                canonical is not None
+                and parse_relation(
+                    split_top_level_arrows(canonical)[-1],
+                    expected_operator=target.operator,
+                    prefix_heads=families,
+                )
+                is not None
+            ):
+                observed.append(RelationHead(name, canonical, len(observed)))
+        self._evidence_heads[(state, goal.goal_id)] = tuple(observed)
+        remaining = stop - self.stats.actions_considered
+        while remaining > 0 and observed and len(solutions) < self.solution_limit:
+            path = solve_relation_path(
+                self.session,
+                state,
+                goal,
+                tuple(observed),
+                query_budget=remaining,
+                deadline=self.deadline,
+                seed_terms=tuple(seeds),
+                prefix_heads=families,
+                excluded_expressions=frozenset(s.proof_text for s in solutions),
+            )
+            self.stats.evidence_path_queries += path.stats.inference_queries
+            self.stats.actions_considered += path.stats.inference_queries
+            self.stats.actions_generated += path.stats.applications_generated
+            if path.expression is not None:
+                solutions.extend(finish(path.expression))
+            else:
+                break
+            remaining = stop - self.stats.actions_considered
+        return tuple(solutions)
+
+    def _solve_with_indexed_evidence(
+        self,
+        state: StateToken,
+        goal: GoalInfo,
+        depth: int,
+        ancestors: frozenset[tuple[object, ...]],
+        premise_query_stop: int,
+    ) -> Iterator[ConstructorSolution]:
+        if not self.contextual_evidence_enabled or _INTERNAL_META.search(goal.target):
+            return
+        terms = tuple(
+            EvidenceTerm(e.name, e.type) for e in goal.context if e.in_scope and e.name
+        )
+        inputs = tuple(indexed_evidence_inputs(goal.target, terms))
+        if not inputs:
+            return
+        families = family_names(tuple(self._scope_catalog or ()))
+        heads = tuple(
+            a
+            for a in self._ordered_premise_actions(state, goal)
+            if is_family_transport(a.type_text, families)
+        )
+        for value in inputs:
+            for head in heads:
+                if not self._charge():
+                    return
+                labels = transport_index_labels(head.type_text, families)
+                endpoints = (
+                    (
+                        f"{{{labels[0]} = {value.source}}}",
+                        f"{{{labels[1]} = {value.target}}}",
+                    )
+                    if labels is not None
+                    else ()
+                )
+                specialized_head = " ".join(
+                    (render_application(head.expression, ("_",)), *endpoints)
+                )
+                expression = render_application(
+                    specialized_head, ("?", value.value.expression)
+                )
+                checked = self.session.commit_proof_action(
+                    state, kind="refine", goal_id=goal.goal_id, expression=expression
+                )
+                self.stats.actions_generated += 1
+                self.stats.premise_queries += 1
+                self.stats.premise_refinement_queries += 1
+                yield from self._accepted_introduction(
+                    goal, checked, depth, ancestors, premise_query_stop
+                )
+
+    def _solve_with_structured_builders(
+        self,
+        state: StateToken,
+        goal: GoalInfo,
+        depth: int,
+        ancestors: frozenset[tuple[object, ...]],
+        premise_query_stop: int,
+    ) -> Iterator[ConstructorSolution]:
+        if not self.contextual_evidence_enabled:
+            return
+        terms = tuple(
+            EvidenceTerm(e.name, e.type) for e in goal.context if e.in_scope and e.name
+        )
+        visible_functions = tuple(
+            (t.expression, t.type_text)
+            for t in terms
+            if top_level_arrow_count(t.type_text)
+        )
+        if (
+            next(
+                structured_combinator_applications(
+                    goal.target,
+                    terms,
+                    (*visible_functions, *(self._scope_catalog or ())),
+                ),
+                None,
+            )
+            is None
+        ):
+            return
+        declarations = (
+            *visible_functions,
+            *(
+                (a.expression, a.type_text)
+                for a in self._ordered_premise_actions(state, goal)
+            ),
+        )
+        for expression in structured_combinator_applications(
+            goal.target, terms, declarations
+        ):
+            if not self._charge():
+                return
+            checked = self.session.commit_proof_action(
+                state, kind="refine", goal_id=goal.goal_id, expression=expression
+            )
+            self.stats.actions_generated += 1
+            self.stats.premise_queries += 1
+            self.stats.premise_refinement_queries += 1
+            yield from self._accepted_introduction(
+                goal, checked, depth, ancestors, premise_query_stop
+            )
+
+    def _solve_with_observed_elimination(
+        self,
+        state: StateToken,
+        goal: GoalInfo,
+        depth: int,
+        ancestors: frozenset[tuple[object, ...]],
+        premise_query_stop: int,
+    ) -> Iterator[ConstructorSolution]:
+        """Eliminate a checked projection without discarding its source record.
+
+        Pattern lambdas keep this a term-local operation. Constructor names and
+        telescopes come from Agda; coverage and dependent indices are checked
+        by the same refinement boundary as any other candidate.
+        """
+        if (
+            not self.contextual_evidence_enabled
+            or not self._has_opaque_type_head(goal)
+            or any(
+                e.in_scope
+                and e.name
+                and normalize_type_text(e.type) == normalize_type_text(goal.target)
+                for e in goal.context
+            )
+        ):
+            return
+        catalog = dict(self._scope_catalog or ())
+        terms = self._evidence_observations.get((state, goal.goal_id), ())
+        for term in terms:
+            key = (term.expression, term.type_text)
+            if (
+                not term.depth
+                or top_level_arrow_count(term.type_text)
+                or key in self._active_evidence_eliminations
+            ):
+                continue
+            head = result_head(term.type_text)
+            if head not in catalog:
+                surface = parse_relation(term.type_text)
+                if surface is None:
+                    continue
+                head = binary_mixfix_head(surface.operator)
+            if head not in catalog or not result_head(catalog[head]).startswith("Set"):
+                continue
+            constructors = self.session.constructor_candidates(
+                state, goal_id=goal.goal_id, type_head=head
+            )
+            self.stats.catalog_queries += 1
+            if not constructors:
+                continue
+            occupied = {e.name for e in goal.context if e.name}
+            clauses: list[str] = []
+            index = 0
+            for name, ty in constructors:
+                variables: list[str] = []
+                for _ in explicit_domains(ty):
+                    while (variable := f"field{index}") in occupied:
+                        index += 1
+                    occupied.add(variable)
+                    variables.append(variable)
+                pattern = render_application(name, tuple(variables))
+                clauses.append((f"({pattern})" if variables else pattern) + " → ?")
+            subject_type = render_application(
+                head, tuple("_" for _ in explicit_domains(catalog[head]))
+            )
+            while (handler := f"eliminate{index}") in occupied:
+                index += 1
+            expression = render_application(
+                f"λ ({handler} : {subject_type} → _) → {handler} ({term.expression})",
+                ("λ { " + " ; ".join(clauses) + " }",),
+            )
+            if not self._charge():
+                return
+            checked = self.session.commit_proof_action(
+                state, kind="refine", goal_id=goal.goal_id, expression=expression
+            )
+            self.stats.actions_generated += 1
+            self.stats.constructor_queries += 1
+            self._active_evidence_eliminations.add(key)
+            try:
+                yield from self._accepted_introduction(
+                    goal,
+                    replace(checked, preview=expression),
+                    depth,
+                    ancestors,
+                    premise_query_stop,
+                )
+            finally:
+                self._active_evidence_eliminations.remove(key)
+
+    def _solve_with_evidence_refinements(
+        self,
+        state: StateToken,
+        goal: GoalInfo,
+        depth: int,
+        ancestors: frozenset[tuple[object, ...]],
+        premise_query_stop: int,
+    ) -> Iterator[ConstructorSolution]:
+        """Let the goal instantiate mapped evidence with structured arguments.
+
+        Inference alone cannot choose a polymorphic projection's carrier.
+        Refining the complete composition exposes a kernel-constrained child
+        instead of guessing its record fields or dependent substitutions.
+        """
+        terms = self._evidence_observations.get((state, goal.goal_id), ())
+        if not terms:
+            return
+        actions = self._ordered_premise_actions(state, goal)
+        families = family_names(tuple(self._scope_catalog or ()))
+        target = parse_relation(goal.target, prefix_heads=families)
+        if target is None or _INTERNAL_META.search(goal.target):
+            return
+        # A structured evidence argument may determine all the remaining
+        # endpoints through the expected type, even when they contain hidden
+        # family parameters. Give the complete inferred application: unlike
+        # recursive refinement this cannot invent an unconstrained input tree.
+        closed_queries = 0
+        closed_evidence: list[str] = []
+        for action in sorted(actions, key=lambda a: len(explicit_domains(a.type_text))):
+            if closed_queries >= 24:
+                break
+            domains = explicit_domains(action.type_text)
+            if not domains or len(domains) > 3 or top_level_arrow_count(domains[0]):
+                continue
+            if len(split_top_level_application(domains[0])) < 2 or parse_relation(
+                domains[0], expected_operator=target.operator, prefix_heads=families
+            ):
+                continue
+            if not parse_relation(
+                split_top_level_arrows(action.type_text)[-1],
+                expected_operator=target.operator,
+                prefix_heads=families,
+            ):
+                continue
+            for term in terms:
+                if (
+                    top_level_arrow_count(term.type_text)
+                    or result_head(term.type_text).startswith("Set")
+                    or len(split_top_level_application(term.type_text)) < 2
+                    or result_head(term.type_text) != result_head(domains[0])
+                ):
+                    continue
+                if closed_queries >= 24:
+                    break
+                if not self._charge():
+                    return
+                expression = render_application(
+                    action.expression, (term.expression, *("_" for _ in domains[1:]))
+                )
+                closed_evidence.append(expression)
+                checked = self.session.commit_proof_action(
+                    state, kind="give", goal_id=goal.goal_id, expression=expression
+                )
+                closed_queries += 1
+                self.stats.actions_generated += 1
+                self.stats.proof_checks += 1
+                if checked.accepted and checked.child_state is not None:
+                    yield ConstructorSolution(
+                        checked.child_state, ProofPlan(expression)
+                    )
+        functions = tuple(
+            term
+            for term in terms
+            if len(explicit_domains(term.type_text)) == 1
+            and parse_relation(
+                split_top_level_arrows(term.type_text)[-1],
+                expected_operator=target.operator,
+                prefix_heads=families,
+            )
+            and len(split_top_level_application(explicit_domains(term.type_text)[0]))
+            > 1
+        )
+        projections = tuple(
+            a.expression
+            for a in actions
+            if len(explicit_domains(a.type_text)) == 1
+            and premise_structured_result_domains(a.type_text)
+        )
+        maps = tuple(
+            a.expression
+            for a in actions
+            if len(explicit_domains(a.type_text)) == 2
+            and top_level_arrow_count(explicit_domains(a.type_text)[0])
+            and parse_relation(explicit_domains(a.type_text)[1], prefix_heads=families)
+            and parse_relation(
+                split_top_level_arrows(a.type_text)[-1], prefix_heads=families
+            )
+        )
+        queries = 0
+        for function in functions:
+            for mapping in maps:
+                for projection in projections:
+                    if queries >= 12:
+                        break
+                    if not self._charge():
+                        return
+                    expression = render_application(
+                        mapping,
+                        (projection, render_application(function.expression, ("?",))),
+                    )
+                    checked = self.session.commit_proof_action(
+                        state,
+                        kind="refine",
+                        goal_id=goal.goal_id,
+                        expression=expression,
+                    )
+                    queries += 1
+                    self.stats.actions_generated += 1
+                    self.stats.premise_queries += 1
+                    self.stats.premise_refinement_queries += 1
+                    yield from self._accepted_introduction(
+                        goal, checked, depth, ancestors, premise_query_stop
+                    )
+        # Backward refinement supplies endpoint constraints to multi-input
+        # evidence laws (including dependent congruence). Do not repeatedly
+        # unfold unconstrained transitivity here; the edge search owns it.
+        for head in self._evidence_heads.get((state, goal.goal_id), ()):
+            shape = relation_operation_shape(head.type_text, prefix_heads=families)
+            if head.arity == 1 and shape == "reflect":
+                # Reflection can grow its premise indefinitely (f x, f (f x),
+                # ...). In this evidence lane, compose it with a ready supplied
+                # witness instead of recursively inventing larger endpoints.
+                # Expected-type checking resolves the witness's hidden indices.
+                for evidence in closed_evidence:
+                    if not self._charge():
+                        return
+                    expression = render_application(head.expression, (evidence,))
+                    checked = self.session.commit_proof_action(
+                        state, kind="give", goal_id=goal.goal_id, expression=expression
+                    )
+                    self.stats.actions_generated += 1
+                    self.stats.proof_checks += 1
+                    if checked.accepted and checked.child_state is not None:
+                        yield ConstructorSolution(
+                            checked.child_state, ProofPlan(expression)
+                        )
+                continue
+            if head.arity != 2 or shape == "chain":
+                continue
+            if not self._charge():
+                return
+            checked = self.session.commit_proof_action(
+                state, kind="refine", goal_id=goal.goal_id, expression=head.expression
+            )
+            self.stats.actions_generated += 1
+            self.stats.premise_queries += 1
+            self.stats.premise_refinement_queries += 1
+            yield from self._accepted_introduction(
+                goal, checked, depth, ancestors, premise_query_stop
+            )
+
     def _solve_with_relation_path(
         self,
         state: StateToken,
@@ -2126,6 +2732,41 @@ class _ConstructorSearch:
         # the complete visible telescope, rather than one binder per search
         # state or one whole-file reload per binder.
         if top_level_arrow_count(goal.target):
+            domains = explicit_domains(goal.target)
+            if (
+                self.contextual_evidence_enabled
+                and domains
+                and parse_relation(
+                    domains[0],
+                    prefix_heads=family_names(tuple(self._scope_catalog or ())),
+                )
+            ):
+                domain_head = result_head(domains[0])
+                pattern_catalog = self.session.constructor_candidates(
+                    state, goal_id=goal.goal_id, type_head=domain_head
+                )
+                self.stats.catalog_queries += 1
+                if len(pattern_catalog) == 1 and not explicit_domains(
+                    pattern_catalog[0][1]
+                ):
+                    # The sole constructor may determine free indices of an
+                    # argument. A checked pattern lambda lets Agda expose
+                    # that information inside a record's function field.
+                    # In particular, no assumption of K or proof irrelevance
+                    # is made: coverage/unification may reject the pattern.
+                    if not self._charge():
+                        return
+                    checked_pattern = self.session.commit_proof_action(
+                        state,
+                        kind="refine",
+                        goal_id=goal.goal_id,
+                        expression=f"λ {{ {pattern_catalog[0][0]} → ? }}",
+                    )
+                    self.stats.actions_generated += 1
+                    self.stats.constructor_queries += 1
+                    yield from self._accepted_introduction(
+                        goal, checked_pattern, depth, descendants, premise_query_stop
+                    )
             # A function out of a constructor-free domain has a canonical
             # absurd-pattern clause.  This proposal is deliberately blind to
             # the domain's name and representation: Agda accepts ``λ ()``
@@ -2162,7 +2803,15 @@ class _ConstructorSearch:
                 state,
                 kind="refine",
                 goal_id=goal.goal_id,
-                expression="",
+                expression=(
+                    telescope_introduction(
+                        goal.target,
+                        frozenset(entry.name for entry in goal.context if entry.name),
+                    )
+                    if self.contextual_evidence_enabled
+                    else None
+                )
+                or "",
             )
             self.stats.constructor_queries += 1
             if checked.accepted:
@@ -2230,6 +2879,24 @@ class _ConstructorSearch:
             if shallow_solved and not self.require_recursive_call:
                 return
 
+        indexed_solved = False
+        for solution in self._solve_with_indexed_evidence(
+            state, goal, depth, descendants, premise_query_stop
+        ):
+            indexed_solved = True
+            yield solution
+        if indexed_solved:
+            return
+
+        builder_solved = False
+        for solution in self._solve_with_structured_builders(
+            state, goal, depth, descendants, premise_query_stop
+        ):
+            builder_solved = True
+            yield solution
+        if builder_solved:
+            return
+
         # Concrete one-constructor data/record goals have an invertible
         # introduction just like function goals.  Query it before unrestricted
         # focused composition: higher-order branch functions can otherwise
@@ -2249,8 +2916,13 @@ class _ConstructorSearch:
             and result_head(goal.target) == recursive_codomain_head
         )
         intro_check: CommittedProofAction | None = None
+        projection_source = self.contextual_evidence_enabled and any(
+            result_head(domain) == target_head
+            for _name, type_text in self._scope_catalog or ()
+            for domain in premise_structured_result_domains(type_text)
+        )
         if (
-            self.recursive_call is not None
+            (self.recursive_call is not None or projection_source)
             and not opaque_type_head
             and not prefer_recursive_call
         ):
@@ -2358,6 +3030,51 @@ class _ConstructorSearch:
             recursive_solved = True
             yield solution
         if recursive_solved:
+            return
+
+        evidence_solutions = self._solve_with_contextual_evidence(state, goal)
+        if evidence_solutions:
+            yield from evidence_solutions
+            return
+        consequences = evidence_consequences(
+            goal.target,
+            tuple(
+                EvidenceTerm(e.name, e.type)
+                for e in goal.context
+                if e.in_scope and e.name
+            ),
+            tuple(
+                (name, ty)
+                for name, ty in self._scope_catalog or ()
+                if name not in self.excluded_premises
+            ),
+        )
+        consequence_stop = min(self.action_budget, self.stats.actions_considered + 48)
+        for expression in consequences if self.contextual_evidence_enabled else ():
+            if self.stats.actions_considered >= consequence_stop or not self._charge():
+                break
+            checked = self.session.commit_proof_action(
+                state, kind="give", goal_id=goal.goal_id, expression=expression
+            )
+            self.stats.actions_generated += 1
+            self.stats.proof_checks += 1
+            if checked.accepted and checked.child_state is not None:
+                yield ConstructorSolution(checked.child_state, ProofPlan(expression))
+        elimination_solved = False
+        for solution in self._solve_with_observed_elimination(
+            state, goal, depth, descendants, premise_query_stop
+        ):
+            elimination_solved = True
+            yield solution
+        if elimination_solved:
+            return
+        refinement_solved = False
+        for solution in self._solve_with_evidence_refinements(
+            state, goal, depth, descendants, premise_query_stop
+        ):
+            refinement_solved = True
+            yield solution
+        if refinement_solved:
             return
 
         if self._has_ready_nonrecursive_eliminators:
@@ -3284,8 +4001,42 @@ class _ConstructorSearch:
                         obligations, self._baseline_internal_obligations, strict=True
                     )
                 ):
-                    self.stats.incomplete_solutions_pruned += 1
-                    continue
+                    # Separately refined children can leave a higher-order
+                    # motive blocked even after their assembled expression
+                    # contains enough information. Re-elaborate that complete
+                    # expression against the original parent; never discharge
+                    # residual obligations merely because interaction holes
+                    # disappeared.
+                    if not self._charge():
+                        break
+                    checked = self.session.commit_proof_action(
+                        state,
+                        kind="give",
+                        goal_id=root_goal.goal_id,
+                        expression=rendered,
+                    )
+                    self.stats.actions_generated += 1
+                    self.stats.proof_checks += 1
+                    complete = checked.accepted and checked.child_state is not None
+                    if complete:
+                        assert checked.child_state is not None
+                        obligations = self.session.internal_obligation_counts(
+                            checked.child_state
+                        )
+                        self.stats.completion_queries += 1
+                        complete = all(
+                            current <= baseline
+                            for current, baseline in zip(
+                                obligations,
+                                self._baseline_internal_obligations,
+                                strict=True,
+                            )
+                        )
+                    if not complete:
+                        self.stats.incomplete_solutions_pruned += 1
+                        continue
+                    assert checked.child_state is not None
+                    solution = ConstructorSolution(checked.child_state, solution.plan)
             results.append(solution)
             if len(results) >= self.solution_limit:
                 break

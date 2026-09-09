@@ -7,12 +7,14 @@ from collections.abc import Iterable
 from typing import Any
 
 from .contracts import GoalInfo
+from .project.sources import mask_comments_and_strings, mask_literate_markdown
 from .proof_formatter import (
     FormattedProof,
     format_proof_term,
     validate_formatter_metadata,
 )
 from .terms import Term, render_top_level_clause_shared
+from .type_syntax import split_top_level_application
 
 RECONSTRUCTION_SCHEMA_VERSION = "agdaprover.reconstruction.p0.v1"
 _INTRO_PREVIEW = re.compile(r"^\s*λ\s+(.+?)\s+→\s+\?\s*$")
@@ -43,6 +45,10 @@ def _definition_prefix(source: str, goal: GoalInfo) -> tuple[int, int, str, str]
     lhs = prefix[:equals].rstrip()
     if not lhs or "\n" in lhs:
         raise ValueError("P0 clause reconstruction requires a one-line clause head")
+    if set(split_top_level_application(lhs)).intersection(
+        {"=", "λ", "let", "in", "record"}
+    ):
+        raise ValueError("clause reconstruction cannot hoist an embedded definition")
     return line_start, hole_end, lhs, source[hole_start:hole_end]
 
 
@@ -58,6 +64,17 @@ def _source_edit(
     formatter: FormattedProof | None = None,
     layout: str | None = None,
 ) -> dict[str, Any]:
+    if style != "term":
+        # Check whole-declaration edit boundaries, not every cheap ownership
+        # lookup. An expression's internal record field is not a clause even
+        # if its line happens to have the shape "name = hole".
+        visible = mask_comments_and_strings(source)
+        if "```" in visible:
+            literate = mask_literate_markdown(visible)
+            if literate[start_offset:end_offset].strip():
+                visible = literate
+        if visible[:start_offset].strip():
+            split_top_level_application(visible[:start_offset])
     edit: dict[str, Any] = {
         "schema_version": RECONSTRUCTION_SCHEMA_VERSION,
         "style": style,
@@ -214,6 +231,30 @@ def reconstruct_hole_completion(
     )
 
 
+def reconstruct_intro(source: str, goal: GoalInfo, preview: str) -> dict[str, Any]:
+    """Introduce a kernel-provided lambda without hoisting an embedded hole."""
+    try:
+        return reconstruct_intro_as_clause(source, goal, preview)
+    except ValueError:
+        if not re.match(r"^\s*λ(?=\s|\{)", preview):
+            raise ValueError("introduction preview is not a lambda") from None
+    start, end = _goal_offsets(source, goal)
+    if not _is_hole(source[start:end]):
+        raise ValueError("introduction does not select a proof hole")
+    # A partial preview is an intermediate search state, not a completed
+    # proof for the formatter. Keep its holes and binders exactly as supplied.
+    replacement = f"({preview})"
+    return _source_edit(
+        source,
+        start_offset=start,
+        end_offset=end,
+        replacement=replacement,
+        style="term",
+        binders=(),
+        body=replacement,
+    )
+
+
 def reconstruct_case_split(
     source: str, goal: GoalInfo, clauses: Iterable[str]
 ) -> dict[str, Any]:
@@ -223,13 +264,21 @@ def reconstruct_case_split(
     if not values or any(not clause for clause in values):
         raise ValueError("case split returned no usable clauses")
     hole_start, hole_end = _goal_offsets(source, goal)
+    # The protocol gives clauses for the enclosing definition, not a
+    # replacement for an arbitrary expression on the hole's physical line.
+    # Replacing that line would erase record fields or other sibling terms.
+    _definition_prefix(source, goal)
     line_start = source.rfind("\n", 0, hole_start) + 1
     line_end = source.find("\n", hole_end)
     if line_end < 0:
         line_end = len(source)
     original = source[line_start:line_end]
-    if not any(_is_hole(hole) for hole in re.findall(r"\{![\s\S]*?!\}|\?", original)):
-        raise ValueError("selected clause contains no proof hole")
+    suffix = source[hole_end:line_end]
+    if (
+        not _is_hole(source[hole_start:hole_end])
+        or mask_comments_and_strings(suffix).strip()
+    ):
+        raise ValueError("case reconstruction requires a whole-clause hole")
     indentation_match = re.match(r"[ \t]*", original)
     indentation = indentation_match.group(0) if indentation_match is not None else ""
     # The interaction protocol renders generated clauses as standalone
@@ -248,7 +297,7 @@ def reconstruct_case_split(
             )
             for clause in values
         )
-    replacement = "\n".join(values)
+    replacement = "\n".join(values) + suffix
     return _source_edit(
         source,
         start_offset=line_start,

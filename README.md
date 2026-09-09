@@ -3,6 +3,8 @@
 AgdaProver fills holes in Agda code by searching for definitions and proofs.
 It helps with routine proof steps, case splits, and related goals that need to
 be solved together. Completed proofs are independently checked by Agda.
+Search can combine record fields, function applications and supplied proof laws,
+including dependent fields and inductive values stored in records.
 
 It runs locally, without an online service or LLM. Optional NNUE models guide
 proof search; no model is required to get started.

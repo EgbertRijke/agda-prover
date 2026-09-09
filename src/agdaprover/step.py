@@ -18,7 +18,7 @@ from .contracts import GoalInfo, StepResult, TaskSpec, task_identity
 from .kernel.p0 import AgdaBridgeError, AgdaLoadError, AgdaSession
 from .kernel.protocol import KernelSessionFactory
 from .offline import assert_offline_configuration
-from .presentation import reconstruct_case_split, reconstruct_intro_as_clause
+from .presentation import reconstruct_case_split, reconstruct_intro
 from .project import attach_module_scope, choose_goal, require_agda_source_file
 from .ranking.protocol import StepActionRanker
 from .ranking.runtime import load_step_model
@@ -218,6 +218,16 @@ def propose_step(
                     refinement_checks=int(item.candidate.tag != "case-split"),
                     generated_subgoals=len(checked_goals),
                 )
+                if accepted and item.candidate.tag == "case-split":
+                    try:
+                        reconstruct_case_split(
+                            source_file.read_text(), goal, (preview or "").splitlines()
+                        )
+                    except ValueError as error:
+                        # The kernel's enclosing clauses may not be a safe edit
+                        # for an embedded goal. Reject this action, not the task.
+                        accepted = False
+                        diagnostic = str(error)
                 outcome: Literal["accepted", "applicable", "invalid"] = "invalid"
                 if accepted:
                     outcome = "accepted" if selected_action is None else "applicable"
@@ -246,9 +256,7 @@ def propose_step(
             source_edit = None
             reconstruction_validation = None
             if item.candidate.tag == "introduce-lambda":
-                source_edit = reconstruct_intro_as_clause(
-                    source_file.read_text(), goal, preview
-                )
+                source_edit = reconstruct_intro(source_file.read_text(), goal, preview)
                 reconstruction_validation = validate_partial_reconstruction(
                     source_file,
                     source_edit,

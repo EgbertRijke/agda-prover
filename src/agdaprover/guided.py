@@ -21,7 +21,7 @@ from .presentation import (
     reconstruct_case_split,
     reconstruct_guided_completion,
     reconstruct_hole_completion,
-    reconstruct_intro_as_clause,
+    reconstruct_intro,
 )
 from .ranking.protocol import SparsePolicyRanker
 from .resource_budget import charge_io
@@ -301,9 +301,7 @@ def guided_prove(
                 stats.refinement_queries += 1
                 if checked.accepted and checked.preview is not None:
                     if top_level_arrow_count(goal.target):
-                        edit = reconstruct_intro_as_clause(
-                            state_source, goal, checked.preview
-                        )
+                        edit = reconstruct_intro(state_source, goal, checked.preview)
                         next_source = apply_source_edit(state_source, edit)
                         next_end = (
                             state_region_end
@@ -374,9 +372,12 @@ def guided_prove(
                             "case-variable", action.expression, outcome="invalid"
                         )
                         continue
-                    edit = reconstruct_case_split(
-                        state_source, goal, checked_case.clauses
-                    )
+                    try:
+                        edit = reconstruct_case_split(
+                            state_source, goal, checked_case.clauses
+                        )
+                    except ValueError:
+                        continue
                     next_source = apply_source_edit(state_source, edit)
                     next_end = (
                         state_region_end
