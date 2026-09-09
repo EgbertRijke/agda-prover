@@ -1,0 +1,24 @@
+name: Set up pinned Agda
+description: Install the verified Linux x86-64 Agda executable without compiling Haskell.
+runs:
+  using: composite
+  steps:
+    - name: Download and verify Agda 2.8.0
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ "$RUNNER_OS" != Linux || "$RUNNER_ARCH" != X64 ]]; then
+          echo "This pinned Agda artifact requires Linux x86-64" >&2
+          exit 1
+        fi
+        mkdir -p "$RUNNER_TEMP/agdaprover-toolchain"
+        curl --fail --location --silent --show-error \
+          --output "$RUNNER_TEMP/Agda-v2.8.0-linux.tar.xz" \
+          https://github.com/agda/agda/releases/download/v2.8.0/Agda-v2.8.0-linux.tar.xz
+        echo "824081b8dcbe431289a50ac6bd83e451f390c51c3884ac7a8c4a5c0df2632faf  $RUNNER_TEMP/Agda-v2.8.0-linux.tar.xz" \
+          | sha256sum --check --strict
+        tar -xJf "$RUNNER_TEMP/Agda-v2.8.0-linux.tar.xz" \
+          -C "$RUNNER_TEMP/agdaprover-toolchain"
+        chmod 0755 "$RUNNER_TEMP/agdaprover-toolchain/agda"
+        test "$("$RUNNER_TEMP/agdaprover-toolchain/agda" --numeric-version)" = "2.8.0"
+        echo "$RUNNER_TEMP/agdaprover-toolchain" >> "$GITHUB_PATH"
