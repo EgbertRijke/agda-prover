@@ -8,6 +8,7 @@ module ScopeQuery (emit, request) where
 
 import Control.Monad (foldM, unless, when)
 import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Except (runExceptT)
 import Data.Aeson (Value, eitherDecodeStrict', encode, object, (.=))
 import Data.ByteString.Lazy.Char8 qualified as BL
 import Data.Foldable (toList)
@@ -21,21 +22,22 @@ import Data.Text.Encoding qualified as Text
 import Agda.Syntax.Abstract.Name
 import Agda.Syntax.Common
 import Agda.Syntax.Common.Pretty (prettyShow)
-import Agda.Syntax.Internal
+import Agda.Syntax.Concrete.Name qualified as C
+import Agda.Syntax.Internal hiding (arity)
 import Agda.Syntax.Internal.Generic (foldTerm)
 import Agda.Syntax.Internal.MetaVars (noMetas)
 import Agda.Syntax.Literal (Literal (LitQName))
 import Agda.Syntax.Scope.Base
-import Agda.Syntax.Scope.Monad (resolveName)
+import Agda.Syntax.Scope.Monad (tryResolveName)
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Pretty (prettyTCM)
 import Agda.TypeChecking.Reduce (instantiateFull, normalise)
 
 request :: String -> Maybe (Bool, String)
-request payload = case stripPrefix "agdaprover:scoped-retrieval:v3:" payload of
+request payload = case stripPrefix "agdaprover:scoped-retrieval:v5:" payload of
   Just exclusions -> Just (True, exclusions)
   Nothing -> (\exclusions -> (False, exclusions)) <$>
-    stripPrefix "agdaprover:scoped-retrieval:v2:" payload
+    stripPrefix "agdaprover:scoped-retrieval:v4:" payload
 
 key :: QName -> String
 key q = case nameId (qnameName q) of
@@ -104,9 +106,18 @@ emit withDependencies point payload = do
   when (length excluded > 5000 || any null excluded) $ genericError "scope-exclusion-limit"
   withInteractionId point $ dontAssignMetas $ do
     scope <- getScope
-    let aliases = Set.toAscList (concreteNamesInScope scope)
-    when (length (take 5001 aliases) > 5000) $ genericError "scope-alias-limit"
-    resolved <- mapM (\a -> (,) (prettyShow a) <$> resolveName a) aliases
+    let concrete = Set.toAscList (concreteNamesInScope scope)
+        nameable = all (not . C.isNoName) . C.qnameParts
+        aliases = filter nameable concrete
+        unnameable = Set.toAscList $ Set.fromList
+          [prettyShow a | a <- concrete, not (nameable a)]
+    when (length (take 5001 concrete) > 5000) $ genericError "scope-alias-limit"
+    -- Unused ambiguous spellings do not invalidate an otherwise legal module.
+    -- Resolve each qualified view independently and retain supported overloads.
+    attempted <- mapM (\a -> (,) (prettyShow a) <$>
+      runExceptT (tryResolveName allKindsOfNames Nothing a)) aliases
+    let resolved = [(a, r) | (a, Right r) <- attempted]
+        ambiguous = Set.toAscList $ Set.fromList [a | (a, Left _) <- attempted]
     let globals = [(a, anameName n) | (a, r) <- resolved, n <- names r]
         excludedSet = Set.fromList excluded
         veto a = Set.member a excludedSet || Set.member (reverse (takeWhile (/= '.') (reverse a))) excludedSet
@@ -147,12 +158,13 @@ emit withDependencies point payload = do
       ([], goalNodes, 0, 0) (Map.toAscList allowed)
     let bytes = encode $ object $
           ["kind" .= ("AgdaProverScope" :: String),
-           "schema_version" .= (if withDependencies then "agdaprover.live-scope.v3"
-                                 else "agdaprover.live-scope.v2" :: String),
+           "schema_version" .= (if withDependencies then "agdaprover.live-scope.v5"
+                                 else "agdaprover.live-scope.v4" :: String),
            "feature_policy" .= ("agda-term-body-head-symbol-arity-v1" :: String),
            "type_view_policy" .= ("agda-normalise-contextual-type-v1" :: String),
            "interaction_id" .= interactionId point,
            "excluded_names" .= excluded,
+           "omitted_aliases" .= object ["ambiguous" .= ambiguous, "unnameable" .= unnameable],
            "target" .= query, "declarations" .= reverse rows,
            "structure_nodes" .= nodes] ++
           (if withDependencies then

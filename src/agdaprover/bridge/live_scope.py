@@ -16,13 +16,13 @@ from ..retrieval import (
 )
 from .contracts import StateToken, stable_hash
 
-SCHEMA = "agdaprover.live-scope.v2"
+SCHEMA = "agdaprover.live-scope.v4"
 FEATURE_POLICY = "agda-term-body-head-symbol-arity-v1"
 TYPE_VIEW_POLICY = "agda-normalise-contextual-type-v1"
-MARKER = "agdaprover:scoped-retrieval:v2:"
-DEPENDENCY_SCHEMA = "agdaprover.live-scope.v3"
+MARKER = "agdaprover:scoped-retrieval:v4:"
+DEPENDENCY_SCHEMA = "agdaprover.live-scope.v5"
 DEPENDENCY_POLICY = "permitted-clause-rhs-references-v1"
-DEPENDENCY_MARKER = "agdaprover:scoped-retrieval:v3:"
+DEPENDENCY_MARKER = "agdaprover:scoped-retrieval:v5:"
 
 
 def exclusions_payload(
@@ -55,6 +55,29 @@ def _features(value: object) -> TypeFeatures:
     return TypeFeatures(value["result_head"], tuple(value["symbols"]), value["arity"])
 
 
+def _omissions(value: object) -> set[str]:
+    if not isinstance(value, dict) or set(value) != {"ambiguous", "unnameable"}:
+        raise ValueError("invalid closed live-scope omissions")
+    omitted: set[str] = set()
+    for aliases in value.values():
+        if not isinstance(aliases, list):
+            raise ValueError("invalid live-scope omission array")
+        previous = None
+        for alias in aliases:
+            checkpoint()
+            if (
+                not isinstance(alias, str)
+                or not alias
+                or "\0" in alias
+                or (previous is not None and previous >= alias)
+                or alias in omitted
+            ):
+                raise ValueError("invalid or overlapping live-scope omission")
+            omitted.add(alias)
+            previous = alias
+    return omitted
+
+
 def decode_scope(
     value: object,
     *,
@@ -75,6 +98,7 @@ def decode_scope(
         "type_view_policy",
         "interaction_id",
         "excluded_names",
+        "omitted_aliases",
         "target",
         "declarations",
         "structure_nodes",
@@ -104,6 +128,7 @@ def decode_scope(
     declarations = value["declarations"]
     if not isinstance(declarations, list):
         raise ValueError("invalid live-scope declaration array")
+    omitted = _omissions(value["omitted_aliases"])
     premises, views, references = [], [], []
     for row in declarations:
         checkpoint()
@@ -120,6 +145,10 @@ def decode_scope(
         aliases, ty = row["aliases"], row["type"]
         if not isinstance(aliases, list) or not isinstance(ty, str) or not ty:
             raise ValueError("invalid live-scope aliases/type")
+        for alias in aliases:
+            checkpoint()
+            if not isinstance(alias, str) or alias in omitted:
+                raise ValueError("omitted or malformed live-scope premise alias")
         if include_dependencies:
             refs = row["rhs_dependencies"]
             if refs is not None and not isinstance(refs, list):

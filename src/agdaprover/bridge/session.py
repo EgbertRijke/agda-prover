@@ -393,7 +393,7 @@ class ConformingKernelSession:
             capabilities = replace(
                 result.capabilities,
                 adapter=result.capabilities.adapter
-                + ("+live-scope-v3:" if scoped_dependencies else "+live-scope-v2:")
+                + ("+live-scope-v5:" if scoped_dependencies else "+live-scope-v4:")
                 + self._scope_adapter_hash,
                 operations=tuple(
                     sorted(
