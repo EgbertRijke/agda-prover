@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agdaprover.local/schemas/bridge/v1/bridge.schema.json",
+  "title": "AgdaProver Stage 1 bridge request or result",
+  "type": "object",
+  "required": ["schema_version", "operation"],
+  "properties": {
+    "schema_version": { "const": "agdaprover.bridge.v1" },
+    "operation": {
+      "enum": ["open-project", "load-module", "inspect-goals", "infer", "normalize", "try-action", "case-split", "check-definition", "validate-patch", "close"]
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/openRequest" },
+    { "$ref": "#/$defs/openResult" },
+    { "$ref": "#/$defs/loadRequest" },
+    { "$ref": "#/$defs/loadResult" },
+    { "$ref": "#/$defs/inspectRequest" },
+    { "$ref": "#/$defs/inspectResult" },
+    { "$ref": "#/$defs/inferRequest" },
+    { "$ref": "#/$defs/inferResult" },
+    { "$ref": "#/$defs/normalizeRequest" },
+    { "$ref": "#/$defs/normalizeResult" },
+    { "$ref": "#/$defs/actionRequest" },
+    { "$ref": "#/$defs/actionResult" },
+    { "$ref": "#/$defs/caseRequest" },
+    { "$ref": "#/$defs/caseResult" },
+    { "$ref": "#/$defs/definitionRequest" },
+    { "$ref": "#/$defs/definitionResult" },
+    { "$ref": "#/$defs/validationRequest" },
+    { "$ref": "#/$defs/validationResult" },
+    { "$ref": "#/$defs/closeRequest" },
+    { "$ref": "#/$defs/closeResult" }
+  ],
+  "unevaluatedProperties": false,
+  "$defs": {
+    "openRequest": {
+      "properties": {
+        "operation": { "const": "open-project" },
+        "source_file": { "type": "string", "maxLength": 4096 },
+        "project_root": { "type": ["string", "null"], "maxLength": 4096 },
+        "executable": { "type": "string", "maxLength": 4096 },
+        "options": { "type": "array", "items": { "type": "string" } },
+        "library_file": { "type": ["string", "null"], "maxLength": 4096 }
+      },
+      "required": ["source_file", "project_root", "executable", "options", "library_file"]
+    },
+    "openResult": {
+      "properties": {
+        "operation": { "const": "open-project" },
+        "project": { "type": "object" },
+        "environment_id": { "$ref": "#/$defs/digest" },
+        "source_revision": { "$ref": "#/$defs/digest" },
+        "root_module": { "type": "object" },
+        "capabilities": { "type": "object" },
+        "source_count": { "type": "integer", "minimum": 1 },
+        "module_graph": { "type": "array" },
+        "diagnostics": { "type": "array" },
+        "cost": { "type": "object" }
+      },
+      "required": ["project", "environment_id", "source_revision", "root_module", "capabilities", "source_count", "module_graph", "diagnostics", "cost"]
+    },
+    "loadRequest": {
+      "properties": {
+        "operation": { "const": "load-module" }, "project": { "type": "object" }, "module": { "type": "object" }, "expected_revision": { "$ref": "#/$defs/digest" }
+      },
+      "required": ["project", "module", "expected_revision"]
+    },
+    "loadResult": {
+      "properties": {
+        "operation": { "const": "load-module" }, "transition": { "type": "object" }, "module": { "type": "object" }, "signature": { "type": "array" }, "state": { "$ref": "proof-state.schema.json" }
+      },
+      "required": ["transition", "module", "signature", "state"]
+    },
+    "inspectRequest": {
+      "properties": { "operation": { "const": "inspect-goals" }, "state": { "type": "object" } },
+      "required": ["state"], "not": { "required": ["transition"] }
+    },
+    "inspectResult": {
+      "properties": { "operation": { "const": "inspect-goals" }, "transition": { "type": "object" }, "state": { "$ref": "proof-state.schema.json" } },
+      "required": ["transition", "state"]
+    },
+    "inferRequest": {
+      "properties": { "operation": { "const": "infer" }, "state": { "type": "object" }, "term": { "type": "object" }, "interaction_id": { "type": ["integer", "null"], "minimum": 0 } },
+      "required": ["state", "term", "interaction_id"]
+    },
+    "inferResult": {
+      "properties": { "operation": { "const": "infer" }, "transition": { "type": "object" }, "accepted": { "type": "boolean" }, "inferred_type": { "type": ["object", "null"] }, "constraints": { "type": "array" } },
+      "required": ["transition", "accepted", "inferred_type", "constraints"]
+    },
+    "normalizeRequest": {
+      "properties": { "operation": { "const": "normalize" }, "state": { "type": "object" }, "term": { "type": "object" }, "policy": { "enum": ["as-is", "simplified", "normal", "head-normal", "ignore-abstract"] }, "interaction_id": { "type": ["integer", "null"], "minimum": 0 } },
+      "required": ["state", "term", "policy", "interaction_id"]
+    },
+    "normalizeResult": {
+      "properties": { "operation": { "const": "normalize" }, "transition": { "type": "object" }, "normal_form": { "type": ["object", "null"] }, "complete": { "type": "boolean" }, "blockers": { "type": "array" } },
+      "required": ["transition", "normal_form", "complete", "blockers"]
+    },
+    "actionRequest": {
+      "properties": { "operation": { "const": "try-action" }, "state": { "type": "object" }, "action": { "type": "object" } },
+      "required": ["state", "action"]
+    },
+    "actionResult": {
+      "properties": { "operation": { "const": "try-action" }, "transition": { "type": "object" }, "accepted": { "type": "boolean" }, "preview": { "type": ["string", "null"] }, "generated_goals": { "type": "array" }, "edge": { "type": ["object", "null"] }, "rejection_code": { "type": ["string", "null"] } },
+      "required": ["transition", "accepted", "preview", "generated_goals", "edge", "rejection_code"]
+    },
+    "caseRequest": {
+      "properties": { "operation": { "const": "case-split" }, "state": { "type": "object" }, "subject": { "type": "string" }, "interaction_id": { "type": "integer", "minimum": 0 }, "commit": { "type": "boolean" } },
+      "required": ["state", "subject", "interaction_id", "commit"]
+    },
+    "caseResult": {
+      "properties": { "operation": { "const": "case-split" }, "transition": { "type": "object" }, "accepted": { "type": "boolean" }, "clauses": { "type": "array" }, "variant": { "type": ["string", "null"] }, "generated_goals": { "type": "array" }, "rejection_code": { "type": ["string", "null"] } },
+      "required": ["transition", "accepted", "clauses", "variant", "generated_goals", "rejection_code"]
+    },
+    "definitionRequest": {
+      "properties": { "operation": { "const": "check-definition" }, "state": { "type": "object" }, "definition": { "type": "object" } },
+      "required": ["state", "definition"]
+    },
+    "definitionResult": {
+      "properties": { "operation": { "const": "check-definition" }, "transition": { "type": "object" }, "accepted": { "type": "boolean" }, "checks": { "type": "array" } },
+      "required": ["transition", "accepted", "checks"]
+    },
+    "validationRequest": {
+      "properties": { "operation": { "const": "validate-patch" }, "project": { "type": "object" }, "patch": { "type": "object" }, "policy": { "type": "object" } },
+      "required": ["project", "patch", "policy"]
+    },
+    "validationResult": {
+      "properties": { "operation": { "const": "validate-patch" }, "project": { "type": "object" }, "patch_id": { "$ref": "#/$defs/digest" }, "verified": { "type": "boolean" }, "checks": { "type": "array" }, "diagnostics": { "type": "array" }, "trust_report": { "type": ["object", "null"] }, "cost": { "type": "object" } },
+      "required": ["project", "patch_id", "verified", "checks", "diagnostics", "trust_report", "cost"]
+    },
+    "closeRequest": {
+      "properties": { "operation": { "const": "close" } }, "not": { "required": ["resources"] }
+    },
+    "closeResult": {
+      "properties": { "operation": { "const": "close" }, "resources": { "type": "object" } }, "required": ["resources"]
+    },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

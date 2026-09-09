@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agdaprover.local/schemas/p0/v1/prover-result.schema.json",
+  "title": "AgdaProver P0 prover result",
+  "type": "object",
+  "required": [
+    "schema_version", "task_id", "status", "source_file", "source_hash",
+    "ranker", "goal", "joint_goals", "proof_term", "patch",
+    "candidates_generated", "verifier_calls", "model_calls",
+    "model_elapsed_ms", "elapsed_ms", "validation", "trust_report",
+    "model_id", "action_model_id", "toolchain_id", "policy_profile", "cost",
+    "impossibility_certificate", "search_stats", "diagnostics"
+  ],
+  "properties": {
+    "schema_version": { "const": "agdaprover.p0.v1" },
+    "task_id": { "type": "string", "minLength": 1 },
+    "status": {
+      "enum": ["verified", "impossible", "needs-clarification", "unsolved", "resource-exhausted", "invalid-task", "policy-rejected", "toolchain-error", "internal-error"]
+    },
+    "source_file": { "type": "string", "minLength": 1 },
+    "source_hash": { "type": "string", "minLength": 1 },
+    "ranker": { "type": "string", "minLength": 1 },
+    "goal": { "type": ["object", "null"] },
+    "joint_goals": { "type": "array", "items": { "type": "object" } },
+    "proof_term": { "type": ["string", "null"] },
+    "patch": { "type": ["object", "null"] },
+    "candidates_generated": { "type": "integer", "minimum": 0 },
+    "verifier_calls": { "type": "integer", "minimum": 0 },
+    "verifier_budget": { "$ref": "verifier-budget.schema.json" },
+    "resource_budget": { "$ref": "resource-budget.schema.json" },
+    "model_calls": { "type": "integer", "minimum": 0 },
+    "model_elapsed_ms": { "type": "number", "minimum": 0 },
+    "elapsed_ms": { "type": "number", "minimum": 0 },
+    "attempts": { "type": "array" },
+    "validation": { "type": ["object", "null"] },
+    "trust_report": { "type": ["object", "null"] },
+    "model_id": { "type": ["string", "null"] },
+    "action_model_id": { "type": ["string", "null"] },
+    "toolchain_id": { "type": ["string", "null"] },
+    "policy_profile": { "type": "string", "minLength": 1 },
+    "cost": { "$ref": "cost.schema.json" },
+    "impossibility_certificate": { "type": ["object", "null"] },
+    "search_stats": { "type": ["object", "null"] },
+    "policy_trace": { "type": "array" },
+    "diagnostics": { "type": "array", "items": { "type": "object", "additionalProperties": { "type": "string" } } }
+  },
+  "$defs": {
+    "checkedValidation": {
+      "type": "object",
+      "required": ["checked", "fresh_process", "timed_out", "exit_status"],
+      "properties": {
+        "checked": { "const": true },
+        "fresh_process": { "const": true },
+        "timed_out": { "const": false },
+        "exit_status": { "type": "integer" }
+      },
+      "anyOf": [
+        { "properties": { "exit_status": { "const": 0 } } },
+        {
+          "required": ["validation_scope", "acceptance_basis", "remaining_open_goals"],
+          "properties": {
+            "validation_scope": { "enum": ["target-definition", "target-prefix"] },
+            "acceptance_basis": { "type": "string", "minLength": 1 },
+            "remaining_open_goals": { "type": "array", "items": { "type": "object" } },
+            "prefix_validation": { "$ref": "#/$defs/strictPrefix" }
+          },
+          "if": { "properties": { "validation_scope": { "const": "target-prefix" } } },
+          "then": { "required": ["prefix_validation"] }
+        }
+      ]
+    },
+    "strictTrust": {
+      "type": "object",
+      "required": ["fresh_process", "offline", "checker_exit_status", "options"],
+      "properties": {
+        "fresh_process": { "const": true },
+        "offline": { "const": true },
+        "checker_exit_status": { "type": "integer" },
+        "options": {
+          "type": "array",
+          "items": { "type": "string" },
+          "allOf": [
+            { "contains": { "const": "--without-K" } },
+            { "contains": { "const": "--exact-split" } }
+          ]
+        }
+      },
+      "anyOf": [
+        { "properties": { "checker_exit_status": { "const": 0 } } },
+        {
+          "required": ["validation_scope", "supplemental_checker_command"],
+          "properties": {
+            "validation_scope": { "enum": ["target-definition", "target-prefix"] },
+            "prefix_validation": { "$ref": "#/$defs/fullPrefixTrust" },
+            "supplemental_checker_command": {
+              "type": "array",
+              "contains": { "const": "--interaction-json" }
+            }
+          },
+          "if": { "properties": { "validation_scope": { "const": "target-prefix" } } },
+          "then": { "required": ["prefix_validation"] }
+        }
+      ]
+    },
+    "fullPrefixTrust": {
+      "allOf": [
+        { "$ref": "#/$defs/strictTrust" },
+        { "properties": { "checker_exit_status": { "const": 0 } } }
+      ]
+    },
+    "strictPrefix": {
+      "type": "object",
+      "required": ["schema_version", "status", "parser", "omitted_declarations", "validation", "trust_report"],
+      "properties": {
+        "schema_version": { "const": "agdaprover.prefix-validation.v1" },
+        "status": { "const": "verified" },
+        "parser": { "type": "object" },
+        "omitted_declarations": { "type": "array", "items": { "type": "object" } },
+        "validation": {
+          "allOf": [
+            { "$ref": "#/$defs/checkedValidation" },
+            { "properties": { "exit_status": { "const": 0 } } }
+          ]
+        },
+        "trust_report": { "$ref": "#/$defs/fullPrefixTrust" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["resource_budget"],
+        "properties": {
+          "resource_budget": { "properties": { "exhausted_resource": { "type": "string" } } }
+        }
+      },
+      "then": { "properties": { "status": { "const": "resource-exhausted" } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "verified" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "proof_term": { "type": "string", "minLength": 1 },
+          "patch": { "type": "object" },
+          "validation": { "$ref": "#/$defs/checkedValidation" },
+          "trust_report": { "$ref": "#/$defs/strictTrust" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "impossible" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "impossibility_certificate": { "type": "object" },
+          "validation": { "$ref": "#/$defs/checkedValidation" },
+          "trust_report": { "$ref": "#/$defs/strictTrust" }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+repository_root="$(cd "$(dirname "$0")/.." && pwd)"
+package_db="${AGDAPROVER_AGDA_PACKAGE_DB:-$HOME/.cabal/store/ghc-9.6.7/package.db}"
+output_dir="$repository_root/native/source-parser/target"
+mkdir -p "$output_dir"
+ghc -O2 -Wall -Werror -package-db "$package_db" -package Agda-2.8.0 \
+  -i"$repository_root/native/source-parser" \
+  -package aeson-2.2.4.1 -package bytestring-0.11.5.4 \
+  -outputdir "$output_dir" -o "$output_dir/agdaprover-source-parser" \
+  "$repository_root/native/source-parser/Main.hs"

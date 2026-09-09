@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agdaprover.local/schemas/bridge/v1/proof-state.schema.json",
+  "title": "AgdaProver Stage 1 proof state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "environment_id",
+    "source_revision",
+    "module_id",
+    "focused_interaction",
+    "goals",
+    "metas",
+    "constraints",
+    "dependency_graph",
+    "proof_dag",
+    "extraction_capabilities",
+    "cost",
+    "structural_hash"
+  ],
+  "properties": {
+    "schema_version": { "const": "agdaprover.proof-state.v1" },
+    "environment_id": { "$ref": "#/$defs/digest" },
+    "source_revision": { "$ref": "#/$defs/digest" },
+    "module_id": { "$ref": "#/$defs/module" },
+    "focused_interaction": { "type": ["integer", "null"], "minimum": 0 },
+    "goals": { "type": "array", "maxItems": 100000, "items": { "$ref": "#/$defs/goal" } },
+    "metas": { "type": "array", "maxItems": 100000, "items": { "$ref": "#/$defs/meta" } },
+    "constraints": { "type": "array", "maxItems": 100000, "items": { "$ref": "#/$defs/constraint" } },
+    "dependency_graph": { "type": "array", "maxItems": 100000, "items": { "$ref": "#/$defs/edge" } },
+    "proof_dag": { "type": "array", "maxItems": 100000, "items": { "type": "object" } },
+    "extraction_capabilities": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+    "cost": { "type": "object", "additionalProperties": { "type": "number", "minimum": 0 } },
+    "structural_hash": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "module": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "relative_path"],
+      "properties": {
+        "name": { "type": "string" },
+        "relative_path": { "type": "string" }
+      }
+    },
+    "term": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "rendering", "text", "sha256"],
+      "properties": {
+        "schema_version": { "const": "agdaprover.agda-term-view.v1" },
+        "rendering": { "type": "string" },
+        "text": { "type": "string", "maxLength": 1048576 },
+        "sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "file"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 },
+        "file": { "type": ["string", "null"] }
+      }
+    },
+    "binder": {
+      "type": "object",
+      "required": ["binder_id", "debruijn_index", "suggested_name", "type", "hiding", "relevance", "quantity", "modality", "origin", "instance_status", "in_scope"],
+      "additionalProperties": false,
+      "properties": {
+        "binder_id": { "type": "string" },
+        "debruijn_index": { "type": "integer", "minimum": 0 },
+        "suggested_name": { "type": "string" },
+        "type": { "$ref": "#/$defs/term" },
+        "hiding": { "enum": ["explicit", "implicit", "instance", "unknown"] },
+        "relevance": { "enum": ["relevant", "irrelevant", "shape-irrelevant", "unknown"] },
+        "quantity": { "type": "string" },
+        "modality": { "type": "string" },
+        "origin": { "type": "string" },
+        "instance_status": { "enum": ["ordinary", "instance", "unknown"] },
+        "in_scope": { "type": "boolean" }
+      }
+    },
+    "goal": {
+      "type": "object",
+      "required": ["interaction_id", "meta_id", "telescope", "target", "blockers", "constraint_ids", "boundary", "source_range"],
+      "additionalProperties": false,
+      "properties": {
+        "interaction_id": { "type": "integer", "minimum": 0 },
+        "meta_id": { "type": "string" },
+        "telescope": { "type": "array", "items": { "$ref": "#/$defs/binder" } },
+        "target": { "$ref": "#/$defs/term" },
+        "blockers": { "type": "array", "items": { "type": "string" } },
+        "constraint_ids": { "type": "array", "items": { "type": "string" } },
+        "boundary": { "type": "array", "items": { "type": "string" } },
+        "source_range": { "$ref": "#/$defs/range" }
+      }
+    },
+    "meta": {
+      "type": "object",
+      "required": ["meta_id", "type", "context", "status", "solution", "blockers", "interaction_id", "source_range"],
+      "additionalProperties": false,
+      "properties": {
+        "meta_id": { "type": "string" },
+        "type": { "$ref": "#/$defs/term" },
+        "context": { "type": "array", "items": { "$ref": "#/$defs/binder" } },
+        "status": { "enum": ["open", "solved", "blocked", "unknown"] },
+        "solution": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/term" }] },
+        "blockers": { "type": "array", "items": { "type": "string" } },
+        "interaction_id": { "type": ["integer", "null"], "minimum": 0 },
+        "source_range": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/range" }] }
+      }
+    },
+    "constraint": {
+      "type": "object",
+      "required": ["constraint_id", "kind", "rendered", "meta_ids", "name_ids", "level_variables", "blockers"],
+      "additionalProperties": false,
+      "properties": {
+        "constraint_id": { "type": "string" },
+        "kind": { "type": "string" },
+        "rendered": { "type": "string" },
+        "meta_ids": { "type": "array", "items": { "type": "string" } },
+        "name_ids": { "type": "array", "items": { "type": "string" } },
+        "level_variables": { "type": "array", "items": { "type": "string" } },
+        "blockers": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "required": ["source", "target", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "type": "string" },
+        "target": { "type": "string" },
+        "kind": { "enum": ["goal-meta", "goal-constraint", "constraint-meta", "meta-meta"] }
+      }
+    }
+  }
+}

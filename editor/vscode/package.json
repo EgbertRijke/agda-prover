@@ -1,0 +1,193 @@
+{
+  "name": "agdaprover",
+  "displayName": "AgdaProver",
+  "description": "Local AgdaProver integration over the universal editor API",
+  "version": "0.0.2",
+  "publisher": "agdaprover",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EgbertRijke/agda-prover.git"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "AgdaProver executes the local prover and Agda against workspace source."
+    },
+    "virtualWorkspaces": {
+      "supported": false
+    }
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onLanguage:agda",
+    "onLanguage:lagda-markdown",
+    "onCommand:agdaprover.provePrefix",
+    "onCommand:agdaprover.step",
+    "onCommand:agdaprover.checkSetup",
+    "onCommand:agdaprover.cancel"
+  ],
+  "main": "./extension.js",
+  "scripts": {
+    "check": "node --check core.js && node --check extension.js && node --check test/core.test.js",
+    "test": "node --test test"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "agdaprover.provePrefix",
+        "title": "AgdaProver: Prove Through Current Goal or All Goals"
+      },
+      {
+        "command": "agdaprover.step",
+        "title": "AgdaProver: Take One Step"
+      },
+      {
+        "command": "agdaprover.checkSetup",
+        "title": "AgdaProver: Check Setup"
+      },
+      {
+        "command": "agdaprover.cancel",
+        "title": "AgdaProver: Cancel"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "agdaprover.provePrefix",
+        "key": "ctrl+c ctrl+x ctrl+p",
+        "mac": "ctrl+c ctrl+x ctrl+p",
+        "when": "editorTextFocus && agdaprover.supportedDocument"
+      },
+      {
+        "command": "agdaprover.step",
+        "key": "ctrl+c ctrl+x ctrl+s",
+        "mac": "ctrl+c ctrl+x ctrl+s",
+        "when": "editorTextFocus && agdaprover.supportedDocument"
+      },
+      {
+        "command": "agdaprover.cancel",
+        "key": "ctrl+c ctrl+x ctrl+k",
+        "mac": "ctrl+c ctrl+x ctrl+k",
+        "when": "editorTextFocus && agdaprover.supportedDocument"
+      },
+      {
+        "command": "agdaprover.provePrefix",
+        "key": "ctrl+p",
+        "mac": "ctrl+p",
+        "when": "editorTextFocus && agdaprover.supportedDocument && agda.keySequence == 'cc-x'"
+      },
+      {
+        "command": "agdaprover.step",
+        "key": "ctrl+s",
+        "mac": "ctrl+s",
+        "when": "editorTextFocus && agdaprover.supportedDocument && agda.keySequence == 'cc-x'"
+      },
+      {
+        "command": "agdaprover.cancel",
+        "key": "ctrl+k",
+        "mac": "ctrl+k",
+        "when": "editorTextFocus && agdaprover.supportedDocument && agda.keySequence == 'cc-x'"
+      }
+    ],
+    "configuration": {
+      "title": "AgdaProver",
+      "properties": {
+        "agdaprover.pythonCommand": {
+          "type": "string",
+          "default": "auto",
+          "description": "Python executable for a discovered checkout. 'auto' uses python3 on macOS/Linux and python on Windows."
+        },
+        "agdaprover.executable": {
+          "type": "string",
+          "default": "",
+          "description": "Optional installed agdaprover executable. Empty automatically uses a discovered checkout or agdaprover from PATH."
+        },
+        "agdaprover.projectRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Optional AgdaProver checkout. Empty discovers it from the source, workspace, extension, or AGDAPROVER_PROJECT_ROOT."
+        },
+        "agdaprover.reloadCommand": {
+          "type": "string",
+          "default": "auto",
+          "description": "Companion Agda-extension command invoked after an applied edit. 'auto' detects installed extensions, 'none' disables reload, and any available command ID may be supplied."
+        },
+        "agdaprover.ranker": {
+          "type": "string",
+          "enum": ["symbolic", "nnue"],
+          "default": "symbolic"
+        },
+        "agdaprover.model": {
+          "type": "string",
+          "default": "",
+          "description": "Proof-term or focused-branch NNUE model used by complete proof search."
+        },
+        "agdaprover.stepModel": {
+          "type": "string",
+          "default": "",
+          "description": "One-step-refinement NNUE model used only by the step command."
+        },
+        "agdaprover.actionModel": {
+          "type": "string",
+          "default": "",
+          "description": "Optional OR-decision NNUE model used only by complete proof search."
+        },
+        "agdaprover.maxCandidates": {
+          "type": "integer",
+          "default": 500,
+          "minimum": 1
+        },
+        "agdaprover.maxTermSize": {
+          "type": "integer",
+          "default": 8,
+          "minimum": 1
+        },
+        "agdaprover.maxDepth": {
+          "type": ["integer", "null"],
+          "default": null,
+          "minimum": 1,
+          "description": "Optional hard search-depth bound. Null leaves depth unbounded."
+        },
+        "agdaprover.timeoutSeconds": {
+          "type": ["number", "null"],
+          "default": null,
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "agdaprover.provePrefix",
+          "when": "agdaprover.supportedDocument && resourceScheme == file",
+          "group": "navigation@90"
+        },
+        {
+          "command": "agdaprover.step",
+          "when": "agdaprover.supportedDocument && resourceScheme == file",
+          "group": "navigation@91"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "agdaprover.provePrefix",
+          "when": "agdaprover.supportedDocument && resourceScheme == file",
+          "group": "navigation@90"
+        },
+        {
+          "command": "agdaprover.step",
+          "when": "agdaprover.supportedDocument && resourceScheme == file",
+          "group": "navigation@91"
+        }
+      ]
+    }
+  }
+}

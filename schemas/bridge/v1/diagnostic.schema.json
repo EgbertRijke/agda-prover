@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agdaprover.local/schemas/bridge/v1/diagnostic.schema.json",
+  "title": "AgdaProver Stage 1 bridge diagnostic",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "code",
+    "phase",
+    "severity",
+    "message",
+    "primary_range",
+    "related_ranges",
+    "causes",
+    "retryable",
+    "raw_sha256",
+    "redaction"
+  ],
+  "properties": {
+    "schema_version": { "const": "agdaprover.bridge-diagnostic.v1" },
+    "code": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$" },
+    "phase": {
+      "enum": [
+        "resolution",
+        "transport",
+        "parsing",
+        "scope",
+        "elaboration",
+        "unification",
+        "instance-search",
+        "positivity",
+        "coverage",
+        "termination",
+        "validation",
+        "policy",
+        "resource",
+        "protocol",
+        "toolchain",
+        "internal"
+      ]
+    },
+    "severity": { "enum": ["info", "warning", "error"] },
+    "message": { "type": "string", "maxLength": 16384 },
+    "primary_range": { "$ref": "#/$defs/nullableRange" },
+    "related_ranges": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/range" }
+    },
+    "causes": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "type": "string", "maxLength": 16384 }
+    },
+    "retryable": { "type": "boolean" },
+    "raw_sha256": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      ]
+    },
+    "redaction": { "enum": ["public", "project-relative", "sensitive"] }
+  },
+  "$defs": {
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "file"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 },
+        "file": { "type": ["string", "null"] }
+      }
+    },
+    "nullableRange": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/range" }
+      ]
+    }
+  }
+}

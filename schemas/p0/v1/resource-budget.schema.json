@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agdaprover.local/schemas/p0/v1/resource-budget.schema.json",
+  "title": "Shared measured physical-resource budget",
+  "type": "object",
+  "required": ["schema_version", "limits", "cpu_seconds", "io_bytes", "peak_sampled_rss_bytes", "peak_sampled_temporary_bytes", "exhausted_resource", "accounting"],
+  "properties": {
+    "schema_version": { "const": "agdaprover.resource-budget.v1" },
+    "limits": { "$ref": "#/$defs/limits" },
+    "cpu_seconds": { "type": "number", "minimum": 0 },
+    "io_bytes": { "type": "integer", "minimum": 0 },
+    "peak_sampled_rss_bytes": { "type": "integer", "minimum": 0 },
+    "peak_sampled_temporary_bytes": { "type": "integer", "minimum": 0 },
+    "exhausted_resource": { "enum": [null, "cpu-seconds", "resident-bytes", "io-bytes", "temporary-bytes"] },
+    "accounting": { "const": "sampled-owned-processes-and-caller-thread-v1" }
+  },
+  "$defs": {
+    "limits": {
+      "type": "object",
+      "required": ["schema_version", "cpu_seconds", "memory_bytes", "io_bytes", "temporary_bytes"],
+      "properties": {
+        "schema_version": { "const": "agdaprover.resource-budget.v1" },
+        "cpu_seconds": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+        "memory_bytes": { "type": "integer", "minimum": 1 },
+        "io_bytes": { "type": "integer", "minimum": 1 },
+        "temporary_bytes": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

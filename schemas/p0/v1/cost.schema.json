@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agdaprover.local/schemas/p0/v1/cost.schema.json",
+  "title": "AgdaProver P0 cost vector",
+  "type": "object",
+  "required": [
+    "actions_generated", "actions_scored", "actions_expanded", "kernel_loads",
+    "goal_inspections", "speculative_checks", "candidate_terms_checked",
+    "refinement_checks", "case_split_checks", "fresh_validation_runs",
+    "model_batches", "model_items_scored", "generated_subgoals",
+    "source_bytes_materialized", "source_bytes_written", "kernel_load_elapsed_ms"
+  ],
+  "properties": {
+    "actions_generated": { "type": "integer", "minimum": 0 },
+    "actions_scored": { "type": "integer", "minimum": 0 },
+    "actions_expanded": { "type": "integer", "minimum": 0 },
+    "kernel_loads": { "type": "integer", "minimum": 0 },
+    "goal_inspections": { "type": "integer", "minimum": 0 },
+    "speculative_checks": { "type": "integer", "minimum": 0 },
+    "candidate_terms_checked": { "type": "integer", "minimum": 0 },
+    "refinement_checks": { "type": "integer", "minimum": 0 },
+    "case_split_checks": { "type": "integer", "minimum": 0 },
+    "fresh_validation_runs": { "type": "integer", "minimum": 0 },
+    "model_batches": { "type": "integer", "minimum": 0 },
+    "model_items_scored": { "type": "integer", "minimum": 0 },
+    "generated_subgoals": { "type": "integer", "minimum": 0 },
+    "source_bytes_materialized": { "type": "integer", "minimum": 0 },
+    "source_bytes_written": { "type": "integer", "minimum": 0 },
+    "kernel_load_elapsed_ms": { "type": "number", "minimum": 0 }
+  },
+  "additionalProperties": false
+}

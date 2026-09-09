@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repository_root="$(cd "$(dirname "$0")/.." && pwd)"
+package_db="${AGDAPROVER_AGDA_PACKAGE_DB:-$HOME/.cabal/store/ghc-9.6.7/package.db}"
+output_dir="$repository_root/native/agda-bridge/target"
+
+if [[ ! -f "$package_db/package.cache" ]]; then
+  echo "Agda package database not found: $package_db" >&2
+  echo "Set AGDAPROVER_AGDA_PACKAGE_DB to the package database containing Agda 2.8." >&2
+  exit 2
+fi
+
+mkdir -p "$output_dir"
+ghc \
+  -O2 \
+  -threaded \
+  -package-db "$package_db" \
+  -package Agda \
+  -package aeson-2.2.4.1 \
+  -package bytestring-0.11.5.4 \
+  -i"$repository_root/native/agda-bridge" \
+  -outputdir "$output_dir" \
+  -o "$output_dir/agdaprover-agda-bridge-2.8" \
+  "$repository_root/native/agda-bridge/Main.hs"

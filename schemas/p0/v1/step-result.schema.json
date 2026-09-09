@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agdaprover.local/schemas/p0/v1/step-result.schema.json",
+  "title": "AgdaProver P0 one-step result",
+  "type": "object",
+  "required": [
+    "schema_version", "task_id", "status", "source_file", "source_hash",
+    "ranker", "goal", "action", "candidates_generated", "verifier_calls",
+    "model_calls", "model_elapsed_ms", "elapsed_ms", "model_id",
+    "toolchain_id", "policy_profile", "cost", "diagnostics"
+  ],
+  "properties": {
+    "schema_version": { "const": "agdaprover.step.p0.v1" },
+    "task_id": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["accepted-step", "unsolved", "resource-exhausted", "invalid-task", "toolchain-error", "internal-error"] },
+    "source_file": { "type": "string", "minLength": 1 },
+    "source_hash": { "type": "string", "minLength": 1 },
+    "ranker": { "type": "string", "minLength": 1 },
+    "goal": { "type": ["object", "null"] },
+    "action": { "type": ["object", "null"] },
+    "candidates_generated": { "type": "integer", "minimum": 0 },
+    "verifier_calls": { "type": "integer", "minimum": 0 },
+    "verifier_budget": { "$ref": "verifier-budget.schema.json" },
+    "resource_budget": { "$ref": "resource-budget.schema.json" },
+    "model_calls": { "type": "integer", "minimum": 0 },
+    "model_elapsed_ms": { "type": "number", "minimum": 0 },
+    "elapsed_ms": { "type": "number", "minimum": 0 },
+    "model_id": { "type": ["string", "null"] },
+    "toolchain_id": { "type": ["string", "null"] },
+    "policy_profile": { "type": "string", "minLength": 1 },
+    "cost": { "$ref": "cost.schema.json" },
+    "attempts": { "type": "array" },
+    "diagnostics": { "type": "array", "items": { "type": "object", "additionalProperties": { "type": "string" } } }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["resource_budget"],
+        "properties": {
+          "resource_budget": { "properties": { "exhausted_resource": { "type": "string" } } }
+        }
+      },
+      "then": { "properties": { "status": { "const": "resource-exhausted" } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "accepted-step" } }, "required": ["status"] },
+      "then": { "properties": { "action": { "type": "object" } } }
+    }
+  ],
+  "additionalProperties": false
+}

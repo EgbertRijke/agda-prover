@@ -1,0 +1,51 @@
+{
+  "schema_version": "agdaprover.toolchain-matrix.v1",
+  "supported": true,
+  "agda_version": "2.8.0",
+  "adapter": "agda-interaction-json-2.8.0",
+  "release": "https://github.com/agda/agda/releases/tag/v2.8.0",
+  "license": "MIT",
+  "assets": {
+    "linux-x86_64": {
+      "filename": "Agda-v2.8.0-linux.tar.xz",
+      "sha256": "824081b8dcbe431289a50ac6bd83e451f390c51c3884ac7a8c4a5c0df2632faf"
+    },
+    "macos-arm64": {
+      "filename": "Agda-v2.8.0-macOS-arm64.tar.xz",
+      "sha256": "9a35071eb9747f984177f48e1ba7008a9cebccfc259a40a0a84b29ffc2ec2db6"
+    },
+    "macos-x86_64": {
+      "filename": "Agda-v2.8.0-macOS-x64.tar.xz",
+      "sha256": "9d3b4f376bc9469b5e0c684bf06053f7dae327f7e4314f31f3edc866a9bb3bc5"
+    },
+    "windows-x86_64": {
+      "filename": "Agda-v2.8.0-win64.zip",
+      "sha256": "5c97846c45dc8c43d79a5df3cc78ccf58bad710aac2182b70c4f5ede30af3cbc"
+    }
+  },
+  "operations": [
+    "open-project",
+    "load-module",
+    "inspect-goals",
+    "infer",
+    "normalize",
+    "try-action",
+    "case-split",
+    "check-definition",
+    "validate-patch",
+    "close"
+  ],
+  "limitations": [
+    "case-split commit requires applying returned source clauses",
+    "internal term constructors are unavailable through interaction JSON",
+    "unreported binder modality fields are explicitly unknown"
+  ],
+  "ci_installer": {
+    "repository": "agda/agda-setup-action",
+    "commit": "c931d59d76a036d1bed9f322cc12cc105bda7881"
+  },
+  "local_qualification": {
+    "platform": "macos-arm64",
+    "executable_sha256": "b49f04404dd9bc3ca6ff27c0d3f0e3f8906ae1eda0bad5fbae81dc857a7b5156"
+  }
+}
