@@ -26,5 +26,11 @@ jobs:
       - run: ruff check src tests && ruff format --check src tests && mypy
       - run: python -W error::ResourceWarning -m unittest discover -s tests -v
       - run: npm --prefix editor/vscode run check && npm --prefix editor/vscode test
-      - run: sudo apt-get update && sudo apt-get install -y emacs-nox
+      - name: Install Emacs from signed Ubuntu repositories
+        shell: bash
+        run: |
+          test -f /etc/apt/sources.list.d/ubuntu.sources
+          apt_sources=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-)
+          sudo apt-get "${apt_sources[@]}" update
+          sudo apt-get "${apt_sources[@]}" install -y --no-install-recommends emacs-nox
       - run: ./scripts/test-emacs
