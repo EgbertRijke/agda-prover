@@ -51,3 +51,7 @@ labels; it must not adopt the policy of the supplied result automatically.
 A supplied result with altered items, policy
 or query identity is rejected. This policy is not a default promotion or a
 claim of calibrated C3 recall or fixed-budget downstream improvement.
+
+The separate [symbol-rarity extension](symbol-rarity-retrieval-v1.md) adds an
+optional third lane. It uses its own query/result policy and schema; leaving
+that extension disabled preserves this two-lane contract unchanged.

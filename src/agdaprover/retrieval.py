@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import heapq
 import json
+import math
 import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Mapping
@@ -25,6 +26,10 @@ DEPENDENCY_POLICY = "head-dependency-symbol-arity-lexical-v1"
 QUERY_SYMBOL_POLICY = "head-symbol-arity-lexical-query-symbol-interleave-v1"
 DEPENDENCY_QUERY_SYMBOL_POLICY = (
     "head-dependency-symbol-arity-lexical-query-symbol-interleave-v1"
+)
+SYMBOL_RARITY_POLICY = "head-symbol-arity-lexical-query-symbol-rarity-interleave-v1"
+DEPENDENCY_SYMBOL_RARITY_POLICY = (
+    "head-dependency-symbol-arity-lexical-query-symbol-rarity-interleave-v1"
 )
 DEPENDENCY_SCHEMA = "agdaprover.allowed-dependencies.v1"
 PROGRESSIVE_POLICY = "scoped-progressive-premises-v3"
@@ -235,6 +240,7 @@ class RetrievalQuery:
     features: TypeFeatures
     tokens: tuple[str, ...] = ()
     query_symbol_lane: bool = False
+    symbol_rarity_lane: bool = False
 
     def __post_init__(self) -> None:
         _hash(self.scope_id)
@@ -243,6 +249,10 @@ class RetrievalQuery:
         _strings(self.tokens)
         if type(self.query_symbol_lane) is not bool:
             raise ValueError("query-symbol lane must be a Boolean")
+        if type(self.symbol_rarity_lane) is not bool:
+            raise ValueError("symbol-rarity lane must be a Boolean")
+        if self.symbol_rarity_lane and not self.query_symbol_lane:
+            raise ValueError("symbol-rarity lane requires the query-symbol lane")
 
     @property
     def query_id(self) -> str:
@@ -251,7 +261,11 @@ class RetrievalQuery:
                 "scope_id": self.scope_id,
                 "features": self.features.to_dict(),
                 "tokens": self.tokens,
-                "policy": QUERY_SYMBOL_POLICY if self.query_symbol_lane else POLICY,
+                "policy": SYMBOL_RARITY_POLICY
+                if self.symbol_rarity_lane
+                else QUERY_SYMBOL_POLICY
+                if self.query_symbol_lane
+                else POLICY,
             }
         )
 
@@ -355,7 +369,9 @@ def _query_identity(query: RetrievalQuery, dependencies: bool) -> str:
         _digest(
             {
                 "query_id": query.query_id,
-                "policy": DEPENDENCY_QUERY_SYMBOL_POLICY
+                "policy": DEPENDENCY_SYMBOL_RARITY_POLICY
+                if query.symbol_rarity_lane
+                else DEPENDENCY_QUERY_SYMBOL_POLICY
                 if query.query_symbol_lane
                 else DEPENDENCY_POLICY,
             }
@@ -374,6 +390,7 @@ class RankedPremise:
     arity_distance: int
     dependency_score: int = 0
     query_symbol_match: int = 0
+    symbol_rarity: float = 0.0
 
     @property
     def sort_key(self) -> tuple[object, ...]:
@@ -393,6 +410,7 @@ class RankedPremise:
         *,
         include_dependencies: bool = False,
         include_query_symbols: bool = False,
+        include_symbol_rarity: bool = False,
     ) -> dict[str, object]:
         return {
             "rank": rank,
@@ -412,6 +430,11 @@ class RankedPremise:
                     if include_query_symbols
                     else {}
                 ),
+                **(
+                    {"symbol_rarity": self.symbol_rarity}
+                    if include_symbol_rarity
+                    else {}
+                ),
             },
         }
 
@@ -427,9 +450,16 @@ class RetrievalResult:
     dependency_graph_id: str | None = None
     dependency_postings_visited: int = 0
     query_symbol_lane: bool = False
+    symbol_rarity_lane: bool = False
 
     @property
     def policy(self) -> str:
+        if self.symbol_rarity_lane:
+            return (
+                DEPENDENCY_SYMBOL_RARITY_POLICY
+                if self.dependency_graph_id is not None
+                else SYMBOL_RARITY_POLICY
+            )
         if self.query_symbol_lane:
             return (
                 DEPENDENCY_QUERY_SYMBOL_POLICY
@@ -457,7 +487,9 @@ class RetrievalResult:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_version": "agdaprover.symbolic-retrieval.v3"
+            "schema_version": "agdaprover.symbolic-retrieval.v4"
+            if self.symbol_rarity_lane
+            else "agdaprover.symbolic-retrieval.v3"
             if self.query_symbol_lane
             else "agdaprover.symbolic-retrieval.v2"
             if self.dependency_graph_id is not None
@@ -475,6 +507,7 @@ class RetrievalResult:
                     i,
                     include_dependencies=self.dependency_graph_id is not None,
                     include_query_symbols=self.query_symbol_lane,
+                    include_symbol_rarity=self.symbol_rarity_lane,
                 )
                 for i, item in enumerate(self.items, 1)
             ],
@@ -722,6 +755,17 @@ class SymbolicPremiseIndex:
             raise ValueError("retrieval limit must be a positive integer")
         symbols: Counter[str] = Counter()
         lexical: Counter[str] = Counter()
+        rarity_weights: dict[str, float] = {}
+        population = len(self.allowed.premises)
+        average = (
+            max(
+                1.0,
+                sum(len(p.features.symbols) for p in _checked(self.allowed.premises))
+                / max(population, 1),
+            )
+            if query.symbol_rarity_lane
+            else 1.0
+        )
         visited = 0
         for tokens, postings, counts in (
             (query.features.symbols, self._symbols, symbols),
@@ -729,6 +773,10 @@ class SymbolicPremiseIndex:
         ):
             for token in _checked(tokens):
                 rows = postings.get(token, ())
+                if query.symbol_rarity_lane and counts is symbols:
+                    rarity_weights[token] = math.log1p(
+                        (population - len(rows) + 0.5) / (len(rows) + 0.5)
+                    )
                 counts.update(_checked(rows))
                 visited += len(rows)
         dependency_scores: Counter[str] = Counter()
@@ -758,7 +806,7 @@ class SymbolicPremiseIndex:
         referenced = set(query.features.symbols) if query.query_symbol_lane else set()
         direct: list[RankedPremise] = []
 
-        def candidates() -> Iterator[RankedPremise]:
+        def candidates(*, collect_direct: bool = False) -> Iterator[RankedPremise]:
             for p in _checked(self.allowed.premises):
                 item = RankedPremise(
                     p,
@@ -771,24 +819,49 @@ class SymbolicPremiseIndex:
                     abs(p.features.arity - query.features.arity),
                     dependency_scores[p.declaration_id],
                     int(p.declaration_id in referenced),
+                    sum(
+                        rarity_weights[s]
+                        for s in _checked(p.features.symbols)
+                        if s in rarity_weights
+                    )
+                    * 2.2
+                    / (1 + 1.2 * (0.25 + 0.75 * len(p.features.symbols) / average))
+                    if query.symbol_rarity_lane
+                    else 0.0,
                 )
-                if item.query_symbol_match:
+                if collect_direct and item.query_symbol_match:
                     direct.append(item)
                 yield item
 
         # Unknown/mismatched heads remain eligible: symbolic similarity is not
         # a unification test, and aliases may require further normalization.
-        items = tuple(heapq.nsmallest(limit, candidates(), key=lambda p: p.sort_key))
-        if query.query_symbol_lane and direct:
+        items = tuple(
+            heapq.nsmallest(
+                limit, candidates(collect_direct=True), key=lambda p: p.sort_key
+            )
+        )
+        if (query.query_symbol_lane and direct) or query.symbol_rarity_lane:
             # Each lane's first k entries suffice for a k-element merged prefix.
             # In particular, do not truncate the allowed set before finding
             # referenced declarations whose baseline rank lies beyond k.
-            lanes = (
+            lanes = [
                 iter(items),
                 iter(
                     heapq.nsmallest(limit, _checked(direct), key=lambda p: p.sort_key)
                 ),
-            )
+            ]
+            if query.symbol_rarity_lane:
+                # A second bounded top-k pass avoids storing/sorting N ranked
+                # objects. Posting statistics are collected once, above.
+                lanes.append(
+                    iter(
+                        heapq.nsmallest(
+                            limit,
+                            candidates(),
+                            key=lambda p: (-p.symbol_rarity, p.sort_key),
+                        )
+                    )
+                )
             selected: list[RankedPremise] = []
             emitted: set[str] = set()
             while len(selected) < min(limit, len(self.allowed.premises)):
@@ -812,6 +885,7 @@ class SymbolicPremiseIndex:
             self.dependencies.graph_id if self.dependencies is not None else None,
             dependency_visits,
             query.query_symbol_lane,
+            query.symbol_rarity_lane,
         )
 
 

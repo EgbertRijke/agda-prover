@@ -167,9 +167,35 @@ class _ScopedActions:
                 if self.ranking.query_symbol_lane
                 else ()
             )
+            + (
+                (
+                    (
+                        "retrieval-symbol-rarity-band",
+                        _symbol_rarity_band(self.ranking.items[rank - 1].symbol_rarity),
+                    ),
+                )
+                if self.ranking.symbol_rarity_lane
+                else ()
+            )
             for rank, action in self.entries
             if admission_ranks[rank] <= limit
         }
+
+
+def _symbol_rarity_band(score: float) -> str:
+    """Bounded NNUE vocabulary; exact similarity scores remain in the trace."""
+    for upper, label in (
+        (0, "0"),
+        (1, "0-1"),
+        (2, "1-2"),
+        (4, "2-4"),
+        (8, "4-8"),
+        (16, "8-16"),
+        (32, "16-32"),
+    ):
+        if score <= upper:
+            return label
+    return "32+"
 
 
 @dataclass
@@ -455,8 +481,12 @@ class _ConstructorSearch:
         self._scoped_index_reuse_enabled = (
             os.environ.get("AGDAPROVER_SCOPED_INDEX_REUSE") == "1"
         )
+        self._scoped_symbol_rarity_lane_enabled = (
+            os.environ.get("AGDAPROVER_SCOPED_SYMBOL_RARITY_LANE") == "1"
+        )
         self._scoped_query_symbol_lane_enabled = (
-            os.environ.get("AGDAPROVER_SCOPED_QUERY_SYMBOL_LANE") == "1"
+            self._scoped_symbol_rarity_lane_enabled
+            or (os.environ.get("AGDAPROVER_SCOPED_QUERY_SYMBOL_LANE") == "1")
         )
         self._previous_scoped_index: tuple[StateToken, SymbolicPremiseIndex] | None = (
             None
@@ -1362,12 +1392,17 @@ class _ConstructorSearch:
         started = time.monotonic()
         # Capture policy in the controller, not in an ambient environment read
         # during each query. Never mutate the gateway's source-bound snapshot.
-        if scoped.query.query_symbol_lane != self._scoped_query_symbol_lane_enabled:
+        if (
+            scoped.query.query_symbol_lane != self._scoped_query_symbol_lane_enabled
+            or scoped.query.symbol_rarity_lane
+            != self._scoped_symbol_rarity_lane_enabled
+        ):
             scoped = replace(
                 scoped,
                 query=replace(
                     scoped.query,
                     query_symbol_lane=self._scoped_query_symbol_lane_enabled,
+                    symbol_rarity_lane=self._scoped_symbol_rarity_lane_enabled,
                 ),
             )
         previous = self._previous_scoped_index
@@ -1433,6 +1468,11 @@ class _ConstructorSearch:
                         if ranked.query_symbol_lane
                         else {}
                     ),
+                    **(
+                        {"symbol_rarity": item.symbol_rarity}
+                        if ranked.symbol_rarity_lane
+                        else {}
+                    ),
                 }
                 for item in ranked.items
             ],
@@ -1449,6 +1489,8 @@ class _ConstructorSearch:
         if ranked.query_symbol_lane:
             record["schema_version"] = "agdaprover.scoped-retrieval-decision.v5"
             record["ranking_policy"] = ranked.policy
+        if ranked.symbol_rarity_lane:
+            record["schema_version"] = "agdaprover.scoped-retrieval-decision.v6"
         self.stats.record_retrieval("decisions", record)
         # Exact state/interaction reuse only; no root/child type substitution
         # or similarity cache. Eviction cannot broaden scope.
