@@ -22,6 +22,10 @@ INDEX_SCHEMA = "agdaprover.allowed-premise-index.v1"
 RESULT_SCHEMA = "agdaprover.symbolic-retrieval.v1"
 POLICY = "head-symbol-arity-lexical-v1"
 DEPENDENCY_POLICY = "head-dependency-symbol-arity-lexical-v1"
+QUERY_SYMBOL_POLICY = "head-symbol-arity-lexical-query-symbol-interleave-v1"
+DEPENDENCY_QUERY_SYMBOL_POLICY = (
+    "head-dependency-symbol-arity-lexical-query-symbol-interleave-v1"
+)
 DEPENDENCY_SCHEMA = "agdaprover.allowed-dependencies.v1"
 PROGRESSIVE_POLICY = "scoped-progressive-premises-v3"
 PROGRESSIVE_WIDTHS = (8, 32, 128, 512)
@@ -230,12 +234,15 @@ class RetrievalQuery:
     scope_id: str
     features: TypeFeatures
     tokens: tuple[str, ...] = ()
+    query_symbol_lane: bool = False
 
     def __post_init__(self) -> None:
         _hash(self.scope_id)
         if not isinstance(self.features, TypeFeatures):
             raise ValueError("invalid query type features")
         _strings(self.tokens)
+        if type(self.query_symbol_lane) is not bool:
+            raise ValueError("query-symbol lane must be a Boolean")
 
     @property
     def query_id(self) -> str:
@@ -244,7 +251,7 @@ class RetrievalQuery:
                 "scope_id": self.scope_id,
                 "features": self.features.to_dict(),
                 "tokens": self.tokens,
-                "policy": POLICY,
+                "policy": QUERY_SYMBOL_POLICY if self.query_symbol_lane else POLICY,
             }
         )
 
@@ -345,7 +352,14 @@ def _index_identity(
 
 def _query_identity(query: RetrievalQuery, dependencies: bool) -> str:
     return (
-        _digest({"query_id": query.query_id, "policy": DEPENDENCY_POLICY})
+        _digest(
+            {
+                "query_id": query.query_id,
+                "policy": DEPENDENCY_QUERY_SYMBOL_POLICY
+                if query.query_symbol_lane
+                else DEPENDENCY_POLICY,
+            }
+        )
         if dependencies
         else query.query_id
     )
@@ -359,6 +373,7 @@ class RankedPremise:
     lexical_overlap: int
     arity_distance: int
     dependency_score: int = 0
+    query_symbol_match: int = 0
 
     @property
     def sort_key(self) -> tuple[object, ...]:
@@ -373,7 +388,11 @@ class RankedPremise:
         )
 
     def to_dict(
-        self, rank: int, *, include_dependencies: bool = False
+        self,
+        rank: int,
+        *,
+        include_dependencies: bool = False,
+        include_query_symbols: bool = False,
     ) -> dict[str, object]:
         return {
             "rank": rank,
@@ -386,6 +405,11 @@ class RankedPremise:
                 **(
                     {"dependency_score": self.dependency_score}
                     if include_dependencies
+                    else {}
+                ),
+                **(
+                    {"query_symbol_match": self.query_symbol_match}
+                    if include_query_symbols
                     else {}
                 ),
             },
@@ -402,9 +426,16 @@ class RetrievalResult:
     items: tuple[RankedPremise, ...]
     dependency_graph_id: str | None = None
     dependency_postings_visited: int = 0
+    query_symbol_lane: bool = False
 
     @property
     def policy(self) -> str:
+        if self.query_symbol_lane:
+            return (
+                DEPENDENCY_QUERY_SYMBOL_POLICY
+                if self.dependency_graph_id is not None
+                else QUERY_SYMBOL_POLICY
+            )
         return DEPENDENCY_POLICY if self.dependency_graph_id is not None else POLICY
 
     def progressive_limits(self) -> tuple[int, ...]:
@@ -426,7 +457,9 @@ class RetrievalResult:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_version": "agdaprover.symbolic-retrieval.v2"
+            "schema_version": "agdaprover.symbolic-retrieval.v3"
+            if self.query_symbol_lane
+            else "agdaprover.symbolic-retrieval.v2"
             if self.dependency_graph_id is not None
             else RESULT_SCHEMA,
             "policy": self.policy,
@@ -439,7 +472,9 @@ class RetrievalResult:
             "usage_authority": "ranking-only-requires-agda-elaboration",
             "items": [
                 item.to_dict(
-                    i, include_dependencies=self.dependency_graph_id is not None
+                    i,
+                    include_dependencies=self.dependency_graph_id is not None,
+                    include_query_symbols=self.query_symbol_lane,
                 )
                 for i, item in enumerate(self.items, 1)
             ],
@@ -720,23 +755,53 @@ class SymbolicPremiseIndex:
                         dependency_scores[name] += weight * fresh.bit_count()
                         seen[name] = seen.get(name, 0) | fresh
                         frontier[name] = fresh
-        candidates = (
-            RankedPremise(
-                p,
-                int(
-                    query.features.result_head is not None
-                    and p.features.result_head == query.features.result_head
-                ),
-                symbols[p.declaration_id],
-                lexical[p.declaration_id],
-                abs(p.features.arity - query.features.arity),
-                dependency_scores[p.declaration_id],
-            )
-            for p in _checked(self.allowed.premises)
-        )
+        referenced = set(query.features.symbols) if query.query_symbol_lane else set()
+        direct: list[RankedPremise] = []
+
+        def candidates() -> Iterator[RankedPremise]:
+            for p in _checked(self.allowed.premises):
+                item = RankedPremise(
+                    p,
+                    int(
+                        query.features.result_head is not None
+                        and p.features.result_head == query.features.result_head
+                    ),
+                    symbols[p.declaration_id],
+                    lexical[p.declaration_id],
+                    abs(p.features.arity - query.features.arity),
+                    dependency_scores[p.declaration_id],
+                    int(p.declaration_id in referenced),
+                )
+                if item.query_symbol_match:
+                    direct.append(item)
+                yield item
+
         # Unknown/mismatched heads remain eligible: symbolic similarity is not
         # a unification test, and aliases may require further normalization.
-        items = tuple(heapq.nsmallest(limit, candidates, key=lambda p: p.sort_key))
+        items = tuple(heapq.nsmallest(limit, candidates(), key=lambda p: p.sort_key))
+        if query.query_symbol_lane and direct:
+            # Each lane's first k entries suffice for a k-element merged prefix.
+            # In particular, do not truncate the allowed set before finding
+            # referenced declarations whose baseline rank lies beyond k.
+            lanes = (
+                iter(items),
+                iter(
+                    heapq.nsmallest(limit, _checked(direct), key=lambda p: p.sort_key)
+                ),
+            )
+            selected: list[RankedPremise] = []
+            emitted: set[str] = set()
+            while len(selected) < min(limit, len(self.allowed.premises)):
+                checkpoint()
+                for lane in lanes:
+                    for item in _checked(lane):
+                        if item.premise.declaration_id not in emitted:
+                            emitted.add(item.premise.declaration_id)
+                            selected.append(item)
+                            break
+                    if len(selected) == limit:
+                        break
+            items = tuple(selected)
         return RetrievalResult(
             self.index_id,
             _query_identity(query, self.dependencies is not None),
@@ -746,6 +811,7 @@ class SymbolicPremiseIndex:
             items,
             self.dependencies.graph_id if self.dependencies is not None else None,
             dependency_visits,
+            query.query_symbol_lane,
         )
 
 

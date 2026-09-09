@@ -156,6 +156,17 @@ class _ScopedActions:
                 if self.ranking.dependency_graph_id is not None
                 else ()
             )
+            + (
+                (
+                    ("retrieval-ranking-policy", self.ranking.policy),
+                    (
+                        "retrieval-query-symbol-match",
+                        str(self.ranking.items[rank - 1].query_symbol_match),
+                    ),
+                )
+                if self.ranking.query_symbol_lane
+                else ()
+            )
             for rank, action in self.entries
             if admission_ranks[rank] <= limit
         }
@@ -443,6 +454,9 @@ class _ConstructorSearch:
         self._scoped_actions: dict[tuple[StateToken, int], _ScopedActions] = {}
         self._scoped_index_reuse_enabled = (
             os.environ.get("AGDAPROVER_SCOPED_INDEX_REUSE") == "1"
+        )
+        self._scoped_query_symbol_lane_enabled = (
+            os.environ.get("AGDAPROVER_SCOPED_QUERY_SYMBOL_LANE") == "1"
         )
         self._previous_scoped_index: tuple[StateToken, SymbolicPremiseIndex] | None = (
             None
@@ -1346,6 +1360,16 @@ class _ConstructorSearch:
         # the same caller action budget and smaller recursive branch slices.
         self.stats.premise_query_limit = self.action_budget
         started = time.monotonic()
+        # Capture policy in the controller, not in an ambient environment read
+        # during each query. Never mutate the gateway's source-bound snapshot.
+        if scoped.query.query_symbol_lane != self._scoped_query_symbol_lane_enabled:
+            scoped = replace(
+                scoped,
+                query=replace(
+                    scoped.query,
+                    query_symbol_lane=self._scoped_query_symbol_lane_enabled,
+                ),
+            )
         previous = self._previous_scoped_index
         if (
             self._scoped_index_reuse_enabled
@@ -1404,6 +1428,11 @@ class _ConstructorSearch:
                         if ranked.dependency_graph_id is not None
                         else {}
                     ),
+                    **(
+                        {"query_symbol_match": item.query_symbol_match}
+                        if ranked.query_symbol_lane
+                        else {}
+                    ),
                 }
                 for item in ranked.items
             ],
@@ -1417,6 +1446,9 @@ class _ConstructorSearch:
         if self._scoped_index_reuse_enabled:
             record["schema_version"] = "agdaprover.scoped-retrieval-decision.v4"
             record["index_build_work"] = dict(work)
+        if ranked.query_symbol_lane:
+            record["schema_version"] = "agdaprover.scoped-retrieval-decision.v5"
+            record["ranking_policy"] = ranked.policy
         self.stats.record_retrieval("decisions", record)
         # Exact state/interaction reuse only; no root/child type substitution
         # or similarity cache. Eviction cannot broaden scope.
