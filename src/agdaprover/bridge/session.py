@@ -33,7 +33,7 @@ from .contracts import (
     stable_hash,
 )
 from .diagnostics import diagnostics_from_response, first_error
-from .live_scope import decode_scope, exclusions_payload
+from .live_scope import decode_resource_limit, decode_scope, exclusions_payload
 from .operations import (
     ActionInput,
     CandidateDefinition,
@@ -393,7 +393,7 @@ class ConformingKernelSession:
             capabilities = replace(
                 result.capabilities,
                 adapter=result.capabilities.adapter
-                + ("+live-scope-v5:" if scoped_dependencies else "+live-scope-v4:")
+                + ("+live-scope-v7:" if scoped_dependencies else "+live-scope-v6:")
                 + self._scope_adapter_hash,
                 operations=tuple(
                     sorted(
@@ -1066,6 +1066,7 @@ class ConformingKernelSession:
                 interaction_id.value,
                 exclusions_payload(
                     excluded_names,
+                    output_bytes=budget.output_bytes,
                     include_dependencies=self._scope_dependencies_enabled,
                 ),
             ),
@@ -1077,16 +1078,34 @@ class ConformingKernelSession:
         diagnostic = first_error(diagnostics)
         if diagnostic is not None:
             raise BridgeError(BridgeFailure.AGDA_REJECTION, diagnostic)
-        rows = [e.value for e in response.events if e.kind == "AgdaProverScope"]
+        rows = [
+            e.value
+            for e in response.events
+            if e.kind in {"AgdaProverScope", "AgdaProverScopeResource"}
+        ]
         try:
             if len(rows) != 1:
                 raise ValueError("missing/duplicate live-scope response")
+            if rows[0]["kind"] == "AgdaProverScopeResource":
+                observed = decode_resource_limit(
+                    rows[0],
+                    goal_id=interaction_id.value,
+                    output_bytes=budget.output_bytes,
+                    include_dependencies=self._scope_dependencies_enabled,
+                )
+                raise self._error(
+                    BridgeFailure.RESOURCE_EXHAUSTED,
+                    "live-scope-output-budget",
+                    f"Live scope needs at least {observed} encoded bytes; "
+                    f"the caller reserved {budget.output_bytes}",
+                )
             return decode_scope(
                 rows[0],
                 state=state,
                 goal_id=interaction_id.value,
                 excluded_names=excluded_names,
                 adapter_sha256=self._scope_adapter_hash,
+                output_bytes=budget.output_bytes,
                 include_dependencies=self._scope_dependencies_enabled,
             )
         except ValueError as error:

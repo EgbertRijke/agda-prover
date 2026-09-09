@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import tempfile
 import unittest
@@ -17,12 +18,17 @@ from agdaprover.bridge.contracts import (
     StateToken,
 )
 from agdaprover.bridge.live_scope import (
+    DEPENDENCY_MARKER,
     DEPENDENCY_POLICY,
     DEPENDENCY_SCHEMA,
     FEATURE_POLICY,
+    MARKER,
+    RESOURCE_SCHEMA,
     SCHEMA,
     TYPE_VIEW_POLICY,
+    decode_resource_limit,
     decode_scope,
+    exclusions_payload,
 )
 from agdaprover.validation import validate_candidate
 
@@ -51,6 +57,7 @@ def wire(dependencies=False):
             {"id": "1:1", "aliases": ["Left.clash"], "type": "U", "features": features}
         ],
         "structure_nodes": 2,
+        "output_bytes": 8_388_608,
     }
     if dependencies:
         value.update(dependency_policy=DEPENDENCY_POLICY, dependency_nodes=0)
@@ -65,6 +72,7 @@ def read(value, dependencies=False):
         goal_id=0,
         excluded_names=frozenset(),
         adapter_sha256="d" * 64,
+        output_bytes=8_388_608,
         include_dependencies=dependencies,
     )
 
@@ -124,12 +132,89 @@ class NameableScopeContracts(unittest.TestCase):
             for version in (
                 "agdaprover.live-scope.v2",
                 "agdaprover.live-scope.v3",
+                "agdaprover.live-scope.v4",
+                "agdaprover.live-scope.v5",
                 "unknown",
                 None,
                 [],
             ):
                 with self.assertRaises(ValueError):
                     read({**value, "schema_version": version}, dependencies)
+
+    def test_output_reservation_is_required_and_exact(self):
+        for dependencies in (False, True):
+            value = wire(dependencies)
+            del value["output_bytes"]
+            with self.assertRaises(ValueError):
+                read(value, dependencies)
+            for limit in (True, 0, -1, 8_388_609, "8388608", None):
+                with self.assertRaises(ValueError):
+                    read({**value, "output_bytes": limit}, dependencies)
+            for limit in (True, 0, -1, 1.5, None):
+                with self.assertRaises(ValueError):
+                    exclusions_payload(frozenset(), output_bytes=limit)
+
+    def test_large_exclusions_are_valid_and_serialized_without_truncation(self):
+        excluded = frozenset([*(f"unused{i}" for i in range(5001)), "λ" * 65537])
+        for dependencies, marker in ((False, MARKER), (True, DEPENDENCY_MARKER)):
+            payload = exclusions_payload(
+                excluded,
+                output_bytes=32 * 1024 * 1024,
+                include_dependencies=dependencies,
+            )
+            self.assertTrue(payload.startswith(marker))
+            self.assertEqual(
+                json.loads(payload[len(marker) :]),
+                {
+                    "excluded_names": sorted(excluded),
+                    "output_bytes": 32 * 1024 * 1024,
+                },
+            )
+
+    def test_resource_refusal_is_closed_and_bound_to_request(self):
+        for dependencies in (False, True):
+            value = {
+                "kind": "AgdaProverScopeResource",
+                "schema_version": RESOURCE_SCHEMA,
+                "request_schema": DEPENDENCY_SCHEMA if dependencies else SCHEMA,
+                "interaction_id": 3,
+                "resource": "output-bytes",
+                "limit": 1000,
+                "observed_lower_bound": 1001,
+            }
+
+            def decode(data, dependencies=dependencies):
+                return decode_resource_limit(
+                    data,
+                    goal_id=3,
+                    output_bytes=1000,
+                    include_dependencies=dependencies,
+                )
+
+            self.assertEqual(decode(value), 1001)
+            for field in value:
+                changed = dict(value)
+                del changed[field]
+                with self.assertRaises(ValueError):
+                    decode(changed)
+            for field, wrong in (
+                ("kind", "AgdaProverScope"),
+                ("schema_version", "unknown"),
+                ("request_schema", "old"),
+                ("interaction_id", 4),
+                ("interaction_id", True),
+                ("resource", "nodes"),
+                ("limit", 1001),
+                ("limit", True),
+                ("observed_lower_bound", 1000),
+                ("observed_lower_bound", True),
+                ("declarations", []),
+            ):
+                with (
+                    self.subTest(field=field, wrong=wrong),
+                    self.assertRaises(ValueError),
+                ):
+                    decode({**value, field: wrong})
 
 
 SOURCE = """{-# OPTIONS --safe --without-K #-}

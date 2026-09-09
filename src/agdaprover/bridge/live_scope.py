@@ -16,33 +16,76 @@ from ..retrieval import (
 )
 from .contracts import StateToken, stable_hash
 
-SCHEMA = "agdaprover.live-scope.v4"
+SCHEMA = "agdaprover.live-scope.v6"
 FEATURE_POLICY = "agda-term-body-head-symbol-arity-v1"
 TYPE_VIEW_POLICY = "agda-normalise-contextual-type-v1"
-MARKER = "agdaprover:scoped-retrieval:v4:"
-DEPENDENCY_SCHEMA = "agdaprover.live-scope.v5"
+MARKER = "agdaprover:scoped-retrieval:v6:"
+DEPENDENCY_SCHEMA = "agdaprover.live-scope.v7"
 DEPENDENCY_POLICY = "permitted-clause-rhs-references-v1"
-DEPENDENCY_MARKER = "agdaprover:scoped-retrieval:v5:"
+DEPENDENCY_MARKER = "agdaprover:scoped-retrieval:v7:"
+RESOURCE_SCHEMA = "agdaprover.live-scope-resource.v1"
+
+
+def _validate_request(
+    excluded: frozenset[str], output_bytes: int, include_dependencies: bool
+) -> None:
+    if type(include_dependencies) is not bool:
+        raise ValueError("invalid dependency capability flag")
+    if type(output_bytes) is not int or output_bytes <= 0:
+        raise ValueError("invalid live-scope output reservation")
+    if type(excluded) is not frozenset:
+        raise ValueError("invalid live-scope exclusion set")
+    for name in excluded:
+        checkpoint()
+        if not isinstance(name, str) or not name or "\0" in name:
+            raise ValueError("invalid live-scope exclusion set")
 
 
 def exclusions_payload(
-    excluded: frozenset[str], *, include_dependencies: bool = False
+    excluded: frozenset[str], *, output_bytes: int, include_dependencies: bool = False
 ) -> str:
-    if type(include_dependencies) is not bool:
-        raise ValueError("invalid dependency capability flag")
-    if (
-        type(excluded) is not frozenset
-        or len(excluded) > 5000
-        or any(
-            not isinstance(n, str) or not n or len(n) > 65536 or "\0" in n
-            for n in excluded
-        )
-    ):
-        raise ValueError("invalid live-scope exclusion set")
-    payload = json.dumps(sorted(excluded), ensure_ascii=False)
-    if len(payload) > 65536:
-        raise ValueError("live-scope exclusion limit")
+    _validate_request(excluded, output_bytes, include_dependencies)
+    payload = json.dumps(
+        {"excluded_names": sorted(excluded), "output_bytes": output_bytes},
+        ensure_ascii=False,
+    )
+    checkpoint()
     return (DEPENDENCY_MARKER if include_dependencies else MARKER) + payload
+
+
+def decode_resource_limit(
+    value: object, *, goal_id: int, output_bytes: int, include_dependencies: bool
+) -> int:
+    """Validate a complete resource refusal, never a partial scope or rejection."""
+    _validate_request(frozenset(), output_bytes, include_dependencies)
+    if (
+        type(goal_id) is not int
+        or goal_id < 0
+        or not isinstance(value, dict)
+        or set(value)
+        != {
+            "kind",
+            "schema_version",
+            "request_schema",
+            "interaction_id",
+            "resource",
+            "limit",
+            "observed_lower_bound",
+        }
+        or value["kind"] != "AgdaProverScopeResource"
+        or value["schema_version"] != RESOURCE_SCHEMA
+        or value["request_schema"]
+        != (DEPENDENCY_SCHEMA if include_dependencies else SCHEMA)
+        or type(value["interaction_id"]) is not int
+        or value["interaction_id"] != goal_id
+        or value["resource"] != "output-bytes"
+        or type(value["limit"]) is not int
+        or value["limit"] != output_bytes
+        or type(value["observed_lower_bound"]) is not int
+        or value["observed_lower_bound"] <= output_bytes
+    ):
+        raise ValueError("invalid live-scope resource refusal")
+    return value["observed_lower_bound"]
 
 
 def _features(value: object) -> TypeFeatures:
@@ -85,12 +128,13 @@ def decode_scope(
     goal_id: int,
     excluded_names: frozenset[str],
     adapter_sha256: str,
+    output_bytes: int,
     include_dependencies: bool = False,
 ) -> ScopedPremises:
     AllowedPremiseSet(adapter_sha256, ())
     if type(goal_id) is not int or goal_id < 0:
         raise ValueError("invalid live-scope goal identity")
-    exclusions_payload(excluded_names, include_dependencies=include_dependencies)
+    _validate_request(excluded_names, output_bytes, include_dependencies)
     fields = {
         "kind",
         "schema_version",
@@ -102,6 +146,7 @@ def decode_scope(
         "target",
         "declarations",
         "structure_nodes",
+        "output_bytes",
     }
     if include_dependencies:
         fields |= {"dependency_policy", "dependency_nodes"}
@@ -116,6 +161,8 @@ def decode_scope(
         or type(value["interaction_id"]) is not int
         or value["interaction_id"] != goal_id
         or value["excluded_names"] != sorted(excluded_names)
+        or type(value["output_bytes"]) is not int
+        or value["output_bytes"] != output_bytes
     ):
         raise ValueError("live-scope request/response mismatch")
     if include_dependencies and (

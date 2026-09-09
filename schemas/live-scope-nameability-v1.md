@@ -6,17 +6,20 @@ The native adapter and Python gateway must be upgraded together.
 
 ## Requests and response versions
 
-`agdaprover:scoped-retrieval:v4:` followed by a JSON exclusion array requests
-`agdaprover.live-scope.v4`. With permitted dependency evidence enabled, the
-marker is `agdaprover:scoped-retrieval:v5:` and the response is
-`agdaprover.live-scope.v5`. Capability identities include the matching version
-and exact adapter hash. Older responses fail closed; they are not silently
-treated as having checked nameability.
+`agdaprover:scoped-retrieval:v6:` followed by the closed JSON object
+`{excluded_names, output_bytes}` requests `agdaprover.live-scope.v6`. With
+permitted dependency evidence enabled, the marker uses `v7` and the response
+is `agdaprover.live-scope.v7`. Exclusions are sorted unique nonempty strings
+without NUL; `output_bytes` is the caller's positive integer byte reservation.
+There is no independent exclusion-count or string-length ceiling.
+Capability identities include the matching version and exact adapter hash.
+Older responses fail closed; adapters and gateways must be rebuilt together.
 
 The closed response contains:
 
 - `kind: AgdaProverScope`, the schema version and requested `interaction_id`;
 - `excluded_names`, exactly the sorted requested exclusions;
+- `output_bytes`, exactly the requested reservation;
 - `feature_policy: agda-term-body-head-symbol-arity-v1` and
   `type_view_policy: agda-normalise-contextual-type-v1`;
 - `target: {result_head, symbols, arity}`;
@@ -64,10 +67,42 @@ It cannot assign metas, accept a proof or broaden module assumptions. Proposed
 applications need kernel elaboration; complete results need fresh
 policy-compliant validation.
 
-The current native request retains its existing defensive capacities (5,000
-scope aliases/declarations, 250,000 traversed term nodes, 65,536 characters per
-type view/exclusion payload, 16 MiB output). They are observer-capacity limits,
-not claims about theorem validity; their resource-policy migration is separate.
-The Python omission traversal polls the caller's shared resource envelope and
-adds no independent shape ceiling. This revision does not change ranking,
-progressive admission, model weights, training or the public-protocol path.
+Native scope cardinality, feature-node visits and rendered type lengths no
+longer have separate fixed ceilings. Feature extraction strictly consumes
+Agda's term-body traversal without retaining a second complete term list;
+normalization and pretty-printing remain Agda operations. This is not a claim
+that all kernel traversals are stack-safe or that observations have unlimited
+capacity. The process supervisor checks the caller's CPU, memory, wall and
+I/O envelope, including during silent normalization and rendering. The Python
+consumer polls the shared envelope and checks complete scope integrity.
+
+The complete JSON response must fit `output_bytes`. Before publication, the
+native observer checks both the accumulated encoded-row lower bound and the
+final UTF-8 byte count. Exceeding it emits only the closed resource refusal:
+
+```json
+{
+  "kind": "AgdaProverScopeResource",
+  "schema_version": "agdaprover.live-scope-resource.v1",
+  "request_schema": "agdaprover.live-scope.v6",
+  "interaction_id": 0,
+  "resource": "output-bytes",
+  "limit": 1024,
+  "observed_lower_bound": 1100
+}
+```
+
+The gateway requires exactly one scope or refusal, verifies the request schema,
+interaction and limit, and requires an integer lower bound strictly above the
+limit. A valid refusal becomes `resource-exhausted`, never Agda rejection,
+`invalid-task`, a truncated scope or negative proof evidence. Unknown versions,
+extra fields and mismatched refusals remain protocol errors. Native rollback
+also applies to refusals. The surrounding transport independently bounds the
+entire command and response, including framing and errors; a tiny allowance
+may be exhausted before a refusal can be returned. Retrying cannot reset the
+controller's aggregate ledger. No automatic retry or budget enlargement is
+introduced here.
+
+The reservation and wire version bind exact observation identity, while
+feature policies, ranking, progressive admission, weights and the default
+public-protocol path are unchanged. The capability remains explicitly opt-in.

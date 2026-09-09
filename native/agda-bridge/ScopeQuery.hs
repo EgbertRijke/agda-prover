@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -8,12 +9,14 @@ module ScopeQuery (emit, request) where
 
 import Control.Monad (foldM, unless, when)
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Except (runExceptT)
-import Data.Aeson (Value, eitherDecodeStrict', encode, object, (.=))
+import Control.Monad.Except (runExceptT, throwError)
+import Control.Monad.Trans (lift)
+import Data.Aeson (FromJSON (parseJSON), Value, eitherDecodeStrict', encode, object, withObject, (.:), (.=))
+import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy.Char8 qualified as BL
 import Data.Foldable (toList)
 import Data.Map.Strict qualified as Map
-import Data.List (stripPrefix)
+import Data.List (foldl', stripPrefix)
 import Data.Maybe (catMaybes)
 import Data.Set qualified as Set
 import Data.Text qualified as Text
@@ -34,10 +37,30 @@ import Agda.TypeChecking.Pretty (prettyTCM)
 import Agda.TypeChecking.Reduce (instantiateFull, normalise)
 
 request :: String -> Maybe (Bool, String)
-request payload = case stripPrefix "agdaprover:scoped-retrieval:v5:" payload of
+request payload = case stripPrefix "agdaprover:scoped-retrieval:v7:" payload of
   Just exclusions -> Just (True, exclusions)
   Nothing -> (\exclusions -> (False, exclusions)) <$>
-    stripPrefix "agdaprover:scoped-retrieval:v4:" payload
+    stripPrefix "agdaprover:scoped-retrieval:v6:" payload
+
+-- The caller owns the operational output reservation. Geometry is evidence,
+-- not a second implicit allowance. The transport separately enforces CPU,
+-- memory, wall time, input/output bytes and cancellation for the owned process.
+data ScopeRequest = ScopeRequest [String] Integer
+
+instance FromJSON ScopeRequest where
+  parseJSON = withObject "scope request" $ \o -> do
+    unless (Set.fromList (KeyMap.keys o) == Set.fromList ["excluded_names", "output_bytes"]) $
+      fail "invalid scope request fields"
+    excluded <- o .: "excluded_names"
+    limit <- o .: "output_bytes"
+    unless (limit > 0 && all (\n -> not (null n) && '\0' `notElem` n) excluded
+            && excluded == Set.toAscList (Set.fromList excluded)) $
+      fail "invalid scope request"
+    pure (ScopeRequest excluded limit)
+
+schema :: Bool -> String
+schema withDependencies = if withDependencies then "agdaprover.live-scope.v7"
+                         else "agdaprover.live-scope.v6"
 
 key :: QName -> String
 key q = case nameId (qnameName q) of
@@ -59,14 +82,18 @@ headArity = go 0 0 . unEl
 -- This deliberately small feature view traverses term bodies, not type sorts.
 -- Projections on a neutral/constructor spine are symbols too. Unknown metas
 -- remain unknown; nothing here reduces, solves, or assigns an obligation.
-features :: Type -> Either String (Value, Int)
-features ty = do
-  let terms = take 250001 (foldTerm (: []) ty)
-      count = length terms
-  when (count > 250000) $ Left "scope-feature-node-limit"
-  let (head', arity) = headArity ty
-      symbols = Set.toAscList $ Set.fromList $ concatMap termSymbols terms
-  pure (object ["result_head" .= head', "symbols" .= symbols, "arity" .= arity], count)
+data Summary = Summary !Integer !(Set.Set String)
+
+summarize :: [Term] -> Summary
+summarize = foldl' (\(Summary count symbols) t ->
+  Summary (count + 1) (foldl' (flip Set.insert) symbols (termSymbols t)))
+  (Summary 0 Set.empty)
+
+features :: Type -> (Value, Integer)
+features ty =
+  let Summary count symbols = summarize (foldTerm (: []) ty)
+      (head', arity) = headArity ty
+  in (object ["result_head" .= head', "symbols" .= Set.toAscList symbols, "arity" .= arity], count)
 
 termSymbols :: Term -> [String]
 termSymbols = \case
@@ -83,27 +110,23 @@ termSymbols = \case
 -- RHSs participate; never compiled clauses, display forms or referenced bodies.
 -- Raw metavariables (even assigned ones not instantiated in the RHS) make the
 -- evidence unavailable. Filtering endpoints happens before anything is emitted.
-dependencies :: Set.Set String -> Int -> QName -> TCM (Maybe [String], Int)
-dependencies allowed remaining q = do
+dependencies :: Set.Set String -> QName -> TCM (Maybe [String], Integer)
+dependencies allowed q = do
   def <- getConstInfo q
   case theDef def of
     FunctionDefn f | defAbstract def /= AbstractDef -> do
       let bodies = catMaybes (map clauseBody (_funClauses f))
-          terms = take (remaining + 1) (concatMap (foldTerm (: [])) bodies)
-          count = length terms
-      when (count > remaining) $ genericError "scope-total-node-limit"
+          Summary count symbols = summarize (concatMap (foldTerm (: [])) bodies)
       pure (if noMetas bodies then
               Just $ Set.toAscList $ Set.delete (key q) $
-                Set.intersection allowed (Set.fromList (concatMap termSymbols terms))
+                Set.intersection allowed symbols
             else Nothing, count)
     _ -> pure (Nothing, 0)
 
 emit :: Bool -> InteractionId -> String -> TCM ()
 emit withDependencies point payload = do
-  when (length payload > 65536) $ genericError "scope-exclusion-limit"
-  excluded <- either (const $ genericError "invalid-scope-exclusions") pure $
-    eitherDecodeStrict' (Text.encodeUtf8 (Text.pack payload)) :: TCM [String]
-  when (length excluded > 5000 || any null excluded) $ genericError "scope-exclusion-limit"
+  ScopeRequest excluded limit <- either (const $ genericError "invalid-scope-request") pure $
+    eitherDecodeStrict' (Text.encodeUtf8 (Text.pack payload))
   withInteractionId point $ dontAssignMetas $ do
     scope <- getScope
     let concrete = Set.toAscList (concreteNamesInScope scope)
@@ -111,7 +134,6 @@ emit withDependencies point payload = do
         aliases = filter nameable concrete
         unnameable = Set.toAscList $ Set.fromList
           [prettyShow a | a <- concrete, not (nameable a)]
-    when (length (take 5001 concrete) > 5000) $ genericError "scope-alias-limit"
     -- Unused ambiguous spellings do not invalidate an otherwise legal module.
     -- Resolve each qualified view independently and retain supported overloads.
     attempted <- mapM (\a -> (,) (prettyShow a) <$>
@@ -126,40 +148,40 @@ emit withDependencies point payload = do
         allowed = Map.fromListWith Set.union
           [(q, Set.singleton a) | (a, q) <- globals, Set.notMember q vetoed]
         allowedIds = Set.fromList (map key (Map.keys allowed))
-    when (Map.size allowed > 5000) $ genericError "scope-declaration-limit"
     -- Membership and exclusions are settled BEFORE querying types/features.
     meta <- lookupInteractionId point
     target <- instantiateFull =<< getMetaTypeInContext meta
-    (query, goalNodes) <- either genericError pure (features target)
-    (rows, nodes, dependencyNodes, _) <- foldM (\(previous, total, depTotal, bytesSoFar) (q, as) -> do
-      ty <- instantiateFull =<< typeOfConst q
-      (f, count) <- either genericError pure (features ty)
-      when (total + count > 250000) $ genericError "scope-total-node-limit"
+    let (query, goalNodes) = features target
+    outcome <- runExceptT $ do
+     (rows, nodes, dependencyNodes, _) <- foldM (\(previous, total, depTotal, bytesSoFar) (q, as) -> do
+      ty <- lift $ instantiateFull =<< typeOfConst q
+      let (f, count) = features ty
       -- The existing structural consumers expect the same Normalised view
       -- as Agda's module-contents command. Keep the ranking features on the
       -- original type: this view is not a new feature policy or typed IR.
       -- Count the reduced body before rendering it, still under the request
       -- deadline and local-state/dontAssignMetas isolation boundary.
-      normalized <- normalise ty
-      (_, viewCount) <- either genericError pure (features normalized)
-      when (total + count + viewCount > 250000) $ genericError "scope-total-node-limit"
-      view <- prettyShow <$> prettyTCM normalized
-      when (length view > 65536) $ genericError "scope-type-view-limit"
+      normalized <- lift $ normalise ty
+      let !viewCount = foldl' (\n _ -> n + 1) 0 (foldTerm (: []) normalized)
+      view <- lift $ prettyShow <$> prettyTCM normalized
       (refs, depCount) <- if withDependencies
-        then dependencies allowedIds (250000 - total - count - viewCount) q
+        then lift $ dependencies allowedIds q
         else pure (Nothing, 0)
       let row = object $ ["id" .= key q, "aliases" .= Set.toAscList as,
                           "type" .= view, "features" .= f] ++
                           ["rhs_dependencies" .= refs | withDependencies]
-          size = BL.length (encode row)
-      when (bytesSoFar + size > 16 * 1024 * 1024) $ genericError "scope-output-limit"
-      pure (row : previous, total + count + viewCount + depCount,
-            depTotal + depCount, bytesSoFar + size))
+          size = toInteger (BL.length (encode row))
+      -- A lower bound on final encoded bytes permits early refusal, but never
+      -- publishes the rows accumulated so far as a complete observation.
+      when (bytesSoFar + size > limit) $ throwError (bytesSoFar + size)
+      let !nextTotal = total + count + viewCount + depCount
+          !nextDeps = depTotal + depCount
+      pure (row : previous, nextTotal, nextDeps, bytesSoFar + size))
       ([], goalNodes, 0, 0) (Map.toAscList allowed)
-    let bytes = encode $ object $
+     let bytes = encode $ object $
           ["kind" .= ("AgdaProverScope" :: String),
-           "schema_version" .= (if withDependencies then "agdaprover.live-scope.v5"
-                                 else "agdaprover.live-scope.v4" :: String),
+           "schema_version" .= schema withDependencies,
+           "output_bytes" .= limit,
            "feature_policy" .= ("agda-term-body-head-symbol-arity-v1" :: String),
            "type_view_policy" .= ("agda-normalise-contextual-type-v1" :: String),
            "interaction_id" .= interactionId point,
@@ -170,8 +192,19 @@ emit withDependencies point payload = do
           (if withDependencies then
             ["dependency_policy" .= ("permitted-clause-rhs-references-v1" :: String),
              "dependency_nodes" .= dependencyNodes] else [])
-    unless (BL.length bytes <= 16 * 1024 * 1024) $ genericError "scope-output-limit"
-    liftIO $ BL.putStrLn bytes
+     let size = toInteger (BL.length bytes)
+     when (size > limit) $ throwError size
+     pure bytes
+    liftIO $ BL.putStrLn $ case outcome of
+      Right bytes -> bytes
+      Left observed -> encode $ object
+        ["kind" .= ("AgdaProverScopeResource" :: String),
+         "schema_version" .= ("agdaprover.live-scope-resource.v1" :: String),
+         "request_schema" .= schema withDependencies,
+         "interaction_id" .= interactionId point,
+         "resource" .= ("output-bytes" :: String),
+         "limit" .= limit,
+         "observed_lower_bound" .= observed]
  where
   names = \case
     DefinedName _ a _ -> [a]
