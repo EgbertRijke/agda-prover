@@ -59,3 +59,10 @@ pause, resume, stop, and accepting an individual completed goal.
 - `unsolved` or `resource-exhausted` does not mean the statement is false.
 - No conversion of prose into Agda, no assumption-free proof of statements that
   require extra axioms, and no guarantee of completing an arbitrary library.
+
+## License
+
+AgdaProver is free software under the GNU General Public License, version 3 or
+(at your option) any later version (`GPL-3.0-or-later`). It comes without any
+warranty. See [LICENSE](LICENSE), [authors and acknowledgments](AUTHORS.md), and
+[third-party notices](THIRD_PARTY_NOTICES.md).

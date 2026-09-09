@@ -1,6 +1,12 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
 
+-- SPDX-License-Identifier: GPL-3.0-or-later AND MIT
+-- Copyright (C) 2026 Egbert Rijke and contributors (AgdaProver modifications).
+-- Interaction loop and command reader adapted from Agda 2.8.0 (MIT).
+-- Copyright (c) 2005-2025 remains with the Agda authors.
+-- See ../../THIRD_PARTY_NOTICES.md and ../../licenses/Agda-MIT.txt.
+--
 -- A deliberately narrow Agda 2.8 interaction adapter for AgdaProver.
 --
 -- The ordinary interaction protocol uses the highlighting method `Direct`.

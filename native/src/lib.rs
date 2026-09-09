@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Egbert Rijke and contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Small proof-producing acceleration kernels for AgdaProver Stage 2.
 //!
 //! The ABI deliberately moves only finite numeric batches.  It never parses

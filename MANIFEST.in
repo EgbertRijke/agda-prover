@@ -5,4 +5,8 @@ recursive-include tests *.py
 recursive-include tests *.agda *.lagda.md
 recursive-include docs *.md
 recursive-include schemas *.md *.json
+include THIRD_PARTY_NOTICES.md
+include LICENSE AUTHORS.md
+include editor/vscode/LICENSE
+recursive-include licenses *.txt
 global-exclude *.pyc *.agdai *.elc

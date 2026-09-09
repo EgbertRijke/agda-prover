@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,8 @@ name = "agda-prover"
 version = "0.0.1"
 description = "Offline, kernel-checked Agda proof search and editor interfaces"
 readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE", "AUTHORS.md", "THIRD_PARTY_NOTICES.md", "licenses/*.txt"]
 requires-python = ">=3.11"
 dependencies = []
 
@@ -25,10 +27,11 @@ include = ["agdaprover*"]
 agdaprover = ["data/toolchains/*.json"]
 
 [tool.setuptools.data-files]
-"share/agda-prover" = ["README.md"]
+"share/agda-prover" = ["README.md", "LICENSE", "AUTHORS.md", "THIRD_PARTY_NOTICES.md"]
+"share/agda-prover/licenses" = ["licenses/Agda-MIT.txt"]
 "share/agda-prover/docs" = ["docs/installation.md", "docs/interactive.md"]
 "share/agda-prover/editor" = ["editor/agdaprover.el"]
-"share/agda-prover/editor/vscode" = ["editor/vscode/package.json", "editor/vscode/extension.js", "editor/vscode/core.js", "editor/vscode/README.md"]
+"share/agda-prover/editor/vscode" = ["editor/vscode/package.json", "editor/vscode/extension.js", "editor/vscode/core.js", "editor/vscode/README.md", "editor/vscode/LICENSE"]
 
 [tool.ruff]
 line-length = 88

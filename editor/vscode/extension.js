@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Egbert Rijke and contributors, including Emily Riehl
+// SPDX-License-Identifier: GPL-3.0-or-later
 'use strict';
 
 const crypto = require('crypto');

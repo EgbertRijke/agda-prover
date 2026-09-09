@@ -59,3 +59,11 @@ Run the dependency-free adapter tests with:
 npm --prefix editor/vscode run check
 npm --prefix editor/vscode test
 ```
+
+## License and credits
+
+Copyright (C) 2026 Egbert Rijke and contributors. This extension is licensed
+under GPL-3.0-or-later; see [LICENSE](LICENSE). It comes without any warranty.
+Emily Riehl contributed VS Code integration and development setup, including
+the Agda2 key-sequence handling retained in this extension. Contributors retain
+copyright in their contributions.

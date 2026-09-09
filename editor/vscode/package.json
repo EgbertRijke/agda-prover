@@ -4,6 +4,7 @@
   "description": "Local AgdaProver integration over the universal editor API",
   "version": "0.0.2",
   "publisher": "agdaprover",
+  "license": "GPL-3.0-or-later",
   "repository": {
     "type": "git",
     "url": "https://github.com/EgbertRijke/agda-prover.git"
