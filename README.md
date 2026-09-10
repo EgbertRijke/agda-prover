@@ -2,16 +2,13 @@
 
 AgdaProver fills holes in Agda code by searching for definitions and proofs.
 It helps with routine proof steps, case splits, and related goals that need to
-be solved together. Completed proofs are independently checked by Agda.
-Search can combine record fields, function applications and supplied proof laws,
-including dependent fields and inductive values stored in records.
+be solved together. Completed proofs are independently checked by Agda. It runs
+locally. Optional NNUE models guide proof search; no model is required to get
+started.
 
-It runs locally, without an online service or LLM. Optional NNUE models guide
-proof search; no model is required to get started.
+The AgdaProver project was initiated and is maintained by Egbert Rijke. The code-base is implemented by GPT-5.6 (early development) and GPT-6.
 
-The AgdaProver project is initiated and maintained by Egbert Rijke. The code-base is implemented by ChatGPT-5.6 (early development) and ChatGPT-6.
-
-## Install
+## Installation
 
 Requires Python 3.11+ and Agda 2.8.0.
 
@@ -26,17 +23,52 @@ For solving part of a file while later goals remain open, also install the
 [prefix parser](docs/installation.md). Ordinary `.agda` and Markdown-literate
 `.lagda.md` files are supported.
 
-## Editor extensions for AgdaProver
+## Setting up Editor Extensions for AgdaProver
 
-**Emacs:** add this checkout's `editor/` directory to `load-path`, require
-`agdaprover`, and enable `agdaprover-mode` alongside Agda mode. Open your file
-and load it with `C-c C-l` before running AgdaProver.
+**Emacs (27.1+):** first install AgdaProver as described under
+[Installation](#installation) and configure Agda's Emacs mode. Add the following to your
+Emacs initialization file, replacing `/absolute/path/to/agda-prover/` with
+the location of this checkout:
 
-**VS Code:** follow the [extension setup](editor/vscode/README.md) and trust
-the workspace. The adapter works alongside Agda language extensions and does
-not require a particular companion extension.
+```elisp
+(with-eval-after-load 'agda2-mode
+  (add-to-list 'load-path "/absolute/path/to/agda-prover/editor/")
+  (require 'agdaprover)
+  (setq agdaprover-python-command
+        "/absolute/path/to/agda-prover/.venv/bin/python")
+  (add-hook 'agda2-mode-hook #'agdaprover-mode))
+```
 
-Both integrations support `.agda` and Markdown-literate `.lagda.md` files.
+Restart Emacs, open an `.agda` or `.lagda.md` file in Agda mode, and load it
+with `C-c C-l`. The mode line should show `AgdaP`. For an already-open Agda
+buffer, enable the integration with `M-x agdaprover-mode`.
+
+**VS Code (1.90+):** first install AgdaProver as described under
+[Installation](#installation). To run the extension directly from this checkout:
+
+1. Open the AgdaProver repository root in VS Code and trust the workspace.
+2. Select **Run AgdaProver Extension** in the Run and Debug view and press
+   `F5`.
+3. In the new Extension Development Host window, open your Agda project,
+   trust its workspace, and open an `.agda` or `.lagda.md` file.
+4. Run **AgdaProver: Check Setup** from the Command Palette.
+
+This development setup requires no npm dependencies or build step. To install
+a packaged extension in your normal VS Code window instead, use
+**Extensions: Install from VSIX** and select an AgdaProver `.vsix` package.
+
+The extension automatically looks for an AgdaProver checkout, then falls back
+to the installed `agdaprover` command on `PATH`. If discovery fails, set
+`agdaprover.projectRoot` to the checkout's absolute path or
+`agdaprover.executable` to the installed backend executable. For the virtual
+environment installation above, that executable is
+`/absolute/path/to/agda-prover/.venv/bin/agdaprover`.
+
+The adapter works alongside Agda language extensions; no particular companion
+extension is required. See the [VS Code setup guide](editor/vscode/README.md)
+for further configuration.
+
+## Using AgdaProver
 
 | Function                                 | Emacs                                | VS Code                     | Behavior                                                                                                                  |
 | ---------------------------------------- | ------------------------------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
