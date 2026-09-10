@@ -8,6 +8,19 @@ const test = require('node:test');
 
 const core = require('../core');
 
+test('deep search delegates preset defaults and preserves explicit action limits', () => {
+  assert.deepEqual(core.searchRequestOptions({}), {});
+  assert.deepEqual(core.searchRequestOptions({searchProfile: 'deep', maxCandidates: null}),
+    {search_profile: 'deep'});
+  assert.deepEqual(core.searchRequestOptions({searchProfile: 'deep', maxCandidates: 17}),
+    {search_profile: 'deep', max_candidates: 17});
+  assert.throws(() => core.searchRequestOptions({searchProfile: 'unlimited'}), /Unknown/);
+  assert.throws(() => core.searchRequestOptions({searchProfile: null}), /Unknown/);
+  for (const invalid of [0, -1, true, '17', 1.5]) {
+    assert.throws(() => core.searchRequestOptions({maxCandidates: invalid}), /positive integer/);
+  }
+});
+
 test('explicit project settings preserve defaults and empty option lists', () => {
   assert.equal(core.buildProjectConfiguration({baseDirectory: '/workspace'}), undefined);
   const configured = core.buildProjectConfiguration({libraryFile: 'libraries', options: [], baseDirectory: '/workspace'});
@@ -174,6 +187,13 @@ test('manifest has no Agda-extension dependency and activates extension-neutrall
 test('keybindings support direct chords and Agda2 state without excluding companions', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json')));
   const bindings = manifest.contributes.keybindings;
+  assert.ok(bindings.some(binding =>
+    binding.command === 'agdaprover.proveDeep' && binding.key === 'ctrl+c ctrl+x ctrl+d'
+  ));
+  assert.ok(bindings.some(binding =>
+    binding.command === 'agdaprover.proveDeep' && binding.key === 'ctrl+d' &&
+    binding.when.includes("agda.keySequence == 'cc-x'")
+  ));
   assert.ok(bindings.some(binding =>
     binding.command === 'agdaprover.provePrefix' &&
     binding.key === 'ctrl+c ctrl+x ctrl+p'

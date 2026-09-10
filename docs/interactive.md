@@ -31,3 +31,36 @@ validation succeeds. The returned edit does not solve the remaining goals or
 modify your file automatically. Closing standard input stops an unfinished run.
 Ordinary search has no implicit wall-time deadline; explicit resource limits
 and finite search allowances still apply.
+
+## Deep search
+
+For larger files or harder goals:
+
+```sh
+agda-prover interactive MyFile.agda --deep
+agda-prover prove-prefix MyFile.agda --deep --timeout 360
+```
+
+`--deep` is shorthand for `--search-profile deep`. It changes the default
+whole-run action allowance from 500 to 8,000, giving joint search more room to
+reconsider earlier definitions. It uses the same solver, candidate generators, optional
+NNUE models and fresh validation. It is not a promise that every goal will solve.
+Depth is already unbounded by default; this is a larger effort allowance, not
+a different proof system. Memory and other resource defaults are unchanged.
+
+Explicit `--max-candidates`, `--max-verifier-calls`, `--timeout`, `--cpu-seconds`
+and other limits remain authoritative. For example, `--deep --max-candidates
+12000` requests 12,000 actions. There is no automatic time or memory multiplier
+based on file size. Interactive pause, status, principal variations and stop
+work unchanged; EOF still stops an unfinished run.
+
+In Emacs, use `C-c C-x C-d` (`agdaprover-prove-deep`). In VS Code, choose
+**AgdaProver: Deep Search Through Current Goal or All Goals**, also bound to
+`Ctrl+C Ctrl+X Ctrl+D`. Selection is unchanged: through the containing goal,
+or every open goal when outside one. Both editors retain their cancel command.
+
+To make deep search the usual preset, configure `agdaprover-search-profile` in
+Emacs or `agdaprover.searchProfile` in VS Code. Leave `agdaprover-max-candidates`
+at `nil`, or `agdaprover.maxCandidates` at `null`, to use preset defaults.
+Existing explicit values (including a previously configured 500) still override
+deep search; reset them if you want the preset's larger allowance.

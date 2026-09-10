@@ -12,6 +12,7 @@ const {
   buildProjectConfiguration,
   isSupportedAgdaPath,
   resolveProjectRoot,
+  searchRequestOptions,
   selectAgdaReloadCommand
 } = require('./core');
 
@@ -70,7 +71,8 @@ function configuration(context, document) {
     stepModel: settings.get('stepModel', '') || null,
     actionModel: settings.get('actionModel', '') || null,
     reloadCommand: settings.get('reloadCommand', 'auto'),
-    maxCandidates: settings.get('maxCandidates', 500),
+    searchProfile: settings.get('searchProfile', 'standard'),
+    maxCandidates: settings.get('maxCandidates', null),
     maxTermSize: settings.get('maxTermSize', 8),
     maxDepth: settings.get('maxDepth', null),
     timeoutSeconds: settings.get('timeoutSeconds', null),
@@ -234,7 +236,7 @@ function runEditorAPI(config, operation, document, goalPosition, token) {
     ranker: config.ranker,
     model: models.model,
     action_model: models.actionModel,
-    max_candidates: config.maxCandidates,
+    ...searchRequestOptions(config),
     max_term_size: config.maxTermSize,
     max_depth: config.maxDepth,
     timeout_seconds: config.timeoutSeconds
@@ -373,7 +375,7 @@ async function showActionableError(error) {
   }
 }
 
-async function execute(context, operation) {
+async function execute(context, operation, searchProfile) {
   await resetAgdaKeySequence();
   const editor = vscode.window.activeTextEditor;
   if (!vscode.workspace.isTrusted) {
@@ -394,12 +396,13 @@ async function execute(context, operation) {
   }
   try {
     const config = configuration(context, editor.document);
+    if (searchProfile) config.searchProfile = searchProfile;
     const position = editor.document.offsetAt(editor.selection.active) + 1;
     const result = await vscode.window.withProgress({
       location: vscode.ProgressLocation.Notification,
       title: operation === 'step'
         ? 'AgdaProver: choosing a step'
-        : 'AgdaProver: proving selected goals',
+        : `AgdaProver: ${config.searchProfile === 'deep' ? 'deep search for' : 'proving'} selected goals`,
       cancellable: true
     }, (_progress, token) => runEditorAPI(
       config,
@@ -476,6 +479,10 @@ function activate(context) {
     vscode.commands.registerCommand(
       'agdaprover.provePrefix',
       () => execute(context, 'prove-prefix')
+    ),
+    vscode.commands.registerCommand(
+      'agdaprover.proveDeep',
+      () => execute(context, 'prove-prefix', 'deep')
     ),
     vscode.commands.registerCommand('agdaprover.step', () => execute(context, 'step')),
     vscode.commands.registerCommand('agdaprover.checkSetup', () => checkSetup(context)),

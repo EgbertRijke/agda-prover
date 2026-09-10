@@ -216,6 +216,21 @@ function buildProjectConfiguration({executable = '', libraryFile = '', options =
   };
 }
 
+function searchRequestOptions(config) {
+  const profile = config.searchProfile === undefined ? 'standard' : config.searchProfile;
+  if (!['standard', 'deep'].includes(profile)) throw new Error('Unknown search profile');
+  // Keep ordinary requests compatible with older backends. Deep mode requires
+  // explicit support; never silently downgrade it to the standard allowance.
+  const options = profile === 'standard' ? {} : {search_profile: profile};
+  if (config.maxCandidates !== null && config.maxCandidates !== undefined) {
+    if (!Number.isSafeInteger(config.maxCandidates) || config.maxCandidates < 1) {
+      throw new Error('maxCandidates must be null or a positive integer');
+    }
+    options.max_candidates = config.maxCandidates;
+  }
+  return options;
+}
+
 module.exports = {
   KNOWN_AGDA_RELOAD_ADAPTERS,
   SUPPORTED_SUFFIXES,
@@ -224,5 +239,6 @@ module.exports = {
   isAgdaProverRoot,
   isSupportedAgdaPath,
   resolveProjectRoot,
+  searchRequestOptions,
   selectAgdaReloadCommand
 };

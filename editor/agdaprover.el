@@ -140,9 +140,16 @@ It must have the `or-decision-ranking' role.  In particular, a
   :type '(choice (const :tag "Use symbolic OR-decision ordering" nil) file)
   :group 'agdaprover)
 
-(defcustom agdaprover-max-candidates 500
-  "Maximum candidate-verification calls for one search operation."
-  :type 'integer
+(defcustom agdaprover-search-profile 'standard
+  "Search effort preset: `standard' (500 actions) or `deep' (8000 actions).
+Explicit limits override preset values.  Neither preset adds a time or depth cap."
+  :type '(choice (const standard) (const deep))
+  :group 'agdaprover)
+
+(defcustom agdaprover-max-candidates nil
+  "Whole-run action allowance, or nil to use the search profile's default.
+This counts search actions, not physical Agda calls."
+  :type '(choice (const :tag "Use search profile" nil) integer)
   :group 'agdaprover)
 
 (defcustom agdaprover-max-term-size 8
@@ -228,9 +235,12 @@ RANKER and MODEL-FILE select the candidate ordering implementation."
          "-m" "agdaprover" operation
          (expand-file-name source-file)
          "--goal-position" (number-to-string goal-position)
-         "--ranker" (symbol-name ranker)
-         "--max-candidates" (number-to-string agdaprover-max-candidates)
-         "--max-term-size" (number-to-string agdaprover-max-term-size))
+         "--ranker" (symbol-name ranker))
+   (unless (eq agdaprover-search-profile 'standard)
+     (list "--search-profile" (symbol-name agdaprover-search-profile)))
+   (when agdaprover-max-candidates
+     (list "--max-candidates" (number-to-string agdaprover-max-candidates)))
+   (list "--max-term-size" (number-to-string agdaprover-max-term-size))
    (when agdaprover-agda-executable
      (list "--agda" (alist-get 'executable (agdaprover--project-configuration))))
    (when agdaprover-library-file (list "--library-file" (expand-file-name agdaprover-library-file)))
@@ -302,7 +312,10 @@ editor client."
                                 (file-readable-p action-model-file)
                                 (expand-file-name action-model-file))
                            :null))
-      (max_candidates . ,agdaprover-max-candidates)
+      ,@(unless (eq agdaprover-search-profile 'standard)
+          `((search_profile . ,(symbol-name agdaprover-search-profile))))
+      ,@(when agdaprover-max-candidates
+          `((max_candidates . ,agdaprover-max-candidates)))
       (max_term_size . ,agdaprover-max-term-size)
       (max_depth . ,(or agdaprover-max-depth :null))
       (timeout_seconds . ,(or agdaprover-timeout :null))
@@ -894,9 +907,9 @@ the first goal as its stale-snapshot anchor while passing a later cutoff."
       (when (memq (process-status process) '(exit signal))
         (agdaprover--sentinel process "finished before initialization\n"))
       (if (eq operation 'prove-prefix)
-          (message "AgdaProver: jointly searching %s with %s ranking..."
+          (message "AgdaProver: jointly searching %s with %s ranking (%s effort)..."
                    (agdaprover--prefix-progress-target goal-position)
-                   ranker)
+                   ranker agdaprover-search-profile)
         (message "AgdaProver: %s goal %s with %s ranking..."
                  (if (eq operation 'step)
                      "choosing a step for"
@@ -916,6 +929,14 @@ the first goal as its stale-snapshot anchor while passing a later cutoff."
                (agdaprover--joint-prefix-selection)))
     (agdaprover--start-operation
      'prove-prefix agdaprover-ranker first-id cutoff-position)))
+
+;;;###autoload
+(defun agdaprover-prove-deep ()
+  "Jointly prove through point, or all goals, with the deep effort preset.
+Explicit `agdaprover-max-candidates' and other resource limits remain active."
+  (interactive)
+  (let ((agdaprover-search-profile 'deep))
+    (agdaprover-prove-goal)))
 
 ;;;###autoload
 (defun agdaprover-prove-goal-symbolic ()
@@ -994,6 +1015,7 @@ the first goal as its stale-snapshot anchor while passing a later cutoff."
 (defvar agdaprover-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-x C-p") #'agdaprover-prove-goal)
+    (define-key map (kbd "C-c C-x C-d") #'agdaprover-prove-deep)
     (define-key map (kbd "C-c C-x C-s") #'agdaprover-step-goal)
     (define-key map (kbd "C-c C-x C-n") #'agdaprover-reserved-n)
     (define-key map (kbd "C-c C-x C-v") #'agdaprover-apply-last-proof)
@@ -1005,6 +1027,7 @@ the first goal as its stale-snapshot anchor while passing a later cutoff."
   "Menu for AgdaProver commands."
   '("AgdaProver"
     ["Prove through current goal, or all goals" agdaprover-prove-goal t]
+    ["Deep search through current goal, or all goals" agdaprover-prove-deep t]
     ["Take one refinement step" agdaprover-step-goal t]
     ["Take one step with NNUE" agdaprover-step-goal-nnue t]
     ["Prove goal symbolically" agdaprover-prove-goal-symbolic t]

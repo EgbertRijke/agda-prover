@@ -18,6 +18,7 @@ from typing import Any, Literal
 from .project import agda_source_suffix
 from .project_configuration import ProjectConfiguration
 from .resource_budget import ResourceLimits
+from .search_profiles import search_profile
 
 EDITOR_REQUEST_SCHEMA = "agdaprover.editor.request.v1"
 EDITOR_RESPONSE_SCHEMA = "agdaprover.editor.response.v1"
@@ -40,6 +41,7 @@ _REQUEST_KEYS = frozenset(
         "timeout_seconds",
         "resources",
         "project_configuration",
+        "search_profile",
     }
 )
 
@@ -81,6 +83,9 @@ class EditorRequest:
         operation = value.get("operation")
         if operation not in {"inspect", "prove", "prove-prefix", "step"}:
             raise ValueError("unsupported editor operation")
+        profile = search_profile(value.get("search_profile", "standard"))
+        if operation == "inspect" and "search_profile" in value:
+            raise ValueError("search_profile is a search-only option")
         source_value = value.get("source_file")
         if not isinstance(source_value, str) or not source_value:
             raise ValueError("editor source_file must be nonempty text")
@@ -139,7 +144,7 @@ class EditorRequest:
             ranker=ranker,
             model=optional_path("model"),
             action_model=optional_path("action_model"),
-            max_candidates=positive_int("max_candidates", 500),
+            max_candidates=positive_int("max_candidates", profile.max_candidates),
             max_term_size=positive_int("max_term_size", 8),
             max_depth=max_depth,
             max_verifier_calls=max_verifier_calls,

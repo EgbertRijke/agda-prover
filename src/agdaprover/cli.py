@@ -22,6 +22,7 @@ from .interactive import launch_interactive_run, serve_interactive
 from .offline import offline_audit
 from .project_configuration import ProjectConfiguration
 from .resource_budget import ResourceLimits
+from .search_profiles import search_profile
 
 
 def add_project_options(parser: argparse.ArgumentParser) -> None:
@@ -83,7 +84,25 @@ def add_search_options(
             else "one-based position contained in the target open goal"
         ),
     )
-    parser.add_argument("--max-candidates", type=int, default=500)
+    profiles = parser.add_mutually_exclusive_group()
+    profiles.add_argument(
+        "--search-profile",
+        choices=("standard", "deep"),
+        default="standard",
+        help="effort preset: standard (500 actions) or deep (8000 actions)",
+    )
+    profiles.add_argument(
+        "--deep",
+        dest="search_profile",
+        action="store_const",
+        const="deep",
+        help="use the deep-search effort preset; explicit limits still take precedence",
+    )
+    parser.add_argument(
+        "--max-candidates",
+        type=int,
+        help="explicit whole-run action allowance, overriding the search profile",
+    )
     parser.add_argument(
         "--max-verifier-calls",
         type=int,
@@ -232,11 +251,14 @@ def task_from_arguments(
     ranker: Literal["symbolic", "nnue"],
     model: Path | None,
 ) -> TaskSpec:
+    profile = search_profile(getattr(arguments, "search_profile", "standard"))
     return TaskSpec(
         source_file=source,
         goal_id=arguments.goal,
         goal_position=arguments.goal_position,
-        max_candidates=arguments.max_candidates,
+        max_candidates=arguments.max_candidates
+        if arguments.max_candidates is not None
+        else profile.max_candidates,
         max_verifier_calls=getattr(arguments, "max_verifier_calls", None),
         max_term_size=arguments.max_term_size,
         resources=ResourceLimits(

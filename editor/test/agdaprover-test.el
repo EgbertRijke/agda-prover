@@ -53,6 +53,32 @@
      (member "--timeout"
              (agdaprover--command "/tmp/Tiny.agda" 4 'symbolic)))))
 
+(ert-deftest agdaprover-test-deep-profile-shares-editor-and-cli-contract ()
+  (let* ((agdaprover-search-profile 'deep)
+         (agdaprover-max-candidates nil)
+         (source (expand-file-name "examples/EckmannHilton.agda" agdaprover-test--root))
+         (command (agdaprover--prefix-command source 1 'symbolic))
+         (request (agdaprover--editor-request "test:deep" 'prove-prefix source 1 'symbolic nil)))
+    (should (equal (cadr (member "--search-profile" command)) "deep"))
+    (should-not (member "--max-candidates" command))
+    (should (equal (alist-get 'search_profile request) "deep"))
+    (should-not (assq 'max_candidates request))
+    (let ((agdaprover-max-candidates 17))
+      (should (= (alist-get 'max_candidates
+                           (agdaprover--editor-request "test:deep" 'prove-prefix source 1 'symbolic nil))
+                 17)))))
+
+(ert-deftest agdaprover-test-deep-command-keeps-normal-selection-and-restores-profile ()
+  (let ((agdaprover-search-profile 'standard)
+        observed)
+    (cl-letf (((symbol-function 'agdaprover-prove-goal)
+               (lambda () (setq observed agdaprover-search-profile))))
+      (agdaprover-prove-deep))
+    (should (eq observed 'deep))
+    (should (eq agdaprover-search-profile 'standard))
+    (should (eq (lookup-key agdaprover-mode-map (kbd "C-c C-x C-d"))
+                #'agdaprover-prove-deep))))
+
 (ert-deftest agdaprover-test-literate-markdown-uses-agda-mode ()
   (should (eq (assoc-default "Example.lagda.md" auto-mode-alist
                              #'string-match-p)

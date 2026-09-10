@@ -32,6 +32,7 @@
     "onLanguage:agda",
     "onLanguage:lagda-markdown",
     "onCommand:agdaprover.provePrefix",
+    "onCommand:agdaprover.proveDeep",
     "onCommand:agdaprover.step",
     "onCommand:agdaprover.checkSetup",
     "onCommand:agdaprover.cancel"
@@ -52,6 +53,10 @@
         "title": "AgdaProver: Take One Step"
       },
       {
+        "command": "agdaprover.proveDeep",
+        "title": "AgdaProver: Deep Search Through Current Goal or All Goals"
+      },
+      {
         "command": "agdaprover.checkSetup",
         "title": "AgdaProver: Check Setup"
       },
@@ -61,6 +66,12 @@
       }
     ],
     "keybindings": [
+      {
+        "command": "agdaprover.proveDeep",
+        "key": "ctrl+c ctrl+x ctrl+d",
+        "mac": "ctrl+c ctrl+x ctrl+d",
+        "when": "editorTextFocus && agdaprover.supportedDocument"
+      },
       {
         "command": "agdaprover.provePrefix",
         "key": "ctrl+c ctrl+x ctrl+p",
@@ -83,6 +94,12 @@
         "command": "agdaprover.provePrefix",
         "key": "ctrl+p",
         "mac": "ctrl+p",
+        "when": "editorTextFocus && agdaprover.supportedDocument && agda.keySequence == 'cc-x'"
+      },
+      {
+        "command": "agdaprover.proveDeep",
+        "key": "ctrl+d",
+        "mac": "ctrl+d",
         "when": "editorTextFocus && agdaprover.supportedDocument && agda.keySequence == 'cc-x'"
       },
       {
@@ -154,10 +171,17 @@
           "default": "",
           "description": "Optional OR-decision NNUE model used only by complete proof search."
         },
+        "agdaprover.searchProfile": {
+          "type": "string",
+          "enum": ["standard", "deep"],
+          "default": "standard",
+          "description": "Search effort: standard (500 actions) or deep (8000 actions). Explicit limits override the preset."
+        },
         "agdaprover.maxCandidates": {
-          "type": "integer",
-          "default": 500,
-          "minimum": 1
+          "type": ["integer", "null"],
+          "default": null,
+          "minimum": 1,
+          "description": "Whole-run action allowance. Null uses the search profile's default; an explicit value overrides it."
         },
         "agdaprover.maxTermSize": {
           "type": "integer",

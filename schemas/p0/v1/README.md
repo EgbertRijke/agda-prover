@@ -9,6 +9,18 @@ Optional OR-policy traces can carry
 [validated proof-choice credit](../../proof-choice-credit-v1.md), bound to the
 final result rather than to merely accepted speculative actions.
 
+Editor request v1 accepts an optional `search_profile`: `standard` (default)
+or `deep`. This is a search-only option, not valid for `inspect`. Omitted
+`max_candidates` resolves to 500 or 8,000 respectively; an explicitly supplied
+positive integer always overrides the preset. Other fields retain their existing
+meaning. The CLI exposes `--search-profile` and the `--deep` alias. Frontends
+resolve the preset into the ordinary TaskSpec budget before search, so task
+identity, worker forwarding and accounting use the effective numeric allowance.
+No additional trusted path or unbounded resource mode is introduced.
+Updated editors omit the profile field for standard searches, retaining
+compatibility with older backends. Deep requests require a backend recognizing
+the field; they must not silently fall back to the smaller allowance.
+
 Tasks and editor requests may supply an explicit
 [project checking configuration](../../project-configuration-v1.md). It carries
 the Agda executable, registered libraries and global checking options through
