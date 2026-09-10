@@ -38,15 +38,10 @@ from .contracts import (
     stable_hash,
 )
 from .operations import OpenProjectRequest, OpenProjectResult
-from .source_text import mask_agda_source
+from .source_text import QUALIFIED_MODULE_NAME, mask_agda_source, module_headers
 from .versions import adapter_for_version
 
-_MODULE = re.compile(
-    r"(?m)^\s*module\s+([A-Za-z_][\w'.]*(?:\.[A-Za-z_][\w']*)*)\s+where\b"
-)
-_IMPORT = re.compile(
-    r"(?m)^\s*(?:open\s+)?import\s+([A-Za-z_][\w'.]*(?:\.[A-Za-z_][\w']*)*)\b"
-)
+_IMPORT = re.compile(rf"(?m)^\s*(?:open\s+)?import\s+({QUALIFIED_MODULE_NAME})(?=\s|$)")
 _OPTIONS = re.compile(r"\{-#\s*OPTIONS\s+(.+?)#-\}", re.DOTALL)
 
 _TOOLCHAIN_MODULES = frozenset({"Agda.Primitive"})
@@ -368,14 +363,17 @@ def _nearest_project_manifest(source: Path) -> tuple[Path | None, Path]:
 
 
 def _module_name(source: Path, text: str) -> str:
-    match = _MODULE.search(mask_agda_source(text, source))
-    if match is None:
-        raise _error(
-            "module-declaration-missing",
-            f"source does not contain a top-level module declaration: {source}",
-            BridgeFailure.INVALID_REQUEST,
-        )
-    return match.group(1)
+    for match, _end in module_headers(mask_agda_source(text, source)):
+        # The outer declaration can itself be indented. Never skip an
+        # anonymous outer module and mistake its named child for the root.
+        if match.group("name") != "_":
+            return match.group("name")
+        break
+    raise _error(
+        "module-declaration-missing",
+        f"source does not contain a top-level module declaration: {source}",
+        BridgeFailure.INVALID_REQUEST,
+    )
 
 
 def _declared_source_root(source: Path, module_name: str) -> Path:

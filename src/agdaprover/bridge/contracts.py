@@ -20,13 +20,14 @@ from typing import Any, ClassVar, Literal
 
 from ..resource_budget import current_ledgers
 from ..source_files import is_agda_source_path
+from .source_text import QUALIFIED_MODULE_NAME
 
 BRIDGE_SCHEMA_VERSION = "agdaprover.bridge.v1"
 DIAGNOSTIC_SCHEMA_VERSION = "agdaprover.bridge-diagnostic.v1"
 MAX_IDENTIFIER_BYTES = 512
 MAX_DIAGNOSTIC_BYTES = 16_384
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-_MODULE_NAME = re.compile(r"[A-Za-z_][\w']*(?:\.[A-Za-z_][\w']*)*")
+_MODULE_NAME = re.compile(QUALIFIED_MODULE_NAME)
 
 
 def stable_hash(value: object) -> str:

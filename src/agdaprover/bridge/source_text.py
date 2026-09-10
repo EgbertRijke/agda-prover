@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 from ..source_files import agda_source_suffix
@@ -10,6 +11,57 @@ from ..source_files import agda_source_suffix
 _MARKDOWN_AGDA_BEGIN = re.compile(r"^.*[ \t]*```(?:agda)?[ \t]*(?:\r?\n)?$")
 _MARKDOWN_OTHER_BEGIN = re.compile(r"^[ \t]*```[A-Za-z0-9-]+[ \t]*(?:\r?\n)?$")
 _MARKDOWN_END = re.compile(r"^[ \t]*```[ \t]*(?:\r?\n)?$")
+
+# One observational spelling/header boundary for project resolution and scope
+# provenance. Parameters are not part of the module's qualified source name.
+MODULE_NAME_COMPONENT = r"[^\W\d][\w'′₀-₉⁰-⁹-]*"
+QUALIFIED_MODULE_NAME = rf"{MODULE_NAME_COMPONENT}(?:\.{MODULE_NAME_COMPONENT})*"
+_MODULE_START = re.compile(
+    rf"(?m)^(?P<indent>[ \t]*)module\s+"
+    rf"(?P<name>_|{QUALIFIED_MODULE_NAME})(?=[\s({{⦃]|$)"
+)
+
+
+def module_headers(
+    masked: str, *, header_limit: int | None = None
+) -> Iterator[tuple[re.Match[str], int]]:
+    """Yield balanced declaration headers, not module applications/aliases.
+
+    The caller supplies position-preserving masked Agda. This is a lexical
+    routing hint, not a replacement for Agda parsing or checking the telescope.
+    An optional limit preserves the existing scope-view capacity contract.
+    """
+    for match in _MODULE_START.finditer(masked):
+        boundary, kind = _module_header_boundary(masked, match.end(), header_limit)
+        if kind == "where":
+            yield match, boundary
+
+
+def _module_header_boundary(
+    masked: str, start: int, limit: int | None
+) -> tuple[int, str]:
+    stack: list[str] = []
+    pairs = {"(": ")", "{": "}", "[": "]", "⦃": "⦄"}
+    closing = frozenset(pairs.values())
+    index = start
+    while index < len(masked) and (limit is None or index - start <= limit):
+        character = masked[index]
+        if character in pairs:
+            stack.append(pairs[character])
+        elif character in closing:
+            if not stack or stack.pop() != character:
+                return index, "malformed"
+        elif not stack and character == "=":
+            return index + 1, "alias"
+        elif not stack and masked.startswith("where", index):
+            before = masked[index - 1] if index else " "
+            after = masked[index + 5] if index + 5 < len(masked) else " "
+            if not (
+                before.isalnum() or before in "_'" or after.isalnum() or after in "_'"
+            ):
+                return index + 5, "where"
+        index += 1
+    return min(index, len(masked)), "missing"
 
 
 def _bleach(text: str) -> str:
@@ -141,7 +193,10 @@ def mask_agda_source(source: str, source_file: str | Path) -> str:
 
 
 __all__ = [
+    "MODULE_NAME_COMPONENT",
+    "QUALIFIED_MODULE_NAME",
     "mask_agda_source",
     "mask_comments_and_strings",
     "mask_literate_markdown",
+    "module_headers",
 ]

@@ -17,7 +17,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from .bridge.source_text import mask_agda_source, mask_comments_and_strings
+from .bridge.source_text import MODULE_NAME_COMPONENT as _NAME_COMPONENT
+from .bridge.source_text import QUALIFIED_MODULE_NAME as _QUALIFIED_NAME
+from .bridge.source_text import (
+    mask_agda_source,
+    mask_comments_and_strings,
+    module_headers,
+)
 from .type_syntax import parse_named_binder, split_adjacent_binders
 
 MODULE_SCOPE_SCHEMA_VERSION = "agdaprover.module-scope.v1"
@@ -26,12 +32,6 @@ MAX_MODULE_PARAMETERS = 4096
 MAX_MODULE_DIRECTIVES = 4096
 MAX_MODULE_HEADER_BYTES = 1 << 20
 
-_NAME_COMPONENT = r"[^\W\d][\w'′₀-₉⁰-⁹-]*"
-_QUALIFIED_NAME = rf"{_NAME_COMPONENT}(?:\.{_NAME_COMPONENT})*"
-_MODULE_START = re.compile(
-    rf"(?m)^(?P<indent>[ \t]*)module[ \t]+"
-    rf"(?P<name>_|{_QUALIFIED_NAME})(?=[ \t({{⦃]|$)"
-)
 _OPEN_LINE = re.compile(r"(?m)^(?P<indent>[ \t]*)open[ \t]+(?P<body>[^\n]+)$")
 _ALIAS_LINE = re.compile(
     r"(?m)^(?P<indent>[ \t]*)(?P<open>open[ \t]+)?module[ \t]+"
@@ -55,6 +55,12 @@ def _stable_hash(value: object) -> str:
 
 @dataclass(frozen=True)
 class ModuleParameter:
+    """Source telescope hint; an empty type means no annotation was written.
+
+    Inferred parameter types come from the kernel context, not this surface
+    view. Preserve omitted annotations separately from a written ``_``.
+    """
+
     names: tuple[str, ...]
     type_text: str
     hiding: Literal["explicit", "implicit", "instance"]
@@ -448,11 +454,9 @@ def attach_module_scope(
 
 def _module_frames(source: str, masked: str) -> tuple[ModuleFrame, ...]:
     raw: list[tuple[re.Match[str], int, int, str]] = []
-    for match in _MODULE_START.finditer(masked):
-        boundary, boundary_kind = _module_header_boundary(masked, match.end())
-        if boundary_kind != "where":
-            continue
-        header_end = boundary
+    for match, header_end in module_headers(
+        masked, header_limit=MAX_MODULE_HEADER_BYTES
+    ):
         raw.append((match, header_end, len(match.group("indent")), match.group("name")))
         if len(raw) > MAX_MODULE_FRAMES:
             raise ValueError("module source exceeds the frame limit")
@@ -460,7 +464,7 @@ def _module_frames(source: str, masked: str) -> tuple[ModuleFrame, ...]:
         return ()
     frames: list[ModuleFrame] = []
     for index, (match, header_end, indentation, raw_name) in enumerate(raw):
-        is_root = index == 0 and indentation == 0 and raw_name != "_"
+        is_root = index == 0 and raw_name != "_"
         end = len(source) if is_root else _layout_end(masked, header_end, indentation)
         telescope = source[match.end() : header_end - len("where")]
         parameters = _module_parameters(telescope)
@@ -491,31 +495,6 @@ def _module_frames(source: str, masked: str) -> tuple[ModuleFrame, ...]:
     return tuple(frames)
 
 
-def _module_header_boundary(masked: str, start: int) -> tuple[int, str]:
-    stack: list[str] = []
-    pairs = {"(": ")", "{": "}", "[": "]", "⦃": "⦄"}
-    closing = frozenset(pairs.values())
-    index = start
-    while index < len(masked) and index - start <= MAX_MODULE_HEADER_BYTES:
-        character = masked[index]
-        if character in pairs:
-            stack.append(pairs[character])
-        elif character in closing:
-            if not stack or stack.pop() != character:
-                return index, "malformed"
-        elif not stack and character == "=":
-            return index + 1, "alias"
-        elif not stack and masked.startswith("where", index):
-            before = masked[index - 1] if index else " "
-            after = masked[index + 5] if index + 5 < len(masked) else " "
-            if not (
-                before.isalnum() or before in "_'" or after.isalnum() or after in "_'"
-            ):
-                return index + 5, "where"
-        index += 1
-    return min(index, len(masked)), "missing"
-
-
 def _layout_end(masked: str, header_end: int, indentation: int) -> int:
     line_end = masked.find("\n", header_end)
     cursor = len(masked) if line_end < 0 else line_end + 1
@@ -533,24 +512,45 @@ def _layout_end(masked: str, header_end: int, indentation: int) -> int:
 
 
 def _module_parameters(telescope: str) -> tuple[ModuleParameter, ...]:
-    groups = split_adjacent_binders(telescope)
+    masked = mask_comments_and_strings(telescope)
+    groups = split_adjacent_binders(masked)
     if groups is None:
-        if telescope.strip():
+        if masked.strip():
             raise ValueError("unsupported module telescope surface syntax")
         return ()
     parameters: list[ModuleParameter] = []
+    cursor = 0
     for group in groups:
-        parsed = parse_named_binder(group)
-        if parsed is None:
-            raise ValueError("module telescope contains an unnamed parameter")
-        parameters.append(
-            ModuleParameter(
-                parsed.names, parsed.domain, parsed.visibility, group.strip()
-            )
-        )
+        start = masked.index(group, cursor)
+        cursor = start + len(group)
+        parameters.append(_module_parameter(group, telescope[start:cursor]))
         if len(parameters) > MAX_MODULE_PARAMETERS:
             raise ValueError("module telescope exceeds the parameter limit")
     return tuple(parameters)
+
+
+def _module_parameter(group: str, rendered: str) -> ModuleParameter:
+    parsed = parse_named_binder(group)
+    if parsed is not None:
+        return ModuleParameter(parsed.names, parsed.domain, parsed.visibility, rendered)
+    # Agda can infer annotations such as the level in ``{a} (A : Set a)``.
+    # Do not invent a type or change the shared displayed-type parser: that
+    # parser's consumers require typed binders, whereas this is source metadata.
+    delimiters: tuple[
+        tuple[str, str, Literal["explicit", "implicit", "instance"]], ...
+    ] = (
+        ("{{", "}}", "instance"),
+        ("⦃", "⦄", "instance"),
+        ("{", "}", "implicit"),
+        ("(", ")", "explicit"),
+    )
+    for opening, closing, hiding in delimiters:
+        if group.startswith(opening) and group.endswith(closing):
+            names = tuple(group[len(opening) : -len(closing)].split())
+            if names and all(re.fullmatch(_NAME_COMPONENT, name) for name in names):
+                return ModuleParameter(names, "", hiding, rendered)
+            break
+    raise ValueError("unsupported module parameter surface syntax")
 
 
 def _module_directives(source: str, masked: str) -> tuple[ModuleDirective, ...]:

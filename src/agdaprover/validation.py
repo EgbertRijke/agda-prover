@@ -524,7 +524,14 @@ def _validate_preexisting_holes(
 def write_project_overlay(
     source_file: Path, candidate: str, overlay_root: Path
 ) -> tuple[Path, tuple[tuple[Path, Path], ...]]:
-    return write_source_overlay(source_file, candidate, overlay_root)
+    try:
+        return write_source_overlay(source_file, candidate, overlay_root)
+    except BridgeError as error:
+        if error.failure == BridgeFailure.INVALID_REQUEST:
+            # The P0 application translates load errors into an input result;
+            # a Stage 1 routing error must not escape as a Python traceback.
+            raise AgdaLoadError(error.diagnostic.message) from error
+        raise
 
 
 __all__ = [
