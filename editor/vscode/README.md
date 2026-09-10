@@ -11,7 +11,7 @@ after applying a verified edit.
 ## Setup and first proof
 
 Install Python 3.11+ and Agda 2.8.0, then follow the product
-[installation instructions](../../README.md#install). Open the product checkout
+[installation instructions](../../README.md#installation). Open the product checkout
 in VS Code, trust the workspace, and press F5 using the committed **Run AgdaProver
 Extension** launch profile. The extension host opens with this adapter enabled;
 it does not disable any companion Agda extension. No npm dependencies or build
@@ -25,6 +25,8 @@ If the backend cannot be found, check that the installed `agdaprover` command is
 on VS Code's PATH or set `agdaprover.projectRoot` to the product checkout. A
 development workspace containing its `agda-prover/` submodule is also recognized.
 For prefix-parser requirements, see the product installation instructions.
+All editor settings are listed in the
+[configuration guide](../../docs/editor-configuration.md).
 
 The standard bindings are `Ctrl+C Ctrl+X Ctrl+P` (prove),
 `Ctrl+C Ctrl+X Ctrl+S` (step), and `Ctrl+C Ctrl+X Ctrl+K` (cancel). They work as

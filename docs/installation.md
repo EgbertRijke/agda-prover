@@ -39,12 +39,9 @@ with the existing search order.
 
 ## Emacs checkout configuration
 
-```elisp
-(add-to-list 'load-path "/path/to/agda-prover/editor")
-(require 'agdaprover)
-(setq agdaprover-project-root "/path/to/agda-prover")
-(add-hook 'agda2-mode-hook #'agdaprover-mode)
-```
+Use the [README setup](../README.md#setting-up-your-editor) to load the mode
+with the checkout's Python environment. See the
+[editor configuration guide](editor-configuration.md) for all settings.
 
 The existing `agdaprover` command alias and Python module remain supported.
 `agda-prover doctor --offline-audit` reports runtime configuration and checks
