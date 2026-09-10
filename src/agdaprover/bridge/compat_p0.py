@@ -412,6 +412,21 @@ class AgdaSession:
             if (
                 not checked.accepted
                 and kind == "refine"
+                and not expression
+                and checked.rejection_code == "agda-not-in-scope"
+            ):
+                literal = self._session.search_record_introduction(
+                    state, InteractionId(goal_id), self._budget
+                )
+                if literal is not None:
+                    checked = self._session.try_search_action(
+                        state,
+                        ActionInput(kind, InteractionId(goal_id), literal, commit=True),
+                        self._budget,
+                    )
+            if (
+                not checked.accepted
+                and kind == "refine"
                 and expression
                 and checked.rejection_code == "agda-interaction-cannot-refine"
             ):

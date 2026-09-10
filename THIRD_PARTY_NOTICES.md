@@ -15,6 +15,12 @@ original copyright and license text is preserved in
 [Agda 2.8.0 release](https://github.com/agda/agda/blob/v2.8.0/LICENSE).
 AgdaProver modifies the interaction loop to support transactional commands.
 
+The record-literal renderer in `native/agda-bridge/RecordIntro.hs` is adapted
+from `introRec` in Agda's
+[BasicOps.hs](https://github.com/agda/agda/blob/v2.8.0/src/full/Agda/Interaction/BasicOps.hs).
+It observes the focused goal without assigning metas and retains explicit
+obligations for hidden and instance fields.
+
 The native bridge and source parser also link against separately installed Agda
 and Haskell dependencies. Distributors of compiled helpers must include the
 notices and satisfy the licenses of the dependencies actually included in their

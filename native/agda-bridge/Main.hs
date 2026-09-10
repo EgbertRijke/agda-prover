@@ -77,6 +77,7 @@ import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Monad.Benchmark qualified as Bench
 import Agda.Utils.FileName (absolute)
 import ScopeQuery qualified
+import RecordIntro qualified
 
 main :: IO ()
 main = do
@@ -158,6 +159,14 @@ repl callback prompt setup = do
 runTransactionalInteraction :: IOTCM -> CommandM ()
 runTransactionalInteraction command =
   case command Nothing of
+    IOTCM current _ _ (Cmd_show_module_contents _ point _ payload)
+      | Just query <- RecordIntro.request payload ->
+        handleCommand_ $ localStateCommandM $ do
+          path <- liftIO $ absolute current
+          loaded <- gets theCurrentFile
+          unless (Just path == (currentFilePath <$> loaded)) $
+            lift $ genericError "record-introduction-current-file-mismatch"
+          lift $ RecordIntro.emit point query
     IOTCM current _ _ (Cmd_show_module_contents _ point _ payload)
       | Just (withDependencies, withQueryViews, exclusions) <- ScopeQuery.request payload ->
         handleCommand_ $ localStateCommandM $ do

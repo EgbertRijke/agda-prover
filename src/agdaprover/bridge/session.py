@@ -65,6 +65,9 @@ from .proof_state import (
     ProofState,
     TermView,
 )
+from .record_introduction import KIND as RECORD_INTRODUCTION_KIND
+from .record_introduction import decode as decode_record_introduction
+from .record_introduction import request_payload as record_introduction_payload
 from .resources import CancellationToken, ProcessUsage, temporary_storage
 from .transport import AgdaJsonTransport
 from .validator import validate_patch as run_fresh_validation
@@ -195,6 +198,7 @@ class ConformingKernelSession:
         self._scope_type_heads_enabled = False
         self._scope_type_family_enabled = False
         self._scope_adapter_hash: str | None = None
+        self._record_introduction_enabled = False
 
     def __enter__(self) -> ConformingKernelSession:
         return self
@@ -371,6 +375,31 @@ class ConformingKernelSession:
         self._project = project
         self._budget = budget
         bridge_executable = _transactional_bridge_executable(project.toolchain.version)
+        self._record_introduction_enabled = (
+            os.environ.get("AGDAPROVER_STRUCTURAL_RECORD_INTRO") == "1"
+        )
+        if self._record_introduction_enabled:
+            if bridge_executable is None:
+                raise self._error(
+                    BridgeFailure.UNSUPPORTED_CAPABILITY,
+                    "record-introduction-adapter-required",
+                    "Structural record introduction requires the built Agda 2.8 adapter",
+                )
+            capabilities = replace(
+                result.capabilities,
+                adapter=result.capabilities.adapter
+                + "+record-introduction-v1:"
+                + executable_sha256(str(bridge_executable), deadline=budget.deadline),
+                operations=tuple(
+                    sorted((*result.capabilities.operations, "record-introduction"))
+                ),
+                limitations=(
+                    *result.capabilities.limitations,
+                    "structural record introduction is opt-in and qualified only for Agda 2.8.0",
+                ),
+            )
+            self._project = replace(project, capabilities=capabilities)
+            result = replace(result, capabilities=capabilities)
         self._live_scope_enabled = live_scope
         self._scope_dependencies_enabled = scoped_dependencies
         self._scope_query_views_enabled = query_views
@@ -415,7 +444,7 @@ class ConformingKernelSession:
                     "live scoped retrieval is opt-in and qualified only for Agda 2.8.0",
                 ),
             )
-            self._project = replace(project, capabilities=capabilities)
+            self._project = replace(self.project, capabilities=capabilities)
             result = replace(result, capabilities=capabilities)
         self._transport = AgdaJsonTransport(
             bridge_executable or project.toolchain.executable,
@@ -1133,6 +1162,63 @@ class ConformingKernelSession:
                 "invalid-live-scope-response",
                 str(error),
             ) from error
+
+    def search_record_introduction(
+        self,
+        state: StateToken,
+        interaction_id: InteractionId,
+        budget: BridgeBudget,
+    ) -> str | None:
+        """Propose a literal from the actual goal type, not its rendered name.
+
+        The query never changes the parent or grants acceptance. It is used
+        only as a fallback for unnameable named constructors; ordinary refine
+        and fresh validation still establish all obligations and correctness.
+        """
+        if not self._record_introduction_enabled:
+            return None
+        record = self._activate(state, budget)
+        if all(g.interaction_id != interaction_id for g in record.state.goals):
+            raise self._error(
+                BridgeFailure.INVALID_REQUEST,
+                "record-goal-not-open",
+                "Record introduction requires an open interaction",
+            )
+        adapter = adapter_for_version(self.project.toolchain.version)
+        _command, response = self.transport.command(
+            self._source_for(state.module_id),
+            adapter.module_contents(
+                interaction_id.value,
+                record_introduction_payload(budget.output_bytes),
+            ),
+            transactional=True,
+        )
+        diagnostic = first_error(
+            diagnostics_from_response(response, project_root=self.project.project_root)
+        )
+        if diagnostic is not None:
+            raise BridgeError(BridgeFailure.AGDA_REJECTION, diagnostic)
+        rows = [e.value for e in response.events if e.kind == RECORD_INTRODUCTION_KIND]
+        try:
+            if len(rows) != 1:
+                raise ValueError("missing/duplicate record-introduction response")
+            proposal = decode_record_introduction(
+                rows[0], goal_id=interaction_id.value, output_bytes=budget.output_bytes
+            )
+        except ValueError as error:
+            raise self._error(
+                BridgeFailure.PROTOCOL_FAILURE,
+                "invalid-record-introduction-response",
+                str(error),
+            ) from error
+        if proposal.required_bytes is not None:
+            raise self._error(
+                BridgeFailure.RESOURCE_EXHAUSTED,
+                "record-introduction-output-budget",
+                f"Record introduction needs {proposal.required_bytes} encoded bytes; "
+                f"the caller reserved {budget.output_bytes}",
+            )
+        return proposal.expression
 
     def search_constructor_candidates(
         self,
