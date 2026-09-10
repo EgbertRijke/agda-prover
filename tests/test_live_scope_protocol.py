@@ -256,6 +256,88 @@ NATIVE = (
     "explicit native live-scope test required",
 )
 class NativeNameableScopeContracts(unittest.TestCase):
+    def test_generated_import_paths_do_not_grant_source_scope(self):
+        payload = """{-# OPTIONS --safe --without-K #-}
+module Payload (X : Set) where
+identity : X → X
+identity x = x
+hidden : X → X
+hidden x = x
+_◇_ : X → X → X
+x ◇ y = x
+#marker : X → X
+#marker x = x
+"""
+        for directive, expected, proof in (
+            (
+                "open import Payload Flag using (identity; _◇_; #marker)",
+                {"identity", "_◇_", "#marker"},
+                "identity",
+            ),
+            (
+                "import Payload Flag as Active using (identity; _◇_; #marker)",
+                {"Active.identity", "Active._◇_", "Active.#marker"},
+                "Active.identity",
+            ),
+        ):
+            source = f"""{{-# OPTIONS --safe --without-K #-}}
+module ScopeNames where
+data Flag : Set where
+  off on : Flag
+{directive}
+goal : Flag → Flag
+goal = {{!!}}
+"""
+            for dependencies in (False, True):
+                with (
+                    self.subTest(directive=directive, dependencies=dependencies),
+                    tempfile.TemporaryDirectory() as directory,
+                    patch.dict(
+                        os.environ,
+                        {
+                            "AGDAPROVER_AGDA_BRIDGE": str(NATIVE),
+                            "AGDAPROVER_DISABLE_AGDA_BRIDGE": "0",
+                            "AGDAPROVER_SCOPED_RETRIEVAL": "1",
+                            "AGDAPROVER_SCOPED_DEPENDENCIES": str(int(dependencies)),
+                        },
+                    ),
+                ):
+                    root = Path(directory)
+                    path = root / "ScopeNames.agda"
+                    path.write_text(source)
+                    (root / "Payload.agda").write_text(payload)
+                    with AgdaSession(timeout_seconds=10) as session:
+                        (goal,) = session.load_module(path)
+                        state = session.current_state()
+                        scope = session.scoped_retrieval(
+                            state,
+                            goal_id=goal.goal_id,
+                            excluded_names=frozenset(("goal",)),
+                        )
+                        self.assertIsNotNone(scope)
+                        aliases = {a for p in scope.allowed.premises for a in p.aliases}
+                        self.assertTrue(expected <= aliases, aliases)
+                        self.assertFalse(
+                            any(a.startswith(".#") for a in aliases), aliases
+                        )
+                        self.assertFalse(
+                            any(a.endswith("hidden") for a in aliases), aliases
+                        )
+                        self.assertIsNotNone(
+                            session.infer_type(
+                                state, goal_id=goal.goal_id, expression=proof
+                            )
+                        )
+                        self.assertEqual(session.current_state(), state)
+                    checked, trust = validate_candidate(
+                        path, goal, proof, timeout_seconds=10
+                    )
+                    self.assertTrue(checked["checked"], checked)
+                    self.assertTrue(checked["fresh_process"])
+                    self.assertEqual(trust["admitted_axioms_and_primitives"], [])
+                    self.assertEqual(path.read_text(), source)
+                    self.assertEqual((root / "Payload.agda").read_text(), payload)
+
     def test_legal_names_overloads_and_fresh_validation_survive_omissions(self):
         for dependencies in (False, True):
             with (

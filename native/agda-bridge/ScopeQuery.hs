@@ -25,7 +25,6 @@ import Data.Text.Encoding qualified as Text
 import Agda.Syntax.Abstract.Name
 import Agda.Syntax.Common
 import Agda.Syntax.Common.Pretty (prettyShow)
-import Agda.Syntax.Concrete.Name qualified as C
 import Agda.Syntax.Internal hiding (arity)
 import Agda.Syntax.Internal.Generic (foldTerm)
 import Agda.Syntax.Internal.MetaVars (noMetas)
@@ -37,6 +36,7 @@ import Agda.TypeChecking.Conversion (equalType, tryConversion)
 import Agda.TypeChecking.Pretty (prettyTCM)
 import Agda.TypeChecking.Reduce (instantiateFull, normalise)
 import QueryReduction qualified as Query
+import ScopeNames (nameable)
 
 data QueryMode = Raw | Normalized | TypeFamilies deriving (Eq)
 
@@ -145,7 +145,6 @@ emit withDependencies mode point payload = do
   withInteractionId point $ dontAssignMetas $ do
     scope <- getScope
     let concrete = Set.toAscList (concreteNamesInScope scope)
-        nameable = all (not . C.isNoName) . C.qnameParts
         aliases = filter nameable concrete
         unnameable = Set.toAscList $ Set.fromList
           [prettyShow a | a <- concrete, not (nameable a)]

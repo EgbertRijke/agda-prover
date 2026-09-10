@@ -39,9 +39,18 @@ concrete evidence. No excluded endpoint or intermediary can occur.
 
 The native observer enters the requested interaction-meta closure. It uses
 Agda's concrete-name structure to withhold aliases containing an anonymous
-`IsNoName` component before resolution. Anonymous declarations' distinct native
-IDs do not make `_` a usable spelling. Ordinary mixfix names and independently
-exposed named members of anonymous modules remain eligible.
+`IsNoName` component or a `NotInScope` component before resolution. The shared
+native `ScopeNames.nameable` predicate checks every qualifier. Anonymous
+declarations' distinct native IDs do not make `_` a usable spelling, and
+parser-generated import paths may resolve as concrete objects without being
+usable source expressions. Ordinary mixfix names and independently exposed
+named members of anonymous or applied modules remain eligible.
+
+The generated-import correction preserves this wire shape and feature policies;
+it repairs native membership, not the scoring algorithm. Rebuild the adapter:
+its exact binary hash binds the corrected observation and prevents cross-build
+cache reuse. Historical observations from an older producer remain historical
+evidence, not certification of this additional native check.
 
 Agda's non-throwing name resolver classifies unresolved ambiguous spellings.
 They are omitted without discarding independently resolved qualified aliases.
