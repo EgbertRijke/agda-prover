@@ -13,7 +13,6 @@ from pathlib import Path
 
 from ..policy import inspect_patch
 from ..resource_budget import charge_io
-from ..source_files import agda_source_suffix
 from ..verifier_budget import charge_verifier_request
 from .contracts import (
     BridgeBudget,
@@ -31,6 +30,7 @@ from .operations import (
     TrustReport,
     ValidatePatchResult,
 )
+from .overlay import library_arguments, materialize_project
 from .project import ResolvedProject
 from .resources import (
     CancellationToken,
@@ -68,77 +68,6 @@ def _validation_error(failure: BridgeFailure, code: str, message: str) -> Bridge
             retryable=failure == BridgeFailure.TIMEOUT,
         ),
     )
-
-
-def _materialize(
-    project: ResolvedProject,
-    candidate: str,
-    patch: SourcePatch,
-    overlay: Path,
-    budget: BridgeBudget,
-    cancellation: CancellationToken,
-) -> tuple[Path, tuple[tuple[str, str], ...], int]:
-    artifacts: list[tuple[str, str]] = []
-    total_bytes = 0
-    for index, source in enumerate(project.sources, 1):
-        cancellation.raise_if_cancelled()
-        if time.monotonic() >= budget.deadline:
-            raise _validation_error(
-                BridgeFailure.TIMEOUT,
-                "validator-materialization-timeout",
-                "validation deadline exhausted while copying sources",
-            )
-        if index > budget.artifact_count:
-            raise _validation_error(
-                BridgeFailure.RESOURCE_EXHAUSTED,
-                "validator-artifact-count-exhausted",
-                "validation artifact-count budget exhausted",
-            )
-        suffix = agda_source_suffix(source.path)
-        if suffix is None:
-            raise _validation_error(
-                BridgeFailure.INTERNAL_INVARIANT,
-                "validator-source-kind-invalid",
-                "resolved project contains a non-Agda source",
-            )
-        relative = Path(*source.module.name.split("."))
-        destination = overlay / Path(str(relative) + suffix)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        text = (
-            candidate if source.module == patch.module_id else source.path.read_text()
-        )
-        encoded = text.encode()
-        if source.module != patch.module_id:
-            charge_io(len(encoded))
-        total_bytes += len(encoded)
-        if total_bytes > budget.temporary_bytes:
-            raise _validation_error(
-                BridgeFailure.RESOURCE_EXHAUSTED,
-                "validator-storage-exhausted",
-                "validation temporary-storage budget exhausted",
-            )
-        try:
-            destination.write_bytes(encoded)
-            charge_io(len(encoded))
-        except OSError as error:
-            raise _validation_error(
-                BridgeFailure.RESOURCE_EXHAUSTED,
-                "validator-overlay-write-failed",
-                f"could not materialize validation overlay: {error}",
-            ) from error
-        digest = hashlib.sha256(encoded).hexdigest()
-        artifacts.append((destination.relative_to(overlay).as_posix(), digest))
-    root_suffix = agda_source_suffix(project.source_for(patch.module_id))
-    if root_suffix is None:
-        raise _validation_error(
-            BridgeFailure.INTERNAL_INVARIANT,
-            "validator-root-source-kind-invalid",
-            "patch module resolves to a non-Agda source",
-        )
-    candidate_path = overlay / Path(
-        str(Path(*patch.module_id.name.split("."))) + root_suffix
-    )
-    return candidate_path, tuple(sorted(artifacts)), total_bytes
 
 
 def _run_checker(
@@ -323,19 +252,26 @@ def validate_patch(
         temporary_storage(Path(temporary)) as storage,
     ):
         overlay = Path(temporary)
-        candidate_path, artifacts, temporary_bytes = _materialize(
-            project, policy.candidate, patch, overlay, budget, token
+        materialized = materialize_project(
+            project,
+            overlay,
+            budget,
+            token,
+            replacement=(patch.module_id, policy.candidate),
         )
+        candidate_path = materialized.source_for(patch.module_id)
+        artifacts = materialized.artifacts
+        temporary_bytes = materialized.total_bytes
         storage.sample(force=True)
         relative_candidate = candidate_path.relative_to(overlay).as_posix()
-        options = tuple(project.options)
+        options = project.command_options
         command_parts = [
             str(project.toolchain.executable),
-            "--no-libraries",
+            *library_arguments(materialized.library_file),
             "--ignore-interfaces",
-            "-i",
-            ".",
         ]
+        for include in materialized.include_roots:
+            command_parts.extend(("-i", str(include.relative_to(overlay)) or "."))
         if profile.require_safe and "--safe" not in options:
             command_parts.append("--safe")
         command_parts.extend(options)
@@ -363,7 +299,9 @@ def validate_patch(
             admitted_assumptions=policy.admitted_assumptions,
             policy_profile=profile.name,
             sandbox_profile=(
-                "isolated-overlay-sanitized-home-no-libraries-process-group-v1"
+                "isolated-overlay-pinned-libraries-process-group-v1"
+                if materialized.library_file is not None
+                else "isolated-overlay-sanitized-home-no-libraries-process-group-v1"
             ),
             command=("agda", *command[1:]),
             exit_status=run.exit_status,

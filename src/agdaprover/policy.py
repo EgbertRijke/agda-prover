@@ -23,6 +23,19 @@ _DANGEROUS_DECLARATION = re.compile(r"(?m)^\s*(?:postulate|primitive)\b", re.IGN
 _ASSUMPTION_DECLARATION = re.compile(
     r"(?m)^\s*(?P<kind>postulate|primitive)\s+(?P<name>\S+)", re.IGNORECASE
 )
+_INCOMPLETE_CHECKING_OPTIONS = frozenset(
+    {
+        "--allow-unsolved-metas",
+        "--allow-incomplete-matches",
+    }
+)
+_CHECKING_WAIVERS = _INCOMPLETE_CHECKING_OPTIONS | frozenset(
+    {
+        "--no-termination-check",
+        "--no-positivity-check",
+        "--no-universe-check",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -184,11 +197,16 @@ def inspect_patch(
             )
     candidate_sha = hashlib.sha256(candidate.encode()).hexdigest()
     assumptions: list[str] = []
+    checking_options = set(project.command_options)
+    for library in project.libraries:
+        checking_options.update(library.flags)
     for source in project.sources:
         text = (
             candidate if source.module == patch.module_id else source.path.read_text()
         )
         code = mask_agda_source(text, source.path)
+        for pragma in _OPTIONS.findall(code):
+            checking_options.update(re.findall(r"--[a-zA-Z][a-zA-Z-]*", pragma))
         assumptions.extend(
             f"{source.module.name}:{match.group('kind').lower()}:{match.group('name')}"
             for match in _ASSUMPTION_DECLARATION.finditer(code)
@@ -196,6 +214,19 @@ def inspect_patch(
         assumptions.extend(
             f"{source.module.name}:pragma:{' '.join(match.group(0).split())}"
             for match in _DANGEROUS_PRAGMA.finditer(code)
+        )
+    forbidden_options = checking_options & (
+        _INCOMPLETE_CHECKING_OPTIONS
+        if profile.allow_unsafe_options
+        else _CHECKING_WAIVERS
+    )
+    if forbidden_options:
+        diagnostics.append(
+            _diagnostic(
+                "unsafe-checking-option",
+                "fresh validation cannot certify this checking profile: "
+                + ", ".join(sorted(forbidden_options)),
+            )
         )
     return PolicyReport(
         not diagnostics,

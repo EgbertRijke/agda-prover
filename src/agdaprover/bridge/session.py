@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
-import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
@@ -13,7 +12,6 @@ from typing import Protocol
 from ..artifacts import executable_sha256
 from ..resource_budget import StorageLease, charge_io
 from ..retrieval import ScopedPremises
-from ..source_files import agda_source_suffix
 from .contracts import (
     BridgeBudget,
     BridgeCost,
@@ -55,6 +53,7 @@ from .operations import (
     TryActionResult,
     ValidatePatchResult,
 )
+from .overlay import materialize_project
 from .project import ResolvedProject, resolve_project
 from .proof_state import (
     Binder,
@@ -187,6 +186,7 @@ class ConformingKernelSession:
         self._overlay_storage: StorageLease | None = None
         self._runtime_storage: StorageLease | None = None
         self._runtime_sources: dict[ModuleId, Path] = {}
+        self._library_file: Path | None = None
         self._overlay_bytes = 0
         self._overlays_removed = 0
         self._live_scope_enabled = False
@@ -249,47 +249,8 @@ class ConformingKernelSession:
         temporary = tempfile.TemporaryDirectory(prefix="agdaprover-stage1-session-")
         root = Path(temporary.name)
         storage = temporary_storage(root)
-        runtime_sources: dict[ModuleId, Path] = {}
-        total_bytes = 0
         try:
-            for index, source in enumerate(project.sources, 1):
-                self._cancellation.raise_if_cancelled()
-                if index > budget.artifact_count:
-                    raise self._error(
-                        BridgeFailure.RESOURCE_EXHAUSTED,
-                        "session-overlay-artifact-exhausted",
-                        "session overlay exceeded its artifact-count budget",
-                    )
-                if budget.deadline <= time.monotonic():
-                    raise self._error(
-                        BridgeFailure.TIMEOUT,
-                        "session-overlay-timeout",
-                        "session overlay materialization exceeded its deadline",
-                    )
-                suffix = agda_source_suffix(source.path)
-                if suffix is None:
-                    raise self._error(
-                        BridgeFailure.INTERNAL_INVARIANT,
-                        "session-overlay-source-kind-invalid",
-                        "resolved project contains a non-Agda source",
-                    )
-                destination = root / Path(
-                    str(Path(*source.module.name.split("."))) + suffix
-                )
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                content = source.path.read_bytes()
-                charge_io(len(content))
-                total_bytes += len(content)
-                if total_bytes > budget.temporary_bytes:
-                    raise self._error(
-                        BridgeFailure.RESOURCE_EXHAUSTED,
-                        "session-overlay-storage-exhausted",
-                        "session overlay exceeded its temporary-storage budget",
-                    )
-                destination.write_bytes(content)
-                charge_io(len(content))
-                storage.sample()
-                runtime_sources[source.module] = destination
+            overlay = materialize_project(project, root, budget, self._cancellation)
             storage.sample(force=True)
         except OSError as error:
             try:
@@ -311,8 +272,9 @@ class ConformingKernelSession:
         old_storage = self._overlay_storage
         self._overlay = temporary
         self._overlay_storage = storage
-        self._runtime_sources = runtime_sources
-        self._overlay_bytes = total_bytes
+        self._runtime_sources = dict(overlay.sources)
+        self._overlay_bytes = overlay.total_bytes
+        self._library_file = overlay.library_file
         if old_overlay is not None:
             try:
                 if old_storage is not None:
@@ -327,6 +289,7 @@ class ConformingKernelSession:
         self._overlay = None
         self._overlay_storage = None
         self._runtime_sources.clear()
+        self._library_file = None
         self._overlay_bytes = 0
         try:
             if storage is not None:
@@ -461,6 +424,7 @@ class ConformingKernelSession:
             cancellation=self._cancellation,
             runtime_root=Path(runtime.name),
             transactional_commands=bridge_executable is not None,
+            library_file=self._library_file,
         )
         self._transport.cost.add(temporary_bytes=self._overlay_bytes)
         return replace(result, cost=BridgeCost(temporary_bytes=self._overlay_bytes))
@@ -490,6 +454,7 @@ class ConformingKernelSession:
         # immutable snapshot.  A copy/read/budget failure therefore leaves the
         # old project epoch usable by the compatibility caller.
         self._prepare_overlay(project, budget)
+        self.transport.set_library_file(self._library_file)
         self._project = project
         self._states.clear()
         self._active_state = None
@@ -543,7 +508,7 @@ class ConformingKernelSession:
         command_id, response = self.transport.command(
             source_file,
             adapter_for_version(self.project.toolchain.version).load(
-                source_file, self.project.options
+                source_file, self.project.command_options
             ),
         )
         diagnostics = diagnostics_from_response(
@@ -1387,6 +1352,22 @@ class ConformingKernelSession:
             )
 
     def _ensure_sources_unchanged(self) -> None:
+        for path, expected in self.project.configuration_files:
+            try:
+                unchanged = path.is_file()
+                if unchanged:
+                    content = path.read_bytes()
+                    charge_io(len(content))
+                    unchanged = hashlib.sha256(content).hexdigest() == expected
+            except OSError:
+                unchanged = False
+            if not unchanged:
+                self._active_state = None
+                raise self._error(
+                    BridgeFailure.STALE_TOKEN,
+                    "project-configuration-changed",
+                    "library registrations or manifest changed after OpenProject",
+                )
         for source in self.project.sources:
             try:
                 unchanged = source.path.is_file()
@@ -1444,7 +1425,7 @@ class ConformingKernelSession:
         source = self._source_for(token.module_id)
         adapter = adapter_for_version(self.project.toolchain.version)
         _, loaded = self.transport.command(
-            source, adapter.load(source, self.project.options)
+            source, adapter.load(source, self.project.command_options)
         )
         diagnostics = diagnostics_from_response(
             loaded, project_root=self.project.project_root

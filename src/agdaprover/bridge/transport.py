@@ -22,6 +22,7 @@ from .contracts import (
     CommandId,
     DiagnosticPhase,
 )
+from .overlay import library_arguments
 from .resources import (
     CancellationToken,
     OwnedProcess,
@@ -42,6 +43,7 @@ class AgdaJsonTransport:
         cancellation: CancellationToken | None = None,
         runtime_root: Path | None = None,
         transactional_commands: bool = False,
+        library_file: Path | None = None,
     ) -> None:
         self.executable = executable
         self.adapter = adapter
@@ -49,6 +51,7 @@ class AgdaJsonTransport:
         self.cancellation = cancellation or CancellationToken()
         self.runtime_root = runtime_root
         self.transactional_commands = transactional_commands
+        self.library_file = library_file
         self.supervisor = ResourceSupervisor(budget, self.cancellation)
         self.cost = BridgeCost()
         self.process_generation = 0
@@ -93,7 +96,7 @@ class AgdaJsonTransport:
             process = OwnedProcess(
                 [
                     str(self.executable),
-                    "--no-libraries",
+                    *library_arguments(self.library_file),
                     "--ignore-interfaces",
                     "--interaction-json",
                 ],
@@ -346,6 +349,12 @@ class AgdaJsonTransport:
         if process.stdout is not None:
             process.stdout.close()
         self.supervisor.release(process)
+
+    def set_library_file(self, library_file: Path | None) -> None:
+        """A relocated environment must not reuse startup library state."""
+        if self.library_file != library_file:
+            self._poison()
+            self.library_file = library_file
 
     def close(self) -> BridgeResourceSummary:
         started = time.monotonic()

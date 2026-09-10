@@ -24,8 +24,11 @@ import Control.Monad.Trans (lift)
 import Data.Aeson (encode)
 import Data.ByteString.Lazy.Char8 qualified as BS
 import Data.Char (isSpace)
-import Data.List (sort)
+import Data.List (sort, stripPrefix)
+import Data.Maybe (isJust, mapMaybe)
+import System.Directory (doesFileExist)
 import System.Environment (getArgs, getProgName)
+import System.FilePath (isAbsolute)
 import System.IO
   ( BufferMode (LineBuffering)
   , hFlush
@@ -58,6 +61,8 @@ import Agda.Interaction.Options
   , optExitOnError
   , optIgnoreInterfaces
   , optJSONInteraction
+  , optDefaultLibs
+  , optOverrideLibrariesFile
   , optUseLibs
   )
 import Agda.Interaction.Response (InteractionOutputCallback)
@@ -75,17 +80,29 @@ import ScopeQuery qualified
 
 main :: IO ()
 main = do
-  -- This private adapter has one startup profile, matching its transport.
+  -- Two narrow startup profiles: no libraries, or an explicit isolated
+  -- registry with default-library discovery disabled. Never consult ambient
+  -- registrations. Library flags must be active before parseSource runs.
   -- Agda 2.8's runAgdaWithOptions expects *parsed* options: passing defaults
   -- silently discards argv, including isolation and interaction settings.
   arguments <- getArgs
-  unless (sort arguments == sort ["--no-libraries", "--ignore-interfaces", "--interaction-json"]) $ do
-    hPutStrLn stderr "AgdaProver bridge requires --no-libraries --ignore-interfaces --interaction-json; other startup options are unsupported"
+  let fixed = ["--ignore-interfaces", "--interaction-json"]
+      registries = mapMaybe (stripPrefix "--library-file=") arguments
+      registry = case registries of
+        [path] | isAbsolute path -> Just path
+        _ -> Nothing
+      expected = maybe ("--no-libraries" : fixed)
+        (\path -> ["--no-default-libraries", "--library-file=" ++ path] ++ fixed) registry
+  exists <- maybe (pure True) doesFileExist registry
+  unless (sort arguments == sort expected && exists) $ do
+    hPutStrLn stderr "AgdaProver bridge requires an isolated interaction profile; other startup options are unsupported"
     exitAgdaWith CommandError
   Agda.Setup.setup False
   program <- getProgName
   let options = defaultOptions
-        { optUseLibs = False
+        { optUseLibs = isJust registry
+        , optDefaultLibs = False
+        , optOverrideLibrariesFile = registry
         , optIgnoreInterfaces = True
         , optJSONInteraction = True
         }

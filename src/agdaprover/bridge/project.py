@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..artifacts import executable_sha256, file_sha256
@@ -82,6 +82,7 @@ class LibraryIdentity:
     manifest_sha256: str
     include_roots: tuple[Path, ...]
     dependencies: tuple[str, ...]
+    flags: tuple[str, ...]
 
     def semantic_dict(self, project_root: Path) -> dict[str, object]:
         return {
@@ -91,6 +92,7 @@ class LibraryIdentity:
                 _portable_path(root, project_root) for root in self.include_roots
             ],
             "dependencies": list(self.dependencies),
+            "flags": list(self.flags),
         }
 
 
@@ -101,14 +103,18 @@ class SourceIdentity:
     sha256: str
     imports: tuple[str, ...]
     interface_sha256: str | None
+    library_name: str | None = None
 
     def semantic_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "module": self.module.to_dict(),
             "sha256": self.sha256,
             "imports": list(self.imports),
             "interface_sha256": self.interface_sha256,
         }
+        if self.library_name is not None:
+            result["library_name"] = self.library_name
+        return result
 
 
 @dataclass(frozen=True)
@@ -125,6 +131,8 @@ class ResolvedProject:
     source_revision: SourceRevision
     capabilities: CapabilityManifest
     handle: ProjectHandle
+    command_options: tuple[str, ...]
+    configuration_files: tuple[tuple[Path, str], ...]
 
     def source_for(self, module: ModuleId) -> Path:
         matches = [source.path for source in self.sources if source.module == module]
@@ -235,14 +243,18 @@ def _tool_environment() -> dict[str, str]:
 def _parse_agda_lib(path: Path, budget: BridgeBudget) -> LibraryIdentity:
     fields: dict[str, list[str]] = {}
     current: str | None = None
-    for raw_line in path.read_text().splitlines():
+    content = path.read_bytes()
+    charge_io(len(content))
+    for raw_line in content.decode().splitlines():
         if time.monotonic() >= budget.deadline:
             raise _error(
                 "project-resolution-timeout",
                 "project resolution exceeded its wall-time budget",
                 BridgeFailure.TIMEOUT,
             )
-        line = raw_line.split("--", 1)[0].rstrip()
+        # Agda comments require whitespace after the two dashes. In
+        # particular, --without-K and similar flags are not comments.
+        line = re.split(r"--(?=\s)", raw_line, maxsplit=1)[0].rstrip()
         if not line:
             continue
         if not line[0].isspace() and ":" in line:
@@ -258,7 +270,27 @@ def _parse_agda_lib(path: Path, budget: BridgeBudget) -> LibraryIdentity:
                 BridgeFailure.INVALID_REQUEST,
             )
     name = " ".join(fields.get("name", [])).strip() or path.stem
-    includes = " ".join(fields.get("include", [])).split() or ["."]
+    # Agda's path syntax escapes spaces and backslashes, not shell quotes.
+    includes: list[str] = []
+    for value in fields.get("include", []):
+        token = ""
+        index = 0
+        while index < len(value):
+            char = value[index]
+            if char == "\\" and index + 1 < len(value) and value[index + 1] in " \\":
+                index += 1
+                token += value[index]
+            elif char == " ":
+                if token:
+                    includes.append(token)
+                    token = ""
+            else:
+                token += char
+            index += 1
+        if token:
+            includes.append(token)
+    if not includes:
+        includes = ["."]
     roots: list[Path] = []
     manifest_root = path.parent.resolve()
     for include in includes:
@@ -271,14 +303,15 @@ def _parse_agda_lib(path: Path, budget: BridgeBudget) -> LibraryIdentity:
             )
         roots.append(root)
     dependencies = tuple(
-        sorted(filter(None, " ".join(fields.get("depend", [])).split()))
+        sorted(filter(None, re.split(r"[\s,]+", " ".join(fields.get("depend", [])))))
     )
     return LibraryIdentity(
         name=name,
         manifest_path=path.resolve(),
-        manifest_sha256=file_sha256(path.resolve(), deadline=budget.deadline),
+        manifest_sha256=hashlib.sha256(content).hexdigest(),
         include_roots=tuple(roots),
         dependencies=dependencies,
+        flags=tuple(" ".join(fields.get("flags", [])).split()),
     )
 
 
@@ -293,7 +326,7 @@ def _library_database(path: Path | None, budget: BridgeBudget) -> dict[str, Path
         )
     result: dict[str, Path] = {}
     for line in path.read_text().splitlines():
-        entry = line.split("--", 1)[0].strip()
+        entry = re.split(r"--(?=\s)", line, maxsplit=1)[0].strip()
         if not entry:
             continue
         manifest = Path(os.path.expandvars(os.path.expanduser(entry))).resolve()
@@ -557,6 +590,11 @@ def _resolve_project(
         )
     toolchain = detect_toolchain(request.executable, budget)
     adapter = adapter_for_version(toolchain.version)
+    database_digest = (
+        file_sha256(request.library_file.resolve(), deadline=budget.deadline)
+        if request.library_file is not None and request.library_file.is_file()
+        else None
+    )
     libraries = _resolve_libraries(manifest, request.library_file, budget)
     root_name = _module_name(source, source.read_text())
     declared_root = _declared_source_root(source, root_name)
@@ -566,6 +604,26 @@ def _resolve_project(
     )
     source_roots = tuple(dict.fromkeys((*local_roots, *library_roots)))
     sources = _resolve_sources(source, source_roots, budget)
+    # Preserve the nearest library boundary, not just an include path. Agda
+    # reads flags per source library; lifting them into global options changes
+    # the meaning of imported modules.
+    by_manifest = {library.manifest_path: library for library in libraries}
+    owned_sources = []
+    for item in sources:
+        owner, _ = _nearest_project_manifest(item.path)
+        if owner is not None and owner not in by_manifest:
+            raise _error(
+                "unregistered-source-library",
+                f"source library is outside the resolved registrations: {owner}",
+                BridgeFailure.INVALID_REQUEST,
+            )
+        owned_sources.append(
+            replace(
+                item,
+                library_name=by_manifest[owner].name if owner is not None else None,
+            )
+        )
+    sources = tuple(owned_sources)
     root_matches = tuple(item for item in sources if item.path == source)
     if len(root_matches) != 1:
         raise _error(
@@ -580,9 +638,30 @@ def _resolve_project(
             "root module identity changed during project resolution",
             BridgeFailure.INTERNAL_INVARIANT,
         )
+    root_flags = by_manifest[manifest].flags if manifest is not None else ()
     options = _validate_options(
-        dict.fromkeys((*request.options, *_module_options(source.read_text(), source)))
+        dict.fromkeys(
+            (
+                *request.options,
+                *root_flags,
+                *_module_options(source.read_text(), source),
+            )
+        )
     )
+    command_options = _validate_options(request.options) if libraries else options
+    configuration_files = tuple(
+        (library.manifest_path, library.manifest_sha256) for library in libraries
+    )
+    if request.library_file is not None:
+        database_path = request.library_file.resolve()
+        if file_sha256(database_path, deadline=budget.deadline) != database_digest:
+            raise _error(
+                "project-configuration-changed",
+                "library registrations changed during project resolution",
+                BridgeFailure.STALE_TOKEN,
+            )
+        assert database_digest is not None
+        configuration_files += ((database_path, database_digest),)
     source_payload = {
         "sources": [item.semantic_dict() for item in sources],
         "options": list(options),
@@ -601,6 +680,10 @@ def _resolve_project(
         "adapter": adapter.name,
         "interface_policy": "identity-recorded-ignore-for-speculation",
     }
+    if libraries:
+        # A global setting and an equal root-library setting have different
+        # effects on imports even when the root's flattened option view agrees.
+        environment_payload["command_options"] = list(command_options)
     environment_id = EnvironmentId(stable_hash(environment_payload))
     nonce = hashlib.sha256(
         f"{environment_id.value}:{time.monotonic_ns()}".encode()
@@ -620,6 +703,8 @@ def _resolve_project(
         source_revision=revision,
         capabilities=capabilities,
         handle=handle,
+        command_options=command_options,
+        configuration_files=configuration_files,
     )
     result = OpenProjectResult(
         project=handle,

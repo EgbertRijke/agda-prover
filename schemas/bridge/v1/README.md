@@ -20,3 +20,37 @@ parameter's names, hiding, rendered binder and written type annotation. An empty
 `type` means the annotation was omitted, for example `{a} (A : Set a)`; it does
 not assert any inferred type. Actual types come from the kernel goal context.
 Existing annotated-parameter and module-identity wire shapes are unchanged.
+
+## Pinned library environments
+
+`OpenProjectRequest.library_file` selects an explicit registry; dependency
+resolution does not consult the user's default library database. The resolver
+retains library flags and each source's nearest library ownership. Environment
+identity distinguishes global command options from an equal option in only the
+root library. Changed source, manifest or registry contents invalidate a live
+environment.
+
+Speculative and fresh-check overlays share one materializer. They contain only
+the resolved source closure, its manifests and an isolated registry. Module
+structure, relative source paths and source bytes remain unchanged; manifest
+include paths are relocated without erasing flag boundaries or malformed fields.
+Absolute in-root include paths and escaped spaces are supported. Interfaces and
+ambient default libraries are not copied or consulted. Configuration artifacts
+are included in storage accounting and fresh-check artifact hashes.
+
+The optional Agda 2.8 adapter accepts either the historical
+`--no-libraries --ignore-interfaces --interaction-json` startup profile or
+`--no-default-libraries --library-file=ABSOLUTE_PATH --ignore-interfaces
+--interaction-json`. The latter registry must exist. Both profiles are set
+before source parsing; unknown, duplicated or incomplete startup settings fail
+closed. Rebuild the optional adapter to use the explicit-library profile.
+Relocated project resets restart the worker when its registry path changes;
+this cost is counted, not hidden as incremental reuse.
+
+Fresh validation never treats `--allow-unsolved-metas` or
+`--allow-incomplete-matches` as proof acceptance. Other checking waivers are
+rejected unless explicitly allowed by the policy. This applies to command,
+library and source options, not just the edited declaration.
+
+This low-level library contract does not yet expose project configuration
+through every public search/editor entry point or qualify every Agda version.
