@@ -26,19 +26,94 @@ For solving part of a file while later goals remain open, also install the
 [prefix parser](docs/installation.md). Ordinary `.agda` and Markdown-literate
 `.lagda.md` files are supported.
 
-## Use it in your editor
+## Editor extensions for AgdaProver
 
 **Emacs:** add this checkout's `editor/` directory to `load-path`, require
-`agdaprover`, and enable `agdaprover-mode` alongside Agda mode.
-Press `C-c C-x C-p` to solve through the goal at the cursor. Outside a goal,
-the same command selects all open goals in the file. `C-c C-x C-s` proposes
-one step; `C-c C-x C-k` cancels the run.
+`agdaprover`, and enable `agdaprover-mode` alongside Agda mode. Open your file
+and load it with `C-c C-l` before running AgdaProver.
 
-**VS Code:** follow the [extension setup](editor/vscode/README.md).
-The adapter works alongside Agda language extensions.
+**VS Code:** follow the [extension setup](editor/vscode/README.md) and trust
+the workspace. The adapter works alongside Agda language extensions and does
+not require a particular companion extension.
 
-Editor integrations check that your source has not changed before applying a
-returned edit.
+Both integrations support `.agda` and Markdown-literate `.lagda.md` files.
+
+| Function                                 | Emacs                                | VS Code                     | Behavior                                                                                                                  |
+| ---------------------------------------- | ------------------------------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Solve                                    | `C-c C-x C-p`                        | `Ctrl+C Ctrl+X Ctrl+P`      | Solve all open goals through the goal at the cursor, or all open goals in the file when the cursor is outside every goal. |
+| Deep search                              | `C-c C-x C-d`                        | `Ctrl+C Ctrl+X Ctrl+D`      | Solve the same selection with a larger search allowance.                                                                  |
+| Take one step                            | `C-c C-x C-s`                        | `Ctrl+C Ctrl+X Ctrl+S`      | Choose and apply one Agda-accepted refinement at the current goal; this may leave new subgoals.                           |
+| Cancel                                   | `C-c C-x C-k`                        | `Ctrl+C Ctrl+X Ctrl+K`      | Cancel the current buffer's search in Emacs, or the active AgdaProver operation in VS Code.                               |
+| Apply the last verified proof            | `C-c C-x C-v`                        | —                           | Apply a previously returned proof if its source snapshot is still current.                                                |
+| Show the last result                     | `M-x agdaprover-show-last-result`    | —                           | Display the most recent result buffer.                                                                                    |
+| Solve only the current goal symbolically | `M-x agdaprover-prove-goal-symbolic` | —                           | Search for a complete proof of the current goal using symbolic ranking.                                                   |
+| Solve only the current goal with NNUE    | `M-x agdaprover-prove-goal-nnue`     | —                           | Search for a complete proof of the current goal using the configured NNUE proof model.                                    |
+| Take one step with NNUE                  | `M-x agdaprover-step-goal-nnue`      | —                           | Apply a refinement using the configured one-step NNUE model.                                                              |
+| Check setup                              | —                                    | **AgdaProver: Check Setup** | Check backend availability and companion reload configuration.                                                            |
+
+The VS Code shortcuts use **Control**, including on macOS. Its Command Palette
+also provides **AgdaProver: Prove Through Current Goal or All Goals**,
+**AgdaProver: Deep Search Through Current Goal or All Goals**,
+**AgdaProver: Take One Step**, and **AgdaProver: Cancel**.
+Solve and step are also available from the editor title and context menus;
+the AgdaProver status-bar button starts Solve. Emacs provides an
+**AgdaProver** menu. Its `C-c C-x C-n` binding is reserved and performs no
+search.
+
+Both editors save the source before searching and reject stale results before
+applying edits. **Emacs asks before applying completed proofs by default**:
+set `agdaprover-apply-policy` to `always` to apply automatically, or `never`
+to retain results for manual application. One-step refinements apply
+automatically, independently of this policy. **VS Code automatically applies
+and saves successful edits**, then invokes a detected companion extension's
+load-file command when available.
+
+Deep search raises the default whole-run allowance from 500 to 8,000 search
+actions. It can take longer and does not guarantee a completion. Neither
+preset imposes a time or depth limit; explicit resource limits remain active.
+The command-line equivalent is
+`agda-prover prove-prefix MyFile.agda --deep`.
+
+Configure Emacs through `M-x customize-group RET agdaprover RET`, and VS Code
+through its AgdaProver settings:
+
+| Setting                            | Emacs variable                 | VS Code setting             |
+| ---------------------------------- | ------------------------------ | --------------------------- |
+| AgdaProver checkout                | `agdaprover-project-root`      | `agdaprover.projectRoot`    |
+| Python executable                  | `agdaprover-python-command`    | `agdaprover.pythonCommand`  |
+| Installed backend executable       | —                              | `agdaprover.executable`     |
+| Agda compiler                      | `agdaprover-agda-executable`   | `agdaprover.agdaExecutable` |
+| Agda library database              | `agdaprover-library-file`      | `agdaprover.libraryFile`    |
+| Global Agda checking options       | `agdaprover-agda-options`      | `agdaprover.agdaOptions`    |
+| Search preset                      | `agdaprover-search-profile`    | `agdaprover.searchProfile`  |
+| Whole-run action allowance         | `agdaprover-max-candidates`    | `agdaprover.maxCandidates`  |
+| Term-size limit                    | `agdaprover-max-term-size`     | `agdaprover.maxTermSize`    |
+| Depth limit                        | `agdaprover-max-depth`         | `agdaprover.maxDepth`       |
+| Time limit in seconds              | `agdaprover-timeout`           | `agdaprover.timeoutSeconds` |
+| Candidate ranking                  | `agdaprover-ranker`            | `agdaprover.ranker`         |
+| Separate one-step ranking          | `agdaprover-step-ranker`       | —                           |
+| Proof or focused-branch NNUE model | `agdaprover-model-file`        | `agdaprover.model`          |
+| One-step NNUE model                | `agdaprover-step-model-file`   | `agdaprover.stepModel`      |
+| OR-decision NNUE model             | `agdaprover-action-model-file` | `agdaprover.actionModel`    |
+| Completed-proof application policy | `agdaprover-apply-policy`      | —                           |
+| Companion reload command           | —                              | `agdaprover.reloadCommand`  |
+
+To make deep search the default, select `deep` as the search preset and leave
+the action allowance unset (`nil` in Emacs, `null` in VS Code). An explicit
+action allowance overrides either preset. See
+[deep-search settings](docs/interactive.md#deep-search).
+
+No NNUE model is required. Emacs defaults to `auto` ranking, using NNUE when
+the relevant model is readable and symbolic ranking otherwise; its step
+ranker follows the main ranker unless overridden. VS Code defaults to
+`symbolic`. Proof, one-step, and OR-decision models have distinct roles and
+are not interchangeable.
+
+Library and source-file options are preserved; ambient default libraries are
+not used. Unset global checking options retain `--without-K` and
+`--exact-split`; use an empty vector `[]` in Emacs or an empty array `[]` in
+VS Code to supply no global checking options. See the
+[configuration contract](schemas/project-configuration-v1.md).
 
 ## Try an example
 
@@ -81,22 +156,6 @@ Commands return JSON results and proposed edits; they do not overwrite your
 source. Add `--timeout 60` to limit a search to one minute. The
 [interactive command](docs/interactive.md) supports progress inspection,
 pause, resume, stop, and accepting an individual completed goal.
-
-## Deeper search
-
-For harder goals or larger batches of open goals, start deep search:
-
-- Emacs: press `C-c C-x C-d`.
-- VS Code: run **AgdaProver: Deep Search Through Current Goal or All Goals**
-  from the Command Palette, or press `Ctrl+C Ctrl+X Ctrl+D`.
-- Command line: run `agda-prover prove-prefix MyFile.agda --deep`.
-
-In either editor, this solves through the goal at the cursor, or all open goals
-when the cursor is outside a goal. Deep search raises the default whole-run
-allowance from 500 to 8,000 actions; it can take longer and does not guarantee a
-completion. Explicit resource limits still override the preset. See
-[deep-search settings](docs/interactive.md#deep-search) to make it the default
-or reset an existing action-limit override.
 
 ## What to expect
 
