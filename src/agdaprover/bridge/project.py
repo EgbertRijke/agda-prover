@@ -44,13 +44,17 @@ from .versions import adapter_for_version
 _IMPORT = re.compile(rf"(?m)^\s*(?:open\s+)?import\s+({QUALIFIED_MODULE_NAME})(?=\s|$)")
 _OPTIONS = re.compile(r"\{-#\s*OPTIONS\s+(.+?)#-\}", re.DOTALL)
 
-_TOOLCHAIN_MODULES = frozenset({"Agda.Primitive"})
-
 
 def _is_toolchain_module(name: str) -> bool:
-    """Return whether Agda supplies ``name`` independently of source roots."""
+    """Leave Agda's runtime namespaces to the pinned kernel, not source roots.
 
-    return name in _TOOLCHAIN_MODULES or name.startswith("Agda.Builtin.")
+    Namespace recognition does not assert that a module exists or is safe.
+    The kernel must still resolve and check the import in the current profile.
+    """
+
+    return name == "Agda.Primitive" or name.startswith(
+        ("Agda.Primitive.", "Agda.Builtin.")
+    )
 
 
 @dataclass(frozen=True)

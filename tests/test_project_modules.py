@@ -9,12 +9,40 @@ from pathlib import Path
 
 from agdaprover.application.service import ProverApplication
 from agdaprover.bridge.contracts import BridgeError, ModuleId
-from agdaprover.bridge.project import _module_name, write_source_overlay
+from agdaprover.bridge.project import (
+    _is_toolchain_module,
+    _module_name,
+    write_source_overlay,
+)
 from agdaprover.contracts import TaskSpec
 from agdaprover.module_scope import ModuleScope, analyze_module_scope
 
 
 class ProjectModuleHeaderTests(unittest.TestCase):
+    def test_primitive_submodules_are_distinct_from_user_agda_modules(self) -> None:
+        for name in ("Agda.Primitive", "Agda.Primitive.Cubical", "Agda.Builtin.Nat"):
+            with self.subTest(name=name):
+                self.assertTrue(_is_toolchain_module(name))
+        for name in ("Agda.PrimitiveHelper", "Agda.User", "Project.Agda.Primitive"):
+            with self.subTest(name=name):
+                self.assertFalse(_is_toolchain_module(name))
+
+    def test_provisional_overlay_keeps_primitive_import_for_the_kernel(self) -> None:
+        text = (
+            "{-# OPTIONS --cubical --safe #-}\n"
+            "module Endpoints where\n"
+            "open import Agda.Primitive.Cubical using (I; i0)\n"
+            "endpoint : I\nendpoint = {!!}\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "Endpoints.agda"
+            source.write_text(text)
+            candidate, copies = write_source_overlay(source, text, root / "overlay")
+            self.assertEqual(candidate.read_text(), text)
+            self.assertEqual(len(copies), 1)
+            self.assertEqual(source.read_text(), text)
+
     def test_missing_root_is_an_input_result_not_a_bridge_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "Main.agda"
@@ -140,6 +168,39 @@ class ProjectModuleHeaderTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("agda"), "requires Agda")
 class ParameterizedRootProofTests(unittest.TestCase):
+    def test_cubical_primitive_goal_has_a_freshly_validated_completion(self) -> None:
+        text = (
+            "{-# OPTIONS --cubical --safe #-}\n"
+            "module Endpoints where\n"
+            "open import Agda.Primitive.Cubical using (I; i0)\n"
+            "endpoint : I\nendpoint = {!!}\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "Endpoints.agda"
+            source.write_text(text)
+            result = ProverApplication().prove_prefix(
+                TaskSpec(source, timeout_seconds=20)
+            )
+            self.assertEqual(result.status, "verified", result.diagnostics)
+            self.assertTrue(result.validation and result.validation["fresh_process"])
+            self.assertEqual(source.read_text(), text)
+
+    def test_unknown_primitive_module_is_not_accepted_by_namespace_alone(self) -> None:
+        text = (
+            "module MissingPrimitive where\n"
+            "open import Agda.Primitive.NotAnInstalledModule\n"
+            "answer : {A : Set} → A → A\nanswer = {!!}\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "MissingPrimitive.agda"
+            source.write_text(text)
+            result = ProverApplication().prove_prefix(
+                TaskSpec(source, timeout_seconds=20)
+            )
+            self.assertEqual(result.status, "invalid-task", result.diagnostics)
+            self.assertIsNone(result.patch)
+            self.assertEqual(source.read_text(), text)
+
     def test_native_proof_keeps_the_root_telescope_and_imports(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
