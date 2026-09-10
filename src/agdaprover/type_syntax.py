@@ -2,11 +2,96 @@
 
 from __future__ import annotations
 
+import sys
+from collections import OrderedDict
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+from threading import get_ident
 from typing import Literal
 
 _OPEN_TO_CLOSE = {"(": ")", "{": "}", "[": "]", "⦃": "⦄"}
 _CLOSERS = set(_OPEN_TO_CLOSE.values())
+
+
+class _ScanBatch:
+    """Short-lived lexical work reuse, never a type/proof/visibility cache."""
+
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max_bytes
+        self.retained_bytes = 0
+        self.hits = 0
+        self.misses = 0
+        self.owner = get_ident()
+        self.active = True
+        self.entries: OrderedDict[
+            tuple[str, str], tuple[tuple[int, ...], dict[int, int], int]
+        ] = OrderedDict()
+
+    def scan(self, text: str, token: str) -> tuple[list[int], dict[int, int]]:
+        if not self.active or self.owner != get_ident():
+            return _scan_uncached(text, token)
+        key = (text, token)
+        cached = self.entries.get(key)
+        if cached is not None:
+            self.hits += 1
+            self.entries.move_to_end(key)
+            cached_positions, cached_matches, _size = cached
+            # No caller may mutate another call's lexical observation.
+            return list(cached_positions), cached_matches.copy()
+        self.misses += 1
+        positions, matches = _scan_uncached(text, token)
+        if not self.max_bytes:
+            return positions, matches
+        frozen_positions = tuple(positions)
+        # Conservatively count retained Python objects, including repeated
+        # references and per-entry mapping overhead. This bounds a best-effort
+        # optimization; an oversized input still follows the ordinary scan.
+        size = (
+            256
+            + sys.getsizeof(key)
+            + sys.getsizeof(text)
+            + sys.getsizeof(token)
+            + sys.getsizeof(frozen_positions)
+            + sum(map(sys.getsizeof, frozen_positions))
+            + sys.getsizeof(matches)
+            + sum(sys.getsizeof(k) + sys.getsizeof(v) for k, v in matches.items())
+        )
+        if size <= self.max_bytes:
+            while self.entries and self.retained_bytes + size > self.max_bytes:
+                _key, (_positions, _matches, removed) = self.entries.popitem(last=False)
+                self.retained_bytes -= removed
+            self.entries[key] = (frozen_positions, matches.copy(), size)
+            self.retained_bytes += size
+        return positions, matches
+
+
+_scan_batch: ContextVar[_ScanBatch | None] = ContextVar(
+    "type-syntax-batch", default=None
+)
+
+
+@contextmanager
+def syntax_scan_batch(*, max_bytes: int = 2 * 1024**2) -> Iterator[_ScanBatch]:
+    """Reuse exact delimiter scans within one synchronous admission batch.
+
+    The byte reservation limits retained lexical results, not Agda expression
+    size or search completeness. Eviction, disabled caching and failed scans
+    all retain the uncached behavior. Nested batches restore their parent;
+    returning, raising or cancellation clears this batch's retained strings.
+    """
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise ValueError("syntax scan cache reservation must be nonnegative")
+    batch = _ScanBatch(max_bytes)
+    previous = _scan_batch.set(batch)
+    try:
+        yield batch
+    finally:
+        batch.active = False
+        batch.entries.clear()
+        batch.retained_bytes = 0
+        _scan_batch.reset(previous)
 
 
 @dataclass(frozen=True)
@@ -23,6 +108,13 @@ def normalize_type_text(text: str) -> str:
 
 
 def _scan(text: str, token: str) -> tuple[list[int], dict[int, int]]:
+    batch = _scan_batch.get()
+    if batch is not None:
+        return batch.scan(text, token)
+    return _scan_uncached(text, token)
+
+
+def _scan_uncached(text: str, token: str) -> tuple[list[int], dict[int, int]]:
     stack: list[tuple[str, int]] = []
     positions: list[int] = []
     matches: dict[int, int] = {}

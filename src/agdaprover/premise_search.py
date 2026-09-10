@@ -34,6 +34,7 @@ from .type_syntax import (
     split_adjacent_binders,
     split_top_level_arrows,
     strip_outer_delimiters,
+    syntax_scan_batch,
     top_level_arrow_count,
 )
 
@@ -307,6 +308,7 @@ def _tokens(text: str) -> frozenset[str]:
     return frozenset(_TOKEN.findall(normalize_type_text(text)))
 
 
+@syntax_scan_batch()
 def scoped_premise_admission(
     goal: GoalInfo,
     ranked: RetrievalResult,
@@ -2118,6 +2120,7 @@ def shallow_composition_actions(
     return tuple(a for a in actions if premise_has_shallow_support(a.type_text))
 
 
+@syntax_scan_batch()
 def rank_scope_premises(
     goal: GoalInfo,
     declarations: tuple[tuple[str, str], ...],
