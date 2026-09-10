@@ -28,6 +28,12 @@ discarding its applicability restriction. Corrupt, empty, unknown or wrong-role
 domains are rejected before inference.
 
 The domain declares intended applicability, not training quality or qualification.
-The development trainer derives it only from families with actual safe training
-pairs. A validated positive with exclusively censored alternatives is retained
-as experience but does not qualify that family for scoring.
+The development trainer derives it from families that contribute to the selected
+objective. The default pairwise objective requires actual safe comparison pairs;
+a positive with exclusively censored alternatives contributes no pair. The
+optional validated-choice imitation objective instead requires a source-bound
+validated action choice and learns its categorical selection probability. It
+does not label censored alternatives as unsuccessful proofs. Its metadata names
+that objective and counts decisions by family, rather than claiming pair counts.
+Both objectives use this same format and preserve symbolic ordering outside the
+declared domain. Applicability is not model promotion or a performance claim.
