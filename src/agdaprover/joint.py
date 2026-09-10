@@ -31,7 +31,7 @@ from .dependency_planner import (
     goal_has_dependency_tower,
 )
 from .focused import focused_candidates
-from .kernel.p0 import AgdaBridgeError, AgdaLoadError, AgdaSession
+from .kernel.p0 import AgdaBridgeError, AgdaLoadError, AgdaSession, open_kernel_session
 from .kernel.protocol import (
     KernelSessionFactory,
     ScopeDeclarationSession,
@@ -81,8 +81,8 @@ from .type_syntax import (
 )
 from .verification import (
     ValidationError,
+    prepare_project_overlay,
     validate_reconstruction,
-    write_project_overlay,
 )
 from .verifier_budget import VerifierCallLimitExceeded, VerifierCallScope
 
@@ -1101,10 +1101,17 @@ def prove_joint_prefix(
 
         with temporary_workspace(prefix="agdaprover-joint-") as temporary:
             overlay_root = Path(temporary)
-            candidate_path, _overlay_files = write_project_overlay(
-                source_file, original_source, overlay_root
+            workspace = prepare_project_overlay(
+                source_file,
+                original_source,
+                overlay_root,
+                project_configuration=task.project_configuration,
+                timeout_seconds=budget.require_time("initial project overlay"),
             )
-            with session_factory(
+            candidate_path, _overlay_files = workspace.source_file, workspace.files
+            with open_kernel_session(
+                session_factory,
+                project_configuration=workspace.configuration,
                 timeout_seconds=budget.require_time("initial Agda load"),
                 deadline=budget.deadline,
             ) as session:
@@ -1115,6 +1122,9 @@ def prove_joint_prefix(
                     mode="prove-prefix",
                     policy_profile=result.policy_profile,
                     toolchain_id=result.toolchain_id,
+                    project_inputs_id=workspace.inputs.identity
+                    if workspace.inputs is not None
+                    else None,
                     model_ids={
                         "primary": result.model_id,
                         "refinement": result.action_model_id,
@@ -1136,7 +1146,11 @@ def prove_joint_prefix(
                 )
                 focused_policy = policy_router.focused_policy
                 load_started = time.monotonic()
-                original_goals = session.load_module(source_file)
+                original_goals = session.load_module(
+                    candidate_path
+                    if workspace.configuration is not None
+                    else source_file
+                )
                 stats.kernel_loads += 1
                 stats.kernel_load_elapsed_ms += (
                     time.monotonic() - load_started
@@ -1433,6 +1447,8 @@ def prove_joint_prefix(
                             patch,
                             agda_executable=session.executable,
                             agda_version=session.version,
+                            project_configuration=task.project_configuration,
+                            expected_inputs=workspace.inputs,
                             timeout_seconds=budget.require_time(
                                 "fresh joint-proof validation"
                             ),
@@ -1813,6 +1829,7 @@ def prove_joint_prefix(
                             refinement_model=refinement_model,
                             policy_router=policy_router,
                             session_factory=session_factory,
+                            project_configuration=workspace.configuration,
                             session=session,
                             initial_goals=loaded_goals,
                             allow_exact_local=not force_beyond_exact_local,

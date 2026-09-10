@@ -16,9 +16,11 @@ from ..contracts import (
     RefinementCheck,
 )
 from ..kernel.protocol import CommittedProofAction
+from ..project_configuration import ProjectConfiguration
 from ..resource_budget import ResourceLimitError
 from ..retrieval import ScopedPremises
 from ..type_syntax import split_top_level_arrows, top_level_arrow_count
+from .configuration import project_request
 from .contracts import (
     BridgeBudget,
     BridgeError,
@@ -27,10 +29,11 @@ from .contracts import (
     InteractionId,
     StateToken,
 )
-from .operations import ActionInput, OpenProjectRequest, OpenProjectResult, TermInput
+from .operations import ActionInput, OpenProjectResult, TermInput
 from .project import detect_toolchain
 from .proof_state import Goal
 from .session import ConformingKernelSession
+from .workspace import ProjectInputs, project_inputs
 
 SUPPORTED_AGDA_VERSION = "2.8.0"
 AGDA_REFINE_META_LIMIT = 10
@@ -89,6 +92,7 @@ class AgdaSession:
         timeout_seconds: float = math.inf,
         *,
         deadline: float | None = None,
+        project_configuration: ProjectConfiguration | None = None,
     ) -> None:
         if math.isnan(timeout_seconds) or timeout_seconds <= 0:
             raise TimeoutError("no wall-time remains for an Agda session")
@@ -101,6 +105,9 @@ class AgdaSession:
         if wall <= 0:
             raise TimeoutError("Agda task wall-time budget exhausted")
         self._budget = BridgeBudget.for_run(wall)
+        self._project_configuration = project_configuration
+        if project_configuration is not None:
+            executable = project_configuration.executable
         try:
             self._toolchain = detect_toolchain(executable, self._budget)
         except BridgeError as error:
@@ -119,6 +126,9 @@ class AgdaSession:
     @property
     def toolchain_id(self) -> str:
         return self._toolchain.executable_sha256[:20]
+
+    def project_inputs(self) -> ProjectInputs:
+        return project_inputs(self._session.project)
 
     @property
     def active_command(self) -> CommandId | None:
@@ -148,7 +158,9 @@ class AgdaSession:
             raise AgdaLoadError(f"source file not found: {path}") from error
         if self._source_file == path and self._source_sha256 == digest:
             return
-        request = OpenProjectRequest(path, executable=self.executable)
+        request = project_request(
+            path, self._project_configuration, executable=self.executable
+        )
         try:
             if self._open_result is None:
                 self._open_result = self._session.open_project(request, self._budget)

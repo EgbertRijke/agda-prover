@@ -15,7 +15,13 @@ from .artifacts import optional_file_sha256
 from .bridge.resources import current_process_rss
 from .budget import SearchBudget
 from .contracts import GoalInfo, StepResult, TaskSpec, task_identity
-from .kernel.p0 import AgdaBridgeError, AgdaLoadError, AgdaSession
+from .kernel.p0 import (
+    AgdaBridgeError,
+    AgdaLoadError,
+    AgdaSession,
+    open_kernel_session,
+    session_project_inputs,
+)
 from .kernel.protocol import KernelSessionFactory
 from .offline import assert_offline_configuration
 from .presentation import reconstruct_case_split, reconstruct_intro
@@ -134,7 +140,9 @@ def propose_step(
         if model is not None:
             result.model_id = model.model_id
 
-        with session_factory(
+        with open_kernel_session(
+            session_factory,
+            project_configuration=task.project_configuration,
             timeout_seconds=budget.require_time("initial Agda load"),
             deadline=budget.deadline,
         ) as session:
@@ -149,6 +157,19 @@ def propose_step(
             )
             load_started = time.monotonic()
             loaded = session.load_module(source_file)
+            inputs = session_project_inputs(session)
+            if inputs is not None and (
+                task.project_configuration is not None or inputs.library_bound
+            ):
+                result.task_id = task_identity(
+                    task,
+                    result.source_hash,
+                    mode="step",
+                    policy_profile=result.policy_profile,
+                    toolchain_id=result.toolchain_id,
+                    model_ids={"step": result.model_id},
+                    project_inputs_id=inputs.identity,
+                )
             result.cost.add(
                 kernel_loads=1,
                 kernel_load_elapsed_ms=(time.monotonic() - load_started) * 1000.0,
@@ -260,6 +281,7 @@ def propose_step(
                 reconstruction_validation = validate_partial_reconstruction(
                     source_file,
                     source_edit,
+                    project_configuration=task.project_configuration,
                     timeout_seconds=budget.require_time(
                         "step reconstruction validation"
                     ),
@@ -273,6 +295,7 @@ def propose_step(
                 reconstruction_validation = validate_partial_reconstruction(
                     source_file,
                     source_edit,
+                    project_configuration=task.project_configuration,
                     timeout_seconds=budget.require_time(
                         "case reconstruction validation"
                     ),

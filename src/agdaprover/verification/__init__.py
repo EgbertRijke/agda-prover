@@ -8,6 +8,7 @@ from .service import (
     ValidationError,
     executable_sha256,
     file_sha256,
+    prepare_project_overlay,
     validate_candidate,
     validate_partial_reconstruction,
     validate_reconstruction,
@@ -24,4 +25,5 @@ __all__ = [
     "validate_reconstruction",
     "validate_standalone_module",
     "write_project_overlay",
+    "prepare_project_overlay",
 ]

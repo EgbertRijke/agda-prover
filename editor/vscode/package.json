@@ -101,6 +101,19 @@
     "configuration": {
       "title": "AgdaProver",
       "properties": {
+        "agdaprover.agdaExecutable": {
+          "type": "string", "default": "",
+          "description": "Optional Agda compiler executable, distinct from the agdaprover executable. Empty uses agda from PATH."
+        },
+        "agdaprover.libraryFile": {
+          "type": "string", "default": "",
+          "description": "Explicit Agda library registry; relative paths are resolved against this file's workspace folder. Default libraries are never consulted."
+        },
+        "agdaprover.agdaOptions": {
+          "type": ["array", "null"], "default": null,
+          "items": {"type": "string"},
+          "description": "Global Agda checking options. Null retains --without-K and --exact-split; [] supplies no global options. Library and file flags remain local."
+        },
         "agdaprover.pythonCommand": {
           "type": "string",
           "default": "auto",

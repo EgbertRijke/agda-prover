@@ -8,21 +8,28 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import executable_sha256, file_sha256
+from .bridge.configuration import project_request
 from .bridge.contracts import BridgeBudget, BridgeError, BridgeFailure, SourceRange
 from .bridge.operations import (
-    OpenProjectRequest,
     PolicyProfile,
     SourceEdit,
     SourcePatch,
     ValidatePatchResult,
 )
-from .bridge.project import write_source_overlay
+from .bridge.project import ResolvedProject, write_source_overlay
 from .bridge.resources import temporary_workspace
 from .bridge.session import ConformingKernelSession
 from .bridge.source_prefix import independent_prefix, inspect_prefix
+from .bridge.workspace import (
+    ProjectInputs,
+    SourceWorkspace,
+    checking_environment,
+    prepare_source_workspace,
+)
 from .contracts import GoalInfo
-from .kernel.p0 import AgdaLoadError, AgdaSession
+from .kernel.p0 import AgdaBridgeError, AgdaLoadError, AgdaSession
 from .presentation import apply_source_edit
+from .project_configuration import ProjectConfiguration
 from .resource_budget import ResourceLimitError, charge_io
 from .source_files import agda_source_suffix
 
@@ -66,12 +73,16 @@ def _run_patch(
     agda_executable: str,
     timeout_seconds: float,
     policy_profile: str,
+    project_configuration: ProjectConfiguration | None = None,
 ) -> tuple[ValidatePatchResult, ConformingKernelSession]:
     budget = BridgeBudget.for_run(timeout_seconds)
     session = ConformingKernelSession()
     try:
         opened = session.open_project(
-            OpenProjectRequest(source_file, executable=agda_executable), budget
+            project_request(
+                source_file, project_configuration, executable=agda_executable
+            ),
+            budget,
         )
         patch = SourcePatch(
             opened.environment_id,
@@ -87,6 +98,8 @@ def _run_patch(
         )
     except BridgeError as error:
         session.close()
+        if error.failure == BridgeFailure.TOOLCHAIN_ERROR:
+            raise AgdaBridgeError(str(error)) from error
         if error.failure == BridgeFailure.RESOURCE_EXHAUSTED:
             raise ResourceLimitError(str(error)) from error
         if error.failure == BridgeFailure.TIMEOUT:
@@ -105,6 +118,7 @@ def _run_patch(
 
 def _p0_result(
     result: ValidatePatchResult,
+    project: ResolvedProject | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     trust = result.trust_report
     diagnostic = "\n".join(item.message for item in result.diagnostics)
@@ -121,7 +135,7 @@ def _p0_result(
         "patch_id": result.patch_id,
         "fresh_validation_runs": result.cost.process_starts,
     }
-    trust_report = {
+    trust_report: dict[str, Any] = {
         "agda_binary_hash": trust.agda_binary_sha256 if trust else None,
         "agda_version": trust.agda_version if trust else None,
         "options": list(trust.options) if trust else [],
@@ -147,6 +161,8 @@ def _p0_result(
         "fresh_process": bool(trust and trust.fresh_process),
         "offline": bool(trust and trust.offline),
     }
+    if project is not None and project.libraries:
+        trust_report["checking_environment"] = checking_environment(project)
     return validation, trust_report
 
 
@@ -179,7 +195,7 @@ def validate_standalone_module(
             policy_profile=policy_profile,
         )
         try:
-            return _p0_result(result)
+            return _p0_result(result, session.project)
         finally:
             session.close()
 
@@ -191,6 +207,7 @@ def validate_candidate(
     *,
     agda_executable: str = "agda",
     timeout_seconds: float = 10.0,
+    project_configuration: ProjectConfiguration | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     source = source_file.read_text()
     replace_goal(source, goal, proof_term)
@@ -201,9 +218,10 @@ def validate_candidate(
         agda_executable=agda_executable,
         timeout_seconds=timeout_seconds,
         policy_profile="p0-restricted-term-ir",
+        project_configuration=project_configuration,
     )
     try:
-        return _p0_result(result)
+        return _p0_result(result, session.project)
     finally:
         session.close()
 
@@ -215,6 +233,8 @@ def validate_reconstruction(
     agda_executable: str = "agda",
     agda_version: str | None = None,
     timeout_seconds: float = 10.0,
+    project_configuration: ProjectConfiguration | None = None,
+    expected_inputs: ProjectInputs | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     del agda_version
     replacement = edit.get("replacement", "")
@@ -235,6 +255,8 @@ def validate_reconstruction(
     start, end = source_range
     started = time.monotonic()
     deadline = started + timeout_seconds
+    if expected_inputs is not None:
+        expected_inputs.assert_current(deadline=deadline)
     result, session = _run_patch(
         source_file,
         SourceEdit(
@@ -244,6 +266,7 @@ def validate_reconstruction(
         ),
         agda_executable=agda_executable,
         timeout_seconds=_remaining(deadline, "fresh structural validation"),
+        project_configuration=project_configuration,
         policy_profile=(
             "p0-restricted-joint-prefix-reconstruction"
             if edit.get("style") == "joint-clauses"
@@ -251,7 +274,7 @@ def validate_reconstruction(
         ),
     )
     try:
-        validation, trust_report = _p0_result(result)
+        validation, trust_report = _p0_result(result, session.project)
     finally:
         session.close()
     if (
@@ -266,6 +289,7 @@ def validate_reconstruction(
             agda_executable=agda_executable,
             timeout_seconds=_remaining(deadline, "open-goal differential check"),
             deadline=deadline,
+            project_configuration=project_configuration,
         )
         if remaining_goals is not None:
             prefix = _validate_completed_prefix(
@@ -276,6 +300,7 @@ def validate_reconstruction(
                 remaining_ranges=tuple(goal.source_range for goal in remaining_goals),
                 agda_executable=agda_executable,
                 deadline=deadline,
+                project_configuration=project_configuration,
             )
             validation["prefix_validation"] = prefix
             validation["fresh_validation_runs"] += prefix.get("validation", {}).get(
@@ -318,15 +343,43 @@ def validate_reconstruction(
                     "prefix_validation": prefix["trust_report"],
                 }
             )
+    if expected_inputs is not None:
+        expected_inputs.assert_current(deadline=deadline)
     return validation, trust_report
 
 
 def _same_prefix_environment(full: dict[str, Any], prefix: dict[str, Any]) -> bool:
+    library_bound = "checking_environment" in full or "checking_environment" in prefix
+
+    def options(report: dict[str, Any]) -> list[str]:
+        return [
+            "--library-file=<isolated-registry>"
+            if library_bound and option.startswith("--library-file=")
+            else option
+            for option in report["options"]
+        ]
+
     if any(
-        full[key] != prefix[key]
-        for key in ("agda_binary_hash", "agda_version", "options")
-    ):
+        full[key] != prefix[key] for key in ("agda_binary_hash", "agda_version")
+    ) or options(full) != options(prefix):
         return False
+    if library_bound:
+        full_environment = full.get("checking_environment")
+        prefix_environment = prefix.get("checking_environment")
+        if not isinstance(full_environment, dict) or not isinstance(
+            prefix_environment, dict
+        ):
+            return False
+        if any(
+            full_environment.get(key) != prefix_environment.get(key)
+            for key in ("schema_version", "root_module", "command_options", "libraries")
+        ):
+            return False
+        full_sources = full_environment["sources"]
+        return all(
+            full_sources.get(name) == identity
+            for name, identity in prefix_environment["sources"].items()
+        )
     root = full["checker_command"][-1]
     if prefix["checker_command"][-1] != root:
         return False
@@ -348,9 +401,17 @@ def _validate_completed_prefix(
     remaining_ranges: tuple[tuple[int, int], ...],
     agda_executable: str,
     deadline: float,
+    project_configuration: ProjectConfiguration | None = None,
 ) -> dict[str, Any]:
     with temporary_workspace(prefix="agdaprover-prefix-validation-") as tmp:
-        path, dependencies = write_project_overlay(source_file, candidate, Path(tmp))
+        workspace = prepare_project_overlay(
+            source_file,
+            candidate,
+            Path(tmp),
+            project_configuration=project_configuration,
+            timeout_seconds=_remaining(deadline, "prefix overlay"),
+        )
+        path, dependencies = workspace.source_file, workspace.files
         remaining = _remaining(deadline, "prefix declaration inspection")
         try:
             parsed = inspect_prefix(
@@ -391,9 +452,10 @@ def _validate_completed_prefix(
             agda_executable=agda_executable,
             timeout_seconds=_remaining(deadline, "fresh strict prefix validation"),
             policy_profile="p0-restricted-joint-prefix-reconstruction",
+            project_configuration=workspace.configuration,
         )
         try:
-            checked, trust = _p0_result(result)
+            checked, trust = _p0_result(result, session.project)
         finally:
             session.close()
         if checked["timed_out"]:
@@ -413,6 +475,7 @@ def validate_partial_reconstruction(
     edit: dict[str, Any],
     *,
     timeout_seconds: float = 10.0,
+    project_configuration: ProjectConfiguration | None = None,
 ) -> dict[str, Any]:
     source = source_file.read_text()
     try:
@@ -421,15 +484,20 @@ def validate_partial_reconstruction(
         raise ValidationError(str(error)) from error
     deadline = time.monotonic() + timeout_seconds
     with temporary_workspace(prefix="agdaprover-step-reconstruction-") as temporary:
-        candidate_path, _dependencies = write_project_overlay(
-            source_file, candidate, Path(temporary)
+        workspace = prepare_project_overlay(
+            source_file,
+            candidate,
+            Path(temporary),
+            project_configuration=project_configuration,
+            timeout_seconds=_remaining(deadline, "partial reconstruction overlay"),
         )
         try:
             with AgdaSession(
                 timeout_seconds=_remaining(deadline, "partial reconstruction load"),
                 deadline=deadline,
+                project_configuration=workspace.configuration,
             ) as session:
-                goals = session.load_module(candidate_path)
+                goals = session.load_module(workspace.source_file)
         except AgdaLoadError as error:
             raise ValidationError(
                 f"Agda rejected clause-style refinement: {error}"
@@ -466,28 +534,35 @@ def _validate_preexisting_holes(
     agda_executable: str,
     timeout_seconds: float,
     deadline: float | None = None,
+    project_configuration: ProjectConfiguration | None = None,
 ) -> tuple[GoalInfo, ...] | None:
     source_range = edit["source_range"]
     edit_start, edit_end = source_range
     delta = len(edit["replacement"]) - len(edit["original"])
     shared_deadline = deadline or time.monotonic() + timeout_seconds
     with temporary_workspace(prefix="agdaprover-target-validation-") as temporary:
-        candidate_path, _dependencies = write_project_overlay(
-            source_file, candidate, Path(temporary)
+        workspace = prepare_project_overlay(
+            source_file,
+            candidate,
+            Path(temporary),
+            project_configuration=project_configuration,
+            timeout_seconds=_remaining(shared_deadline, "candidate overlay"),
         )
         try:
             with AgdaSession(
                 executable=agda_executable,
                 timeout_seconds=_remaining(shared_deadline, "original goal load"),
                 deadline=shared_deadline,
+                project_configuration=project_configuration,
             ) as original_session:
                 original_goals = original_session.load_module(source_file)
             with AgdaSession(
                 executable=agda_executable,
                 timeout_seconds=_remaining(shared_deadline, "candidate goal load"),
                 deadline=shared_deadline,
+                project_configuration=workspace.configuration,
             ) as candidate_session:
-                candidate_goals = candidate_session.load_module(candidate_path)
+                candidate_goals = candidate_session.load_module(workspace.source_file)
         except AgdaLoadError:
             return None
     expected: list[tuple[tuple[int, int], str]] = []
@@ -521,6 +596,36 @@ def _validate_preexisting_holes(
     return candidate_goals
 
 
+def prepare_project_overlay(
+    source_file: Path,
+    candidate: str,
+    overlay_root: Path,
+    *,
+    project_configuration: ProjectConfiguration | None = None,
+    timeout_seconds: float = float("inf"),
+) -> SourceWorkspace:
+    if timeout_seconds <= 0:
+        raise TimeoutError("project overlay deadline exhausted")
+    try:
+        return prepare_source_workspace(
+            source_file,
+            candidate,
+            overlay_root,
+            configuration=project_configuration,
+            timeout_seconds=timeout_seconds,
+        )
+    except BridgeError as error:
+        if error.failure in {BridgeFailure.INVALID_REQUEST, BridgeFailure.STALE_TOKEN}:
+            raise AgdaLoadError(error.diagnostic.message) from error
+        if error.failure == BridgeFailure.TOOLCHAIN_ERROR:
+            raise AgdaBridgeError(error.diagnostic.message) from error
+        if error.failure == BridgeFailure.TIMEOUT:
+            raise TimeoutError(error.diagnostic.message) from error
+        if error.failure == BridgeFailure.RESOURCE_EXHAUSTED:
+            raise ResourceLimitError(error.diagnostic.message) from error
+        raise ValidationError(str(error)) from error
+
+
 def write_project_overlay(
     source_file: Path, candidate: str, overlay_root: Path
 ) -> tuple[Path, tuple[tuple[Path, Path], ...]]:
@@ -540,6 +645,7 @@ __all__ = [
     "executable_sha256",
     "file_sha256",
     "replace_goal",
+    "prepare_project_overlay",
     "validate_candidate",
     "validate_partial_reconstruction",
     "validate_reconstruction",

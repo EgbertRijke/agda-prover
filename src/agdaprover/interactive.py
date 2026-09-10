@@ -17,6 +17,7 @@ from typing import Any, Literal, TextIO
 
 from .contracts import TaskSpec
 from .principal_variation import load_principal_variation
+from .project_configuration import ProjectConfiguration
 from .verification import ValidationError, validate_reconstruction
 
 INTERACTIVE_COMMAND_SCHEMA = "agdaprover.interactive.command.v1"
@@ -172,6 +173,7 @@ class InteractiveRunController:
         variation_path: Path,
         result_path: Path,
         policy: InteractivePolicy = DEFAULT_INTERACTIVE_POLICY,
+        project_configuration: ProjectConfiguration | None = None,
         signal_group: Callable[[int, int], None] = os.killpg,
         process_groups: Callable[[int], tuple[int, ...]] = (_descendant_process_groups),
         validator: Callable[..., tuple[dict[str, Any], dict[str, Any]]] = (
@@ -185,6 +187,7 @@ class InteractiveRunController:
         self.variation_path = variation_path
         self.result_path = result_path
         self.policy = policy
+        self.project_configuration = project_configuration
         self._signal_group = signal_group
         self._process_groups = process_groups
         self._validator = validator
@@ -292,11 +295,15 @@ class InteractiveRunController:
         if self.state == "running":
             self.pause()
         patch = options[0]["patch"]
+        checking_options: dict[str, Any] = {}
+        if self.project_configuration is not None:
+            checking_options["project_configuration"] = self.project_configuration
         try:
             validation, trust_report = self._validator(
                 self.source_file,
                 patch,
                 timeout_seconds=float("inf"),
+                **checking_options,
             )
         except (OSError, ValidationError) as error:
             raise ValueError(
@@ -426,6 +433,13 @@ def launch_interactive_run(
         argv.extend(("--model", str(task.model_path)))
     if task.action_model_path is not None:
         argv.extend(("--action-model", str(task.action_model_path)))
+    if task.project_configuration is not None:
+        argv.extend(
+            (
+                "--project-configuration",
+                json.dumps(task.project_configuration.to_dict()),
+            )
+        )
     process = subprocess.Popen(
         argv,
         stdin=subprocess.DEVNULL,
@@ -441,6 +455,7 @@ def launch_interactive_run(
         variation_path=variation_path,
         result_path=result_path,
         policy=policy,
+        project_configuration=task.project_configuration,
     )
 
 

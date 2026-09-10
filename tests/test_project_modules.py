@@ -53,7 +53,7 @@ class ProjectModuleHeaderTests(unittest.TestCase):
             self.assertIsNone(result.patch)
 
     def test_module_identity_accepts_shared_spellings_but_not_path_syntax(self) -> None:
-        for name in ("Main", "Example.Ω-types", "_Private.Prime′"):
+        for name in ("Main", "Example.Ω-types", "_Private.Prime′", "Example.2-cells"):
             with self.subTest(name=name):
                 value = ModuleId(name, "Main.agda")
                 self.assertEqual(ModuleId.from_dict(value.to_dict()), value)
@@ -168,6 +168,32 @@ class ProjectModuleHeaderTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("agda"), "requires Agda")
 class ParameterizedRootProofTests(unittest.TestCase):
+    def test_digit_leading_imports_survive_resolution_and_fresh_validation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Support").mkdir()
+            dependency = root / "Support/2-cells.lagda.md"
+            dependency.write_text(
+                "# A digit-leading module component\n```agda\n"
+                "module Support.2-cells where\n"
+                "data Cell : Set where\n  cell : Cell\n```\n"
+            )
+            source = root / "Main.agda"
+            text = (
+                "module Main where\nopen import Support.2-cells\n"
+                "answer : Cell\nanswer = {!!}\n"
+            )
+            source.write_text(text)
+            _, copied = write_source_overlay(source, text, root / "overlay")
+            self.assertEqual(len(copied), 2)
+            result = ProverApplication().prove_prefix(
+                TaskSpec(source, timeout_seconds=20)
+            )
+            self.assertEqual(result.status, "verified", result.diagnostics)
+            self.assertEqual(source.read_text(), text)
+
     def test_cubical_primitive_goal_has_a_freshly_validated_completion(self) -> None:
         text = (
             "{-# OPTIONS --cubical --safe #-}\n"

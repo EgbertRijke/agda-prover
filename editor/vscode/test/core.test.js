@@ -8,6 +8,19 @@ const test = require('node:test');
 
 const core = require('../core');
 
+test('explicit project settings preserve defaults and empty option lists', () => {
+  assert.equal(core.buildProjectConfiguration({baseDirectory: '/workspace'}), undefined);
+  const configured = core.buildProjectConfiguration({libraryFile: 'libraries', options: [], baseDirectory: '/workspace'});
+  assert.equal(configured.library_file, path.resolve('/workspace', 'libraries'));
+  assert.deepEqual(configured.options, []);
+  assert.equal(configured.schema_version, 'agdaprover.project-configuration.v1');
+  assert.deepEqual(core.buildProjectConfiguration({executable: 'custom-agda', baseDirectory: '/workspace'}).options,
+    ['--without-K', '--exact-split']);
+  assert.equal(core.buildProjectConfiguration({executable: './bin/agda', baseDirectory: '/workspace'}).executable,
+    path.resolve('/workspace', 'bin/agda'));
+  assert.throws(() => core.buildProjectConfiguration({options: '--safe'}), /Invalid Agda/);
+});
+
 function makeRoot() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agdaprover-vscode-'));
   fs.mkdirSync(path.join(root, 'src', 'agdaprover'), {recursive: true});

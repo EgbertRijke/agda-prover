@@ -23,7 +23,7 @@ from .constructor_search import ConstructorStats, constructor_tree_prove
 from .contracts import GoalInfo
 from .dependency_planner import DependencyPlan, build_dependency_plan
 from .focused import focused_prove
-from .kernel.p0 import AgdaLoadError, AgdaSession
+from .kernel.p0 import AgdaLoadError, AgdaSession, open_kernel_session
 from .kernel.protocol import (
     KernelSession,
     KernelSessionFactory,
@@ -60,6 +60,7 @@ from .presentation import (
     reconstruct_intro_as_clause,
 )
 from .project import attach_module_scope
+from .project_configuration import ProjectConfiguration
 from .ranking.protocol import SparsePolicyRanker
 from .reasoning.classifications import (
     StructuralClassification,
@@ -100,8 +101,8 @@ from .type_syntax import (
 )
 from .verification import (
     ValidationError,
+    prepare_project_overlay,
     validate_reconstruction,
-    write_project_overlay,
 )
 from .zero_constructor import generate_zero_constructor_actions
 
@@ -638,6 +639,7 @@ def batched_case_prove(
     refinement_model: SparsePolicyRanker | None,
     policy_router: ORPolicyRouter | None = None,
     session_factory: KernelSessionFactory = AgdaSession,
+    project_configuration: ProjectConfiguration | None = None,
     session: KernelSession | None = None,
     initial_goals: tuple[GoalInfo, ...] | None = None,
     allow_exact_local: bool = True,
@@ -857,18 +859,20 @@ def batched_case_prove(
             with tempfile.TemporaryDirectory(
                 prefix="agdaprover-case-lookahead-"
             ) as lookahead_directory:
-                lookahead_path, overlay_files = write_project_overlay(
+                lookahead_workspace = prepare_project_overlay(
                     source_file,
                     successor_source,
                     Path(lookahead_directory),
+                    project_configuration=project_configuration,
+                    timeout_seconds=deadline - time.monotonic(),
                 )
-                materialized = sum(
-                    destination.stat().st_size
-                    for _original, destination in overlay_files
-                )
+                lookahead_path = lookahead_workspace.source_file
+                materialized = lookahead_workspace.total_bytes
                 stats.source_bytes_materialized += materialized
                 stats.source_bytes_written += materialized
-                with session_factory(
+                with open_kernel_session(
+                    session_factory,
+                    project_configuration=lookahead_workspace.configuration,
                     timeout_seconds=max(0.001, deadline - time.monotonic()),
                     deadline=deadline,
                 ) as lookahead_session:
@@ -943,15 +947,15 @@ def batched_case_prove(
             with tempfile.TemporaryDirectory(
                 prefix="agdaprover-zero-candidate-"
             ) as validation_directory:
-                validation_path, overlay_files = write_project_overlay(
+                validation_workspace = prepare_project_overlay(
                     source_file,
                     current_source,
                     Path(validation_directory),
+                    project_configuration=project_configuration,
+                    timeout_seconds=deadline - time.monotonic(),
                 )
-                materialized = sum(
-                    destination.stat().st_size
-                    for _original, destination in overlay_files
-                )
+                validation_path = validation_workspace.source_file
+                materialized = validation_workspace.total_bytes
                 stats.source_bytes_materialized += materialized
                 stats.source_bytes_written += materialized
                 validation, _trust = validate_reconstruction(
@@ -959,6 +963,7 @@ def batched_case_prove(
                     edit,
                     agda_executable=active_session.executable,
                     agda_version=active_session.version,
+                    project_configuration=validation_workspace.configuration,
                     timeout_seconds=max(0.001, deadline - time.monotonic()),
                 )
             return bool(validation.get("checked") and not validation.get("timed_out"))
@@ -988,18 +993,20 @@ def batched_case_prove(
             with tempfile.TemporaryDirectory(
                 prefix="agdaprover-context-candidate-"
             ) as validation_directory:
-                validation_path, overlay_files = write_project_overlay(
+                validation_workspace = prepare_project_overlay(
                     source_file,
                     successor_source,
                     Path(validation_directory),
+                    project_configuration=project_configuration,
+                    timeout_seconds=deadline - time.monotonic(),
                 )
-                materialized = sum(
-                    destination.stat().st_size
-                    for _original, destination in overlay_files
-                )
+                validation_path = validation_workspace.source_file
+                materialized = validation_workspace.total_bytes
                 stats.source_bytes_materialized += materialized
                 stats.source_bytes_written += materialized
-                with session_factory(
+                with open_kernel_session(
+                    session_factory,
+                    project_configuration=validation_workspace.configuration,
                     timeout_seconds=max(0.001, deadline - time.monotonic()),
                     deadline=deadline,
                 ) as validation_session:
@@ -1024,11 +1031,18 @@ def batched_case_prove(
             temporary = resources.enter_context(
                 tempfile.TemporaryDirectory(prefix="agdaprover-case-batch-")
             )
-            candidate_path, _overlay_files = write_project_overlay(
-                source_file, original_source, Path(temporary)
+            workspace = prepare_project_overlay(
+                source_file,
+                original_source,
+                Path(temporary),
+                project_configuration=project_configuration,
+                timeout_seconds=deadline - time.monotonic(),
             )
+            candidate_path, _overlay_files = workspace.source_file, workspace.files
             active_session = resources.enter_context(
-                session_factory(
+                open_kernel_session(
+                    session_factory,
+                    project_configuration=workspace.configuration,
                     timeout_seconds=max(0.001, deadline - time.monotonic()),
                     deadline=deadline,
                 )

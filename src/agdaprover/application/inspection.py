@@ -10,10 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..bridge.configuration import project_request
 from ..bridge.contracts import BridgeBudget, BridgeError, BridgeFailure
-from ..bridge.operations import OpenProjectRequest
 from ..bridge.session import ConformingKernelSession
 from ..project import analyze_module_scope
+from ..project_configuration import ProjectConfiguration
+from ..resource_budget import ResourceLimitError
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,7 @@ def inspect_source(
     goal_id: int | None = None,
     goal_position: int | None = None,
     timeout_seconds: float | None = None,
+    project_configuration: ProjectConfiguration | None = None,
 ) -> CommandResult:
     """Inspect selected goals through the conforming bridge."""
 
@@ -37,9 +40,11 @@ def inspect_source(
         wall = timeout_seconds if timeout_seconds is not None else float("inf")
         if wall <= 0:
             raise ValueError("timeout must be positive")
-        budget = BridgeBudget(wall_seconds=wall, cpu_seconds=wall)
+        budget = BridgeBudget.for_run(wall)
         with ConformingKernelSession() as session:
-            opened = session.open_project(OpenProjectRequest(source), budget)
+            opened = session.open_project(
+                project_request(source, project_configuration), budget
+            )
             loaded = session.load_module(
                 opened.project,
                 opened.root_module,
@@ -103,6 +108,10 @@ def inspect_source(
                 "goals": inspected,
             }
         return CommandResult(0, payload)
+    except ResourceLimitError as error:
+        return CommandResult(
+            6, {"status": "resource-exhausted", "diagnostic": str(error)}
+        )
     except ValueError as error:
         return CommandResult(4, {"status": "invalid-task", "diagnostic": str(error)})
     except BridgeError as error:

@@ -799,6 +799,27 @@
         (kill-buffer buffer))
       (delete-directory temporary-directory t))))
 
+(ert-deftest agdaprover-test-explicit-library-configuration ()
+  (let ((agdaprover-agda-executable nil)
+        (agdaprover-library-file nil)
+        (agdaprover-agda-options nil))
+    (should-not (agdaprover--project-configuration))
+    (setq agdaprover-library-file "registry with spaces")
+    (let ((configuration (agdaprover--project-configuration)))
+      (should (equal (alist-get 'schema_version configuration)
+                     "agdaprover.project-configuration.v1"))
+      (should (equal (alist-get 'options configuration)
+                     ["--without-K" "--exact-split"]))
+      (should (file-name-absolute-p (alist-get 'library_file configuration)))))
+  (let ((agdaprover-agda-options '("--safe")))
+    (should (equal (alist-get 'options (agdaprover--project-configuration))
+                   ["--safe"])))
+  (let ((agdaprover-agda-options [])
+        (agdaprover-agda-executable "./toolchain/agda"))
+    (should (equal (alist-get 'options (agdaprover--project-configuration)) []))
+    (should (equal (alist-get 'executable (agdaprover--project-configuration))
+                   (expand-file-name "./toolchain/agda")))))
+
 (provide 'agdaprover-test)
 
 ;;; agdaprover-test.el ends here

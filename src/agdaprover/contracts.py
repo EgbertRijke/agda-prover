@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .module_scope import ModuleScope
+from .project_configuration import ProjectConfiguration
 from .resource_budget import ResourceLimits
 
 SCHEMA_VERSION = "agdaprover.p0.v1"
@@ -110,6 +111,7 @@ class TaskSpec:
     schema_version: str = SCHEMA_VERSION
     max_verifier_calls: int | None = None
     resources: ResourceLimits = field(default_factory=ResourceLimits)
+    project_configuration: ProjectConfiguration | None = None
 
 
 @dataclass
@@ -153,6 +155,7 @@ def task_identity(
     policy_profile: str,
     toolchain_id: str | None,
     model_ids: dict[str, str | None],
+    project_inputs_id: str | None = None,
 ) -> str:
     """Hash every P0 input that can affect a search or step outcome."""
 
@@ -187,6 +190,10 @@ def task_identity(
         "toolchain_id": toolchain_id,
         "offline": task.offline,
     }
+    if task.project_configuration is not None:
+        payload["project_configuration"] = task.project_configuration.to_dict()
+    if project_inputs_id is not None:
+        payload["project_inputs_id"] = project_inputs_id
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()[:20]
 

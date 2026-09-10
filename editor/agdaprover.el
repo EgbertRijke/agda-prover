@@ -64,6 +64,39 @@
   :type 'string
   :group 'agdaprover)
 
+(defcustom agdaprover-agda-executable nil
+  "Optional Agda compiler executable.  Nil uses agda from PATH."
+  :type '(choice (const nil) string)
+  :group 'agdaprover)
+
+(defcustom agdaprover-library-file nil
+  "Explicit Agda library registry.  Ambient default libraries are never used."
+  :type '(choice (const nil) file)
+  :group 'agdaprover)
+
+(defcustom agdaprover-agda-options nil
+  "Global Agda checking options, or nil for --without-K and --exact-split.
+An empty vector supplies no global options.  These do not replace the
+separate library and source-file flags."
+  :type '(choice (const nil) (const :tag "No global options" []) (repeat string))
+  :group 'agdaprover)
+
+(make-variable-buffer-local 'agdaprover-agda-executable)
+(make-variable-buffer-local 'agdaprover-library-file)
+(make-variable-buffer-local 'agdaprover-agda-options)
+
+(defun agdaprover--project-configuration ()
+  "Return explicit checking configuration, or nil for legacy defaults."
+  (when (or agdaprover-agda-executable agdaprover-library-file agdaprover-agda-options)
+    `((schema_version . "agdaprover.project-configuration.v1")
+      (executable . ,(if (and agdaprover-agda-executable
+                             (string-match-p "/" agdaprover-agda-executable))
+                        (expand-file-name agdaprover-agda-executable)
+                      (or agdaprover-agda-executable "agda")))
+      (library_file . ,(if agdaprover-library-file
+                          (expand-file-name agdaprover-library-file) :null))
+      (options . ,(vconcat (or agdaprover-agda-options '("--without-K" "--exact-split")))))))
+
 (defcustom agdaprover-ranker 'auto
   "Candidate ranker used by `agdaprover-prove-goal'.
 
@@ -198,6 +231,11 @@ RANKER and MODEL-FILE select the candidate ordering implementation."
          "--ranker" (symbol-name ranker)
          "--max-candidates" (number-to-string agdaprover-max-candidates)
          "--max-term-size" (number-to-string agdaprover-max-term-size))
+   (when agdaprover-agda-executable
+     (list "--agda" (alist-get 'executable (agdaprover--project-configuration))))
+   (when agdaprover-library-file (list "--library-file" (expand-file-name agdaprover-library-file)))
+   (mapcar (lambda (option) (concat "--agda-option=" option)) agdaprover-agda-options)
+   (when (equal agdaprover-agda-options []) (list "--no-default-agda-options"))
    (when agdaprover-timeout
      (list "--timeout" (number-to-string agdaprover-timeout)))
    (when agdaprover-max-depth
@@ -267,7 +305,9 @@ editor client."
       (max_candidates . ,agdaprover-max-candidates)
       (max_term_size . ,agdaprover-max-term-size)
       (max_depth . ,(or agdaprover-max-depth :null))
-      (timeout_seconds . ,(or agdaprover-timeout :null)))))
+      (timeout_seconds . ,(or agdaprover-timeout :null))
+      ,@(when-let* ((configuration (agdaprover--project-configuration)))
+          `((project_configuration . ,configuration))))))
 
 (defun agdaprover--goal-at-point ()
   "Return the agda-mode goal number at point or signal a user error."

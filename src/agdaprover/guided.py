@@ -12,7 +12,7 @@ from .actions import RefinementCandidate
 from .bridge.resources import temporary_workspace
 from .contracts import GoalInfo
 from .focused import focused_prove
-from .kernel.p0 import AgdaLoadError, AgdaSession
+from .kernel.p0 import AgdaLoadError, AgdaSession, open_kernel_session
 from .kernel.protocol import KernelSessionFactory
 from .or_policy import ORPolicyRouter, policy_candidate
 from .presentation import (
@@ -23,11 +23,13 @@ from .presentation import (
     reconstruct_hole_completion,
     reconstruct_intro,
 )
+from .project_configuration import ProjectConfiguration
 from .ranking.protocol import SparsePolicyRanker
 from .resource_budget import charge_io
 from .search_frontier import BatchedFrontier
 from .terms import render_term
 from .type_syntax import top_level_arrow_count
+from .verification import prepare_project_overlay
 
 GUIDED_ALGORITHM = "agda-guided-best-first-and-or-v1"
 
@@ -112,6 +114,7 @@ def guided_prove(
     refinement_model: SparsePolicyRanker | None,
     policy_router: ORPolicyRouter | None = None,
     session_factory: KernelSessionFactory = AgdaSession,
+    project_configuration: ProjectConfiguration | None = None,
 ) -> GuidedResult:
     """Search constructor and case branches while every state remains Agda-loadable."""
 
@@ -180,9 +183,21 @@ def guided_prove(
         stats.states_enqueued += 1
 
     with temporary_workspace(prefix="agdaprover-guided-") as temporary:
-        candidate_path = Path(temporary) / source_file.name
-        with session_factory(
-            timeout_seconds=timeout_seconds, deadline=deadline
+        workspace = prepare_project_overlay(
+            source_file,
+            original_source,
+            Path(temporary),
+            project_configuration=project_configuration,
+            timeout_seconds=deadline - time.monotonic(),
+        )
+        candidate_path = workspace.source_file
+        stats.source_bytes_materialized += workspace.total_bytes
+        stats.source_bytes_written += workspace.total_bytes
+        with open_kernel_session(
+            session_factory,
+            project_configuration=workspace.configuration,
+            timeout_seconds=timeout_seconds,
+            deadline=deadline,
         ) as session:
             while queue:
                 if (

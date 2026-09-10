@@ -11,6 +11,7 @@ from pathlib import Path
 from .application import default_application
 from .contracts import TaskSpec
 from .principal_variation import AtomicPrincipalVariationPublisher
+from .project_configuration import ProjectConfiguration
 from .resource_budget import ResourceLimits
 
 
@@ -46,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ranker", choices=("symbolic", "nnue"), required=True)
     parser.add_argument("--model", type=Path)
     parser.add_argument("--action-model", type=Path)
+    parser.add_argument("--project-configuration")
     arguments = parser.parse_args(argv)
     task = TaskSpec(
         source_file=arguments.source,
@@ -65,6 +67,11 @@ def main(argv: list[str] | None = None) -> int:
         ranker=arguments.ranker,
         model_path=arguments.model,
         action_model_path=arguments.action_model,
+        project_configuration=ProjectConfiguration.from_dict(
+            json.loads(arguments.project_configuration)
+        )
+        if arguments.project_configuration is not None
+        else None,
     )
 
     def stop_at_safe_boundary(_signal_number: int, _frame: object) -> None:

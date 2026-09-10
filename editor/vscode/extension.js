@@ -9,6 +9,7 @@ const { spawn } = require('child_process');
 const vscode = require('vscode');
 const {
   buildBackend,
+  buildProjectConfiguration,
   isSupportedAgdaPath,
   resolveProjectRoot,
   selectAgdaReloadCommand
@@ -72,7 +73,13 @@ function configuration(context, document) {
     maxCandidates: settings.get('maxCandidates', 500),
     maxTermSize: settings.get('maxTermSize', 8),
     maxDepth: settings.get('maxDepth', null),
-    timeoutSeconds: settings.get('timeoutSeconds', null)
+    timeoutSeconds: settings.get('timeoutSeconds', null),
+    projectConfiguration: buildProjectConfiguration({
+      executable: settings.get('agdaExecutable', ''),
+      libraryFile: settings.get('libraryFile', ''),
+      options: settings.get('agdaOptions', null),
+      baseDirectory: workspaceFolders[0] || (document ? path.dirname(document.fileName) : context.extensionPath)
+    })
   };
 }
 
@@ -232,6 +239,7 @@ function runEditorAPI(config, operation, document, goalPosition, token) {
     max_depth: config.maxDepth,
     timeout_seconds: config.timeoutSeconds
   };
+  if (config.projectConfiguration) request.project_configuration = config.projectConfiguration;
   const backend = config.backend;
   return new Promise((resolve, reject) => {
     const child = spawn(

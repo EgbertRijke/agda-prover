@@ -58,6 +58,16 @@ working directory before editing it.
 
 ## Use it from the command line
 
+For a project with registered dependencies, pass your Agda library database:
+
+```sh
+agda-prover prove-prefix path/to/Module.agda --library-file path/to/libraries
+```
+
+Library and file-specific options are preserved. `--agda` selects a compiler;
+`--agda-option=--FLAG` supplies global checking options. Ambient default libraries
+are not used. See the [configuration contract](schemas/project-configuration-v1.md).
+
 ```sh
 .venv/bin/agda-prover inspect MyFile.agda
 .venv/bin/agda-prover prove MyFile.agda --goal 0

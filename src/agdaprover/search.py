@@ -23,7 +23,14 @@ from .contracts import (
 from .focused import focused_prove
 from .guided import guided_prove
 from .impossibility import certify_impossible
-from .kernel.p0 import AgdaBridgeError, AgdaLoadError, AgdaSession
+from .kernel.p0 import (
+    AgdaBridgeError,
+    AgdaLoadError,
+    AgdaSession,
+    ProjectInputs,
+    open_kernel_session,
+    session_project_inputs,
+)
 from .kernel.protocol import KernelSessionFactory, TransactionalKernelSession
 from .offline import assert_offline_configuration
 from .or_policy import ORPolicyRouter
@@ -34,6 +41,7 @@ from .presentation import (
     reconstruct_term_as_clause,
 )
 from .project import attach_module_scope, choose_goal, require_agda_source_file
+from .project_configuration import ProjectConfiguration
 from .ranking.protocol import ProofTermRanker
 from .ranking.runtime import configured_model_ids, load_proof_models
 from .reasoning import has_result_subject_elimination_shape
@@ -206,7 +214,9 @@ def prove(
         result.model_id = models.primary_id
         result.action_model_id = models.refinement_id
 
-        with session_factory(
+        with open_kernel_session(
+            session_factory,
+            project_configuration=task.project_configuration,
             timeout_seconds=budget.require_time("initial Agda load"),
             deadline=budget.deadline,
         ) as session:
@@ -224,6 +234,22 @@ def prove(
             )
             load_started = time.monotonic()
             loaded_goals = session.load_module(source_file)
+            original_inputs = session_project_inputs(session)
+            if original_inputs is not None and (
+                task.project_configuration is not None or original_inputs.library_bound
+            ):
+                result.task_id = task_identity(
+                    task,
+                    result.source_hash,
+                    mode="prove",
+                    policy_profile=result.policy_profile,
+                    toolchain_id=result.toolchain_id,
+                    model_ids={
+                        "primary": result.model_id,
+                        "refinement": result.action_model_id,
+                    },
+                    project_inputs_id=original_inputs.identity,
+                )
             result.cost.add(
                 kernel_loads=1,
                 kernel_load_elapsed_ms=(time.monotonic() - load_started) * 1000.0,
@@ -321,6 +347,7 @@ def prove(
                     refinement_model=refinement_model,
                     policy_router=policy_router,
                     session_factory=session_factory,
+                    project_configuration=task.project_configuration,
                 )
                 batch_stats = batched.stats
                 budget.account_actions(batch_stats.actions_considered)
@@ -363,6 +390,8 @@ def prove(
                         budget=budget,
                         agda_executable=session.executable,
                         agda_version=session.version,
+                        project_configuration=task.project_configuration,
+                        expected_inputs=original_inputs,
                     )
                     return True
                 if batched.status == "resource-exhausted":
@@ -462,6 +491,8 @@ def prove(
                         budget=budget,
                         agda_executable=session.executable,
                         agda_version=session.version,
+                        project_configuration=task.project_configuration,
+                        expected_inputs=original_inputs,
                     )
                     return result
 
@@ -536,6 +567,8 @@ def prove(
                         budget=budget,
                         agda_executable=session.executable,
                         agda_version=session.version,
+                        project_configuration=task.project_configuration,
+                        expected_inputs=original_inputs,
                     )
                     return result
                 result.diagnostics.append(
@@ -569,6 +602,7 @@ def prove(
                 refinement_model=refinement_model,
                 policy_router=policy_router,
                 session_factory=session_factory,
+                project_configuration=task.project_configuration,
             )
             budget.account_actions(guided.stats.actions_considered)
             result.search_stats["guided"] = guided.stats.to_dict()
@@ -611,6 +645,8 @@ def prove(
                     budget=budget,
                     agda_executable=session.executable,
                     agda_version=session.version,
+                    project_configuration=task.project_configuration,
+                    expected_inputs=original_inputs,
                 )
                 return result
 
@@ -692,6 +728,8 @@ def prove(
                     budget=budget,
                     agda_executable=session.executable,
                     agda_version=session.version,
+                    project_configuration=task.project_configuration,
+                    expected_inputs=original_inputs,
                 )
                 break
             else:
@@ -755,6 +793,8 @@ def _finish_verified_candidate(
     budget: SearchBudget,
     agda_executable: str,
     agda_version: str,
+    project_configuration: ProjectConfiguration | None = None,
+    expected_inputs: ProjectInputs | None = None,
 ) -> None:
     """Reconstruct and independently validate an Agda-accepted term."""
 
@@ -770,6 +810,8 @@ def _finish_verified_candidate(
         agda_executable=agda_executable,
         agda_version=agda_version,
         timeout_seconds=budget.require_time("fresh proof validation"),
+        expected_inputs=expected_inputs,
+        project_configuration=project_configuration,
     )
     result.cost.add(fresh_validation_runs=validation.get("fresh_validation_runs", 1))
     result.validation = validation
@@ -822,6 +864,8 @@ def _finish_guided_candidate(
     budget: SearchBudget,
     agda_executable: str,
     agda_version: str,
+    project_configuration: ProjectConfiguration | None = None,
+    expected_inputs: ProjectInputs | None = None,
 ) -> None:
     """Fresh-validate a completed multi-step source reconstruction."""
 
@@ -831,6 +875,8 @@ def _finish_guided_candidate(
         agda_executable=agda_executable,
         agda_version=agda_version,
         timeout_seconds=budget.require_time("fresh guided-proof validation"),
+        expected_inputs=expected_inputs,
+        project_configuration=project_configuration,
     )
     result.cost.add(fresh_validation_runs=validation.get("fresh_validation_runs", 1))
     result.validation = validation

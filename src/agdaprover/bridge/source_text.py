@@ -14,7 +14,9 @@ _MARKDOWN_END = re.compile(r"^[ \t]*```[ \t]*(?:\r?\n)?$")
 
 # One observational spelling/header boundary for project resolution and scope
 # provenance. Parameters are not part of the module's qualified source name.
-MODULE_NAME_COMPONENT = r"[^\W\d][\w'′₀-₉⁰-⁹-]*"
+# Components may begin with a digit (for example ``2-dimensional``). This
+# observes a filesystem-safe spelling; Agda still decides lexical validity.
+MODULE_NAME_COMPONENT = r"\w[\w'′₀-₉⁰-⁹-]*"
 QUALIFIED_MODULE_NAME = rf"{MODULE_NAME_COMPONENT}(?:\.{MODULE_NAME_COMPONENT})*"
 _MODULE_START = re.compile(
     rf"(?m)^(?P<indent>[ \t]*)module\s+"

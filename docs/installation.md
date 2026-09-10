@@ -49,3 +49,23 @@ with the existing search order.
 The existing `agdaprover` command alias and Python module remain supported.
 `agda-prover doctor --offline-audit` reports runtime configuration and checks
 for network-capable imports; it is not a complete installation or proof test.
+
+## Projects with registered libraries
+
+Pass `--library-file /path/to/libraries` to select an explicit Agda registration
+database. The project's `.agda-lib` declares its dependencies; the database
+registers their manifests. Ambient default libraries are not read. `--agda`
+selects the compiler, and repeated `--agda-option=--FLAG` arguments replace the
+default global options (`--without-K`, `--exact-split`), without replacing each
+library's own flags. Use `--no-default-agda-options` for no global options.
+
+In Emacs, set the buffer-local variables `agdaprover-library-file`,
+`agdaprover-agda-executable` and `agdaprover-agda-options` as needed. A relative
+registry or compiler path resolves against the buffer's default directory; nil
+options retain the global defaults, and an empty vector `[]` supplies none.
+
+In VS Code, use `agdaprover.libraryFile`, `agdaprover.agdaExecutable` and
+`agdaprover.agdaOptions`. The registry path may be relative to the document's
+workspace folder. Null options retain the global defaults; an empty array
+supplies no global options. These settings apply to proof search, prefix
+search, steps and their fresh validation.

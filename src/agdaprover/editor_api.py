@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .project import agda_source_suffix
+from .project_configuration import ProjectConfiguration
 from .resource_budget import ResourceLimits
 
 EDITOR_REQUEST_SCHEMA = "agdaprover.editor.request.v1"
@@ -38,6 +39,7 @@ _REQUEST_KEYS = frozenset(
         "max_depth",
         "timeout_seconds",
         "resources",
+        "project_configuration",
     }
 )
 
@@ -62,6 +64,7 @@ class EditorRequest:
     timeout_seconds: float | None = None
     max_verifier_calls: int | None = None
     resources: ResourceLimits = ResourceLimits()
+    project_configuration: ProjectConfiguration | None = None
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> EditorRequest:
@@ -144,6 +147,11 @@ class EditorRequest:
             resources=ResourceLimits.from_dict(value["resources"])
             if "resources" in value
             else ResourceLimits(),
+            project_configuration=ProjectConfiguration.from_dict(
+                value["project_configuration"]
+            )
+            if "project_configuration" in value
+            else None,
         )
 
     def to_namespace_values(self) -> dict[str, Any]:
@@ -164,6 +172,7 @@ class EditorRequest:
             "memory_bytes": self.resources.memory_bytes,
             "io_bytes": self.resources.io_bytes,
             "temporary_bytes": self.resources.temporary_bytes,
+            "project_configuration": self.project_configuration,
         }
 
 

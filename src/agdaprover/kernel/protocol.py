@@ -15,6 +15,7 @@ from typing import Literal, Protocol, runtime_checkable
 
 from ..bridge.contracts import StateToken
 from ..contracts import CandidateCheck, CaseSplitCheck, GoalInfo, RefinementCheck
+from ..project_configuration import ProjectConfiguration
 from ..retrieval import ScopedPremises
 
 
@@ -138,7 +139,11 @@ class KernelSessionFactory(Protocol):
     """Construct one bounded kernel session for a search operation."""
 
     def __call__(
-        self, *, timeout_seconds: float, deadline: float | None = None
+        self,
+        *,
+        timeout_seconds: float,
+        deadline: float | None = None,
+        project_configuration: ProjectConfiguration | None = None,
     ) -> AbstractContextManager[KernelSession]: ...
 
 

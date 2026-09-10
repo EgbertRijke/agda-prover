@@ -5,6 +5,11 @@ proof and one-step commands. `python -m agdaprover.schema_validation` is the
 dependency-free standalone validator and additionally enforces terminal-status
 invariants such as fresh validation evidence for `verified`.
 
+Tasks and editor requests may supply an explicit
+[project checking configuration](../../project-configuration-v1.md). It carries
+the Agda executable, registered libraries and global checking options through
+search and validation, including relocated candidate projects.
+
 ## Optional physical verifier budget
 
 An explicitly capped task adds `verifier_budget`, using

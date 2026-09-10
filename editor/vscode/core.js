@@ -201,10 +201,26 @@ function selectAgdaReloadCommand(options) {
   return null;
 }
 
+function buildProjectConfiguration({executable = '', libraryFile = '', options = null, baseDirectory}) {
+  if (typeof executable !== 'string' || typeof libraryFile !== 'string' ||
+      (options !== null && (!Array.isArray(options) || options.some(value => typeof value !== 'string')))) {
+    throw new Error('Invalid Agda checking configuration');
+  }
+  if (!executable && !libraryFile && options === null) return undefined;
+  return {
+    schema_version: 'agdaprover.project-configuration.v1',
+    executable: executable && /[\\/]/.test(executable) && !executable.startsWith('~')
+      ? path.resolve(baseDirectory, executable) : (executable || 'agda'),
+    library_file: libraryFile ? path.resolve(baseDirectory, libraryFile) : null,
+    options: options === null ? ['--without-K', '--exact-split'] : options
+  };
+}
+
 module.exports = {
   KNOWN_AGDA_RELOAD_ADAPTERS,
   SUPPORTED_SUFFIXES,
   buildBackend,
+  buildProjectConfiguration,
   isAgdaProverRoot,
   isSupportedAgdaPath,
   resolveProjectRoot,

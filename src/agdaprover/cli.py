@@ -20,7 +20,48 @@ from .contracts import EXIT_CODES, Status, TaskSpec
 from .editor_api import EditorRequest, error_envelope, response_envelope
 from .interactive import launch_interactive_run, serve_interactive
 from .offline import offline_audit
+from .project_configuration import ProjectConfiguration
 from .resource_budget import ResourceLimits
+
+
+def add_project_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--agda", help="Agda executable (default: agda)")
+    parser.add_argument(
+        "--library-file",
+        type=Path,
+        help="explicit Agda library registry; ambient defaults are never used",
+    )
+    checking_options = parser.add_mutually_exclusive_group()
+    checking_options.add_argument(
+        "--agda-option",
+        action="append",
+        help="global checking option, repeat as --agda-option=--FLAG; replaces default global options",
+    )
+    checking_options.add_argument(
+        "--no-default-agda-options",
+        dest="agda_option",
+        action="store_const",
+        const=[],
+        help="supply no global checking options; retain library and file options",
+    )
+
+
+def project_configuration_from_arguments(
+    arguments: argparse.Namespace,
+) -> ProjectConfiguration | None:
+    supplied = getattr(arguments, "project_configuration", None)
+    if supplied is not None:
+        return supplied
+    executable = getattr(arguments, "agda", None)
+    library = getattr(arguments, "library_file", None)
+    options = getattr(arguments, "agda_option", None)
+    if executable is None and library is None and options is None:
+        return None
+    return ProjectConfiguration(
+        executable or "agda",
+        library,
+        tuple(options) if options is not None else ProjectConfiguration().options,
+    )
 
 
 def add_search_options(
@@ -29,6 +70,7 @@ def add_search_options(
     allow_model: bool = True,
     joint_selection: bool = False,
 ) -> None:
+    add_project_options(parser)
     goal = parser.add_mutually_exclusive_group()
     goal.add_argument("--goal", type=int)
     goal.add_argument(
@@ -93,6 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
         "source", type=Path, metavar="SOURCE", help="an .agda or .lagda.md source file"
     )
     inspect_goal = inspect.add_mutually_exclusive_group()
+    add_project_options(inspect)
     inspect_goal.add_argument("--goal", type=int)
     inspect_goal.add_argument("--goal-position", type=int)
     inspect.add_argument(
@@ -208,6 +251,7 @@ def task_from_arguments(
         model_path=model,
         action_model_path=getattr(arguments, "action_model", None),
         offline=True,
+        project_configuration=project_configuration_from_arguments(arguments),
     )
 
 
@@ -217,6 +261,7 @@ def _inspect(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         goal_id=arguments.goal,
         goal_position=arguments.goal_position,
         timeout_seconds=arguments.timeout,
+        project_configuration=project_configuration_from_arguments(arguments),
     )
     return outcome.exit_code, outcome.payload
 
