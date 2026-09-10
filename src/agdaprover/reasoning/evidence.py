@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from itertools import product
 
-from ..notation import render_application, strip_outer_parentheses
+from ..notation import binary_mixfix_head, render_application, strip_outer_parentheses
 from ..relation_path import parse_relation
 from ..resource_budget import checkpoint
 from ..type_syntax import (
@@ -443,12 +443,105 @@ def evidence_applications(
                         "",
                         function.depth + 1,
                     )
+                    # The function may not determine parameters appearing
+                    # only in the following structured input. Infer this
+                    # supported prefix together instead of retaining an
+                    # underconstrained partial application's guessed type.
+                    if (
+                        len(domains) > 1
+                        and not top_level_arrow_count(domains[1])
+                        and len(split_top_level_application(domains[1])) > 1
+                    ):
+                        for value in values:
+                            checkpoint()
+                            if _evidence_application_head(
+                                value.type_text
+                            ) == _evidence_application_head(domains[1]):
+                                yield EvidenceTerm(
+                                    render_application(
+                                        name, (function.expression, value.expression)
+                                    ),
+                                    "",
+                                    1 + max(function.depth, value.depth),
+                                )
             continue
-        domain_head = result_head(domains[0])
+        domain_head = _evidence_application_head(domains[0]) or result_head(domains[0])
         if domain_head in relation_heads or _flexible_domain(ty, domains[0]):
             continue
         for value in values:
-            if result_head(value.type_text) == domain_head:
+            if (
+                _evidence_application_head(value.type_text)
+                or result_head(value.type_text)
+            ) == domain_head:
                 yield EvidenceTerm(
                     render_application(name, (value.expression,)), "", value.depth + 1
                 )
+
+
+def _evidence_application_head(type_text: str) -> str | None:
+    """Compare supported prefix/infix applications without treating operands as heads.
+
+    This is a syntactic proposal hint, not a normalization or equality claim.
+    Unknown/malformed observations have no recognized application head.
+    """
+    try:
+        if top_level_arrow_count(type_text):
+            return None
+        relation = parse_relation(type_text)
+        if relation is not None:
+            return binary_mixfix_head(relation.operator)
+        parts = split_top_level_application(type_text)
+        return strip_outer_parentheses(parts[0]) if len(parts) > 1 else None
+    except ValueError:
+        return None
+
+
+def ready_evidence_declarations(
+    goal_type: str,
+    terms: tuple[EvidenceTerm, ...],
+    declarations: tuple[tuple[str, str], ...],
+) -> Iterator[tuple[str, str]]:
+    """Offer supplied maps and consumers supported by the current context.
+
+    Specializing a map with an existing ordinary function can expose a useful
+    intermediate type without inventing a polymorphic function argument. A
+    supplied consumer can then connect that evidence to the goal. These are
+    shape-based proposals only: the caller must infer every application in the
+    exact kernel context, and retain no type containing unresolved metavariables.
+    No declarations are discovered here and no constructor law is assumed.
+    """
+    try:
+        goal_head = result_head(goal_type)
+    except ValueError:
+        return
+    function_arities: set[int] = set()
+    value_heads: set[str] = set()
+    for term in terms:
+        checkpoint()
+        try:
+            if result_head(term.type_text).startswith("Set"):
+                continue
+        except ValueError:
+            continue
+        domains = explicit_domains(term.type_text)
+        if domains and _plain_function_argument(term.type_text):
+            function_arities.add(len(domains))
+        head = _evidence_application_head(term.type_text)
+        if head is not None:
+            value_heads.add(head)
+    for name, ty in declarations:
+        checkpoint()
+        domains = explicit_domains(ty)
+        if not domains:
+            continue
+        if top_level_arrow_count(domains[0]):
+            if len(explicit_domains(domains[0])) in function_arities and any(
+                _evidence_application_head(domain) in value_heads
+                for domain in domains[1:]
+            ):
+                yield name, ty
+        elif (
+            result_head(ty) == goal_head
+            and _evidence_application_head(domains[0]) in value_heads
+        ):
+            yield name, ty

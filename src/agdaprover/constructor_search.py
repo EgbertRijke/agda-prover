@@ -67,6 +67,7 @@ from .reasoning.evidence import (
     family_names,
     indexed_evidence_inputs,
     is_family_transport,
+    ready_evidence_declarations,
     structured_combinator_applications,
     telescope_introduction,
     transport_index_labels,
@@ -1834,7 +1835,7 @@ class _ConstructorSearch:
             return ()
         actions = self._ordered_premise_actions(state, goal)
         declarations = (*locals_, *((a.expression, a.type_text) for a in actions))
-        projections = tuple(
+        evidence_declarations = tuple(
             (a.expression, a.type_text)
             for a in actions
             if explicit_domains(a.type_text)
@@ -1856,12 +1857,47 @@ class _ConstructorSearch:
                 )
             )
         )
+        expand_scoped_evidence = (
+            target is None
+            and (state, goal.goal_id) in self._scoped_actions
+            and len(split_top_level_application(goal.target)) > 1
+        )
+        evidence_limits = iter(
+            limit
+            for limit in (
+                self._scoped_actions[(state, goal.goal_id)].ranking.progressive_limits()
+                if expand_scoped_evidence
+                else ()
+            )
+            if limit > 64
+        )
+        if expand_scoped_evidence:
+            # An abstract family has no constructors, but supplied maps may
+            # connect ready contextual evidence to it. Use only this exact
+            # live scope's ranked declarations and the existing checked,
+            # budgeted evidence closure; do not open unrestricted refinement
+            # on a bare abstract carrier or an unconstrained metavariable.
+            evidence_declarations = tuple(
+                dict.fromkeys(
+                    (
+                        *evidence_declarations,
+                        *ready_evidence_declarations(
+                            goal.target,
+                            values,
+                            tuple((a.expression, a.type_text) for a in actions),
+                        ),
+                    )
+                )
+            )
         endpoints = frozenset((target.left, target.right)) if target else frozenset()
         edge_heads = frozenset((target.operator.split()[0],)) if target else frozenset()
         proposals = evidence_applications(
-            values, projections, endpoint_terms=endpoints, relation_heads=edge_heads
+            values,
+            evidence_declarations,
+            endpoint_terms=endpoints,
+            relation_heads=edge_heads,
         )
-        if next(proposals, None) is None:
+        if next(proposals, None) is None and not expand_scoped_evidence:
             return ()
         stop = min(self.action_budget - 1, self.stats.actions_considered + 48)
         terms = list(values)
@@ -1908,7 +1944,7 @@ class _ConstructorSearch:
                     p
                     for p in evidence_applications(
                         tuple(terms),
-                        projections,
+                        evidence_declarations,
                         endpoint_terms=endpoints,
                         relation_heads=edge_heads,
                     )
@@ -1918,7 +1954,43 @@ class _ConstructorSearch:
                 default=None,
             )
             if proposal is None:
-                break
+                limit = next(evidence_limits, None)
+                if limit is None:
+                    break
+                widened = self._ordered_premise_actions(
+                    state, goal, retrieval_limit=limit
+                )
+                additions = tuple(
+                    declaration
+                    for declaration in ready_evidence_declarations(
+                        goal.target,
+                        tuple(terms),
+                        tuple((a.expression, a.type_text) for a in widened),
+                    )
+                    if declaration not in evidence_declarations
+                )
+                evidence_declarations = (*evidence_declarations, *additions)
+                pool = self._scoped_actions[(state, goal.goal_id)]
+                self.stats.record_retrieval(
+                    "widenings",
+                    {
+                        "schema_version": "agdaprover.retrieval-evidence-widening.v1",
+                        "search_policy": PROGRESSIVE_POLICY,
+                        "scope_id": pool.ranking.scope_id,
+                        "index_id": pool.ranking.index_id,
+                        "query_id": pool.ranking.query_id,
+                        "width": limit,
+                        "new_expressions": [name for name, _ty in additions],
+                        "retained_expressions": [
+                            name for name, _ty in evidence_declarations
+                        ],
+                        "actions_considered": self.stats.actions_considered,
+                        "action_limit": collection_stop,
+                    },
+                )
+                # Keep successful observations and exact-parent rejections;
+                # widening spends the original allowance, never a fresh one.
+                continue
             attempted.add(proposal.expression)
             ty = infer(proposal.expression)
             if ty is None or _INTERNAL_META.search(ty):
