@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -19,7 +20,11 @@ from ..kernel.protocol import CommittedProofAction
 from ..project_configuration import ProjectConfiguration
 from ..resource_budget import ResourceLimitError
 from ..retrieval import ScopedPremises
-from ..type_syntax import split_top_level_arrows, top_level_arrow_count
+from ..type_syntax import (
+    split_top_level_arrows,
+    telescope_introduction,
+    top_level_arrow_count,
+)
 from .configuration import project_request
 from .contracts import (
     BridgeBudget,
@@ -29,7 +34,7 @@ from .contracts import (
     InteractionId,
     StateToken,
 )
-from .operations import ActionInput, OpenProjectResult, TermInput
+from .operations import ActionInput, OpenProjectResult, TermInput, TryActionResult
 from .project import detect_toolchain
 from .proof_state import Goal
 from .session import ConformingKernelSession
@@ -264,6 +269,10 @@ class AgdaSession:
                 ActionInput("refine", InteractionId(goal_id), expression),
                 self._budget,
             )
+            if not expression:
+                checked = self._recover_empty_introduction(
+                    self._state, goal_id, checked, commit=False
+                )
             if (
                 not checked.accepted
                 and expression
@@ -409,6 +418,10 @@ class AgdaSession:
                 ),
                 self._budget,
             )
+            if kind == "refine" and not expression:
+                checked = self._recover_empty_introduction(
+                    state, goal_id, checked, commit=True, parent_goal=parent_goal
+                )
             if (
                 not checked.accepted
                 and kind == "refine"
@@ -495,6 +508,67 @@ class AgdaSession:
             generated_goals=child_goals,
             alternatives=alternatives,
             rejection_code=checked.rejection_code,
+        )
+
+    def _recover_empty_introduction(
+        self,
+        state: StateToken,
+        goal_id: int,
+        checked: TryActionResult,
+        *,
+        commit: bool,
+        parent_goal: GoalInfo | None = None,
+    ) -> TryActionResult:
+        """Recover Agda's accepted-but-unrenderable automatic introduction.
+
+        Some pattern telescopes produce only ``?`` plus dangling interaction
+        metas. Retry once from the original parent, never from that child.
+        The explicit checked action owns the returned lineage and preview;
+        both physical calls remain charged by the transport budget.
+        """
+        if (
+            not checked.accepted
+            or checked.preview is None
+            or checked.preview.strip() != "?"
+        ):
+            return checked
+        if parent_goal is None:
+            parent_goal = next(
+                goal for goal in self.inspect_state(state) if goal.goal_id == goal_id
+            )
+        expression = telescope_introduction(
+            parent_goal.target,
+            frozenset(entry.name for entry in parent_goal.context if entry.name),
+            implicit_only=False,
+        )
+        if expression is not None:
+            operation = (
+                self._session.try_search_action if commit else self._session.try_action
+            )
+            retried = operation(
+                state,
+                ActionInput(
+                    "refine", InteractionId(goal_id), expression, commit=commit
+                ),
+                self._budget,
+            )
+            if (
+                not retried.accepted
+                or retried.preview is None
+                or retried.preview.strip() != "?"
+            ):
+                return retried
+            checked = retried
+        # Unsupported/no-progress output is an unavailable action, not an
+        # invalid input file or a completion. Do not publish its child/metas.
+        return replace(
+            checked,
+            transition=replace(checked.transition, child_state=None, committed=False),
+            accepted=False,
+            preview=None,
+            generated_goals=(),
+            edge=None,
+            rejection_code="agda-intro-no-progress",
         )
 
     def _expanded_refinement(

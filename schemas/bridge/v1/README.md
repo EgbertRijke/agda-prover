@@ -21,6 +21,22 @@ parameter's names, hiding, rendered binder and written type annotation. An empty
 not assert any inferred type. Actual types come from the kernel goal context.
 Existing annotated-parameter and module-identity wire shapes are unchanged.
 
+## Automatic introduction recovery
+
+The P0 compatibility adapter handles an Agda 2.8 automatic introduction whose
+preview is only `?` by retrying once with a capture-free explicit telescope.
+Some dependent pattern binders trigger this response even for valid function
+goals. The retry starts from the original parent; it cannot inherit the
+unrenderable attempt's interaction metas. Its checked expression, child token
+and replay lineage stay together. Unsupported or still-unrenderable output is
+an unavailable action (`agda-intro-no-progress`), not an invalid input file.
+
+This applies to speculative refinement and committed search actions, including
+one-step/editor use. Ordinary introductions are unchanged. All actual kernel
+requests, restoration and replay remain charged; resource exhaustion propagates
+and fresh reconstruction validation is still required for completion. The raw
+Stage 1 protocol and its state/diagnostic schemas are unchanged.
+
 ## Pinned library environments
 
 `OpenProjectRequest.library_file` selects an explicit registry; dependency

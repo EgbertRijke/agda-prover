@@ -25,6 +25,9 @@ from ..type_syntax import (
     split_top_level_arrows,
     top_level_arrow_count,
 )
+from ..type_syntax import (
+    telescope_introduction as telescope_introduction,
+)
 
 
 @dataclass(frozen=True)
@@ -305,51 +308,6 @@ def has_structured_builder(
         )
         is not None
     )
-
-
-def telescope_introduction(
-    type_text: str, occupied: frozenset[str], *, trailing_only: bool = False
-) -> str | None:
-    """Expose hidden arguments that ordinary visible introduction would hide.
-
-    Labels come from the displayed telescope. Fresh local names avoid capture;
-    unsupported alias/instance displays retain ordinary kernel introduction.
-    """
-    try:
-        groups = tuple(
-            group
-            for part in split_top_level_arrows(type_text)[:-1]
-            for group in split_adjacent_binders(part) or (part,)
-        )
-        parsed = tuple(parse_named_binder(group) for group in groups)
-    except ValueError:
-        return None
-    if trailing_only and (
-        not parsed or parsed[-1] is None or parsed[-1].visibility != "implicit"
-    ):
-        return None
-    if not any(
-        binder is not None and binder.visibility == "implicit" for binder in parsed
-    ):
-        return None
-    if any(
-        binder is not None and (binder.visibility == "instance" or "=" in binder.names)
-        for binder in parsed
-    ):
-        return None
-    used = set(occupied) | set(re.findall(r"[^\s(){}⦃⦄:→]+", type_text))
-    names: list[str] = []
-    index = 0
-    for binder in parsed:
-        for label in binder.names if binder is not None else (None,):
-            while (name := f"arg{index}") in used:
-                index += 1
-            used.add(name)
-            if binder is not None and binder.visibility == "implicit":
-                names.append(f"{{{label} = {name}}}")
-            else:
-                names.append(name)
-    return "λ " + " ".join(names) + " → ?"
 
 
 def explicit_domains(type_text: str) -> tuple[str, ...]:

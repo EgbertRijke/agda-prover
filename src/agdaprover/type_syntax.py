@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from collections import OrderedDict
 from collections.abc import Iterator
@@ -101,6 +102,57 @@ class NamedBinder:
     names: tuple[str, ...]
     domain: str
     visibility: Literal["explicit", "implicit", "instance"]
+
+
+def telescope_introduction(
+    type_text: str,
+    occupied: frozenset[str],
+    *,
+    trailing_only: bool = False,
+    implicit_only: bool = True,
+) -> str | None:
+    """Render a capture-free lambda proposal from a displayed telescope.
+
+    Ordinary reasoning requests hidden-binder exposure only. An adapter can
+    also request an explicit telescope when automatic introduction cannot
+    print internal pattern binders. This is syntax, not a typing witness:
+    callers must check the resulting expression with Agda.
+    """
+    try:
+        groups = tuple(
+            group
+            for part in split_top_level_arrows(type_text)[:-1]
+            for group in split_adjacent_binders(part) or (part,)
+        )
+        parsed = tuple(parse_named_binder(group) for group in groups)
+    except ValueError:
+        return None
+    if not parsed:
+        return None
+    if trailing_only and (parsed[-1] is None or parsed[-1].visibility != "implicit"):
+        return None
+    if implicit_only and not any(
+        binder is not None and binder.visibility == "implicit" for binder in parsed
+    ):
+        return None
+    if any(
+        binder is not None and (binder.visibility == "instance" or "=" in binder.names)
+        for binder in parsed
+    ):
+        return None
+    used = set(occupied) | set(re.findall(r"[^\s(){}⦃⦄:→]+", type_text))
+    names: list[str] = []
+    index = 0
+    for binder in parsed:
+        for label in binder.names if binder is not None else (None,):
+            while (name := f"arg{index}") in used:
+                index += 1
+            used.add(name)
+            if binder is not None and binder.visibility == "implicit":
+                names.append(f"{{{label} = {name}}}")
+            else:
+                names.append(name)
+    return "λ " + " ".join(names) + " → ?"
 
 
 def normalize_type_text(text: str) -> str:
