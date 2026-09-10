@@ -27,6 +27,7 @@ from .relation_path import parse_relation
 from .retrieval import RetrievalResult, ScopedPremises
 from .type_syntax import (
     binder_domain,
+    binder_domains,
     normalize_type_text,
     parse_named_binder,
     result_head,
@@ -1975,6 +1976,39 @@ def premise_type_pattern_matches(
         )
         is not None
     )
+
+
+def premise_function_shape_matches(goal: GoalInfo, action: ScopePremiseAction) -> bool:
+    """Propose reusing a supplied function at its complete expected telescope.
+
+    Hidden parameters are left to Agda; matching the explicit domains and
+    result together preserves repeated-variable relationships in the proposal.
+    This deliberately limited surface check is neither type equality nor a
+    reason to prune ordinary introduction when it does not recognize a shape.
+    """
+
+    def explicit_core(type_text: str) -> tuple[int, str]:
+        parts = split_top_level_arrows(type_text)
+        domains = tuple(
+            domain
+            for part in parts[:-1]
+            for group in split_adjacent_binders(part) or (part,)
+            if not group.lstrip().startswith(("{", "⦃"))
+            for domain in binder_domains(group)
+        )
+        return len(domains), " → ".join((*domains, parts[-1]))
+
+    try:
+        arity, target = explicit_core(goal.target)
+        candidate_arity, pattern = explicit_core(action.type_text)
+        return bool(
+            arity
+            and arity == candidate_arity
+            and not _INTERNAL_META.search(goal.target)
+            and premise_type_pattern_matches(action.type_text, pattern, target)
+        )
+    except ValueError:
+        return False
 
 
 def _has_independent_explicit_domain(type_text: str) -> bool:

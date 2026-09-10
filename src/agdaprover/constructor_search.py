@@ -37,6 +37,7 @@ from .premise_search import (
     ScopePremiseAction,
     premise_eliminator_source_domains,
     premise_expected_arguments,
+    premise_function_shape_matches,
     premise_has_shallow_support,
     premise_independent_result_domains,
     premise_inferred_application,
@@ -1627,11 +1628,22 @@ class _ConstructorSearch:
         return actions
 
     def _ordered_premise_actions(
-        self, state: StateToken, goal: GoalInfo, *, retrieval_limit: int = 64
+        self,
+        state: StateToken,
+        goal: GoalInfo,
+        *,
+        retrieval_limit: int = 64,
+        function_values: bool = False,
     ) -> tuple[ScopePremiseAction, ...]:
         """Return the bounded symbolic tier order, optionally NNUE-tiebroken."""
 
         actions = self._premise_actions(state, goal, retrieval_limit=retrieval_limit)
+        if function_values:
+            actions = tuple(
+                action
+                for action in actions
+                if premise_function_shape_matches(goal, action)
+            )
         scoped = self._scoped_actions.get((state, goal.goal_id))
         retrieval_metadata = (
             scoped.metadata(retrieval_limit) if scoped is not None else {}
@@ -1671,7 +1683,11 @@ class _ConstructorSearch:
         candidates = tuple(
             policy_candidate(
                 family="visible-premise",
-                tag="refine-visible-premise",
+                tag=(
+                    "reuse-visible-function"
+                    if function_values
+                    else "refine-visible-premise"
+                ),
                 expression=action.expression,
                 type_text=action.type_text,
                 symbolic_key=priorities[action],
@@ -1679,6 +1695,7 @@ class _ConstructorSearch:
                     ("explicit-arity", str(self._premise_explicit_arity(action))),
                     ("result-overlap", str(premise_result_overlap(goal, action))),
                 )
+                + (("whole-function-shape", "supported"),) * int(function_values)
                 + retrieval_metadata.get(action, ()),
             )
             for action in ordered
@@ -2756,6 +2773,88 @@ class _ConstructorSearch:
         ):
             yield ConstructorSolution(final_state, ProofPlan(preview, child_plans))
 
+    def _solve_with_function_values(
+        self, state: StateToken, goal: GoalInfo, premise_query_stop: int
+    ) -> Iterator[ConstructorSolution]:
+        """Try checked whole functions before reconstructing their bodies.
+
+        This uses only the opt-in live scope, the existing progressive ranking
+        and a shared branch allowance. Failed gives leave ordinary telescope
+        introduction available; no parameter assignments are guessed here.
+        """
+        self._premise_actions(state, goal)
+        pool = self._scoped_actions.get((state, goal.goal_id))
+        if pool is None:
+            return
+        stop = min(
+            premise_query_stop,
+            self.stats.premise_query_limit,
+            self._scope_premise_queries + _PREMISE_BRANCH_QUERY_SLICE,
+        )
+        attempted: set[str] = set()
+        for limit in pool.ranking.progressive_limits():
+            if not self._available() or self._scope_premise_queries >= stop:
+                return
+            actions = self._ordered_premise_actions(
+                state, goal, retrieval_limit=limit, function_values=True
+            )
+            new_actions = tuple(
+                action for action in actions if action.expression not in attempted
+            )
+            self.stats.record_retrieval(
+                "widenings",
+                {
+                    "schema_version": "agdaprover.retrieval-function-value-widening.v1",
+                    "search_policy": PROGRESSIVE_POLICY,
+                    "scope_id": pool.ranking.scope_id,
+                    "index_id": pool.ranking.index_id,
+                    "query_id": pool.ranking.query_id,
+                    "width": limit,
+                    "new_expressions": [a.expression for a in new_actions],
+                    "premise_queries": self._scope_premise_queries,
+                    "premise_query_stop": stop,
+                },
+            )
+            for action in new_actions:
+                if action.expression in attempted:
+                    continue
+                if self._scope_premise_queries >= stop or not self._charge():
+                    return
+                attempted.add(action.expression)
+                self.policy_router.mark("visible-premise", action.expression)
+                checked = self.session.commit_proof_action(
+                    state,
+                    kind="give",
+                    goal_id=goal.goal_id,
+                    expression=action.expression,
+                )
+                self.stats.actions_generated += 1
+                self.stats.premise_candidates += 1
+                self.stats.premise_queries += 1
+                self.stats.proof_checks += 1
+                self._scope_premise_queries += 1
+                attempt = {
+                    **action.to_dict(),
+                    "schema_version": "agdaprover.function-value-attempt.v1",
+                    "tag": "reuse-visible-function",
+                    "elaboration": "agda-give",
+                    "goal_target": goal.target,
+                    "accepted": checked.accepted,
+                    "rejection_code": checked.rejection_code,
+                }
+                if len(self.stats.premise_attempts) < _MAX_RECORDED_PREMISE_ATTEMPTS:
+                    self.stats.premise_attempts.append(attempt)
+                else:
+                    self.stats.premise_attempts_omitted += 1
+                if checked.accepted and checked.child_state is not None:
+                    yield ConstructorSolution(
+                        checked.child_state, ProofPlan(action.expression)
+                    )
+                else:
+                    self.policy_router.mark(
+                        "visible-premise", action.expression, outcome="invalid"
+                    )
+
     def _solve_goal(
         self,
         state: StateToken,
@@ -2865,6 +2964,9 @@ class _ConstructorSearch:
         # the complete visible telescope, rather than one binder per search
         # state or one whole-file reload per binder.
         if top_level_arrow_count(goal.target):
+            yield from self._solve_with_function_values(state, goal, premise_query_stop)
+            # A provisional give may still be rejected by the outer completion
+            # or recursive-plan filter. Keep introduction on generator resume.
             domains = explicit_domains(goal.target)
             if (
                 self.contextual_evidence_enabled
