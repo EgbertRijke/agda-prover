@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 
@@ -14,7 +15,11 @@ import Agda.Syntax.Common (unitRelevance)
 import Agda.Syntax.Internal (Type, Type'' (..), Term (..))
 import Agda.TypeChecking.CheckInternal qualified as C
 import Agda.TypeChecking.Conversion (equalType)
+#if defined(AGDAPROVER_AGDA_2643)
+import Agda.TypeChecking.Constraints (noConstraints)
+#else
 import Agda.TypeChecking.Constraints (reallyNoConstraints)
+#endif
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Reduce (reduce)
 
@@ -60,3 +65,17 @@ typeFamily original = do
     Sort{} -> pure True
     Pi domain body -> underAbstraction domain body typeFamily
     _ -> pure False
+
+#if defined(AGDAPROVER_AGDA_2643)
+-- In this kernel nonblocking constraints have no problem ID. A problem-local
+-- test alone therefore misses them. Conservatively require an empty constraint
+-- store before AND after the action; localTCState restores success/rejection.
+reallyNoConstraints :: TCM a -> TCM a
+reallyNoConstraints action = do
+  before <- getAllConstraints
+  unless (null before) $ genericError "query-reduction-existing-constraints"
+  result <- noConstraints action
+  after <- getAllConstraints
+  unless (null after) $ genericError "query-reduction-created-constraint"
+  pure result
+#endif
