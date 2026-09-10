@@ -27,6 +27,7 @@ from agdaprover.reasoning.evidence import (
     EvidenceTerm,
     evidence_applications,
     family_names,
+    structured_combinator_applications,
     telescope_introduction,
 )
 from agdaprover.reconstruction import apply_source_edit
@@ -37,6 +38,44 @@ from agdaprover.validation import validate_candidate
 
 
 class EvidenceProposalTests(unittest.TestCase):
+    def test_builder_constant_functions_are_proposals_with_open_fallback(self):
+        terms = (EvidenceTerm("seed", "Tag A"), EvidenceTerm("value", "P A"))
+        declarations = (("assemble", "(a : Tag A) → (Tag A → P A) → Bundle a"),)
+        baseline = list(
+            structured_combinator_applications("Bundle seed", terms, declarations)
+        )
+        expanded = list(
+            structured_combinator_applications(
+                "Bundle seed", terms, declarations, shallow_functions=True
+            )
+        )
+        self.assertEqual(baseline, ["assemble seed ?"])
+        self.assertEqual(expanded, ["assemble seed (λ _ → value)", *baseline])
+        hidden = (("assemble", "(a : Tag A) → ({x : Tag A} → P A) → Bundle a"),)
+        self.assertEqual(
+            list(
+                structured_combinator_applications(
+                    "Bundle seed", terms, hidden, shallow_functions=True
+                )
+            ),
+            baseline,
+        )
+        renamed = tuple(
+            ("create", ty.replace("Tag", "Carrier").replace("Bundle", "Output"))
+            for _name, ty in declarations
+        )
+        self.assertEqual(
+            list(
+                structured_combinator_applications(
+                    "Output seed",
+                    (EvidenceTerm("seed", "Carrier A"), terms[1]),
+                    renamed,
+                    shallow_functions=True,
+                )
+            ),
+            ["create seed (λ _ → value)", "create seed ?"],
+        )
+
     def test_restart_policy_respects_the_shared_remaining_allowance(self):
         self.assertFalse(_can_amortize_budget_widening(500, 9))
         self.assertFalse(_can_amortize_budget_widening(160, 1))

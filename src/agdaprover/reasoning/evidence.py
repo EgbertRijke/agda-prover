@@ -140,6 +140,8 @@ def structured_combinator_applications(
     goal_type: str,
     terms: tuple[EvidenceTerm, ...],
     declarations: tuple[tuple[str, str], ...],
+    *,
+    shallow_functions: bool = False,
 ) -> Iterator[str]:
     """Specialize supplied structured builders before rebuilding their output.
 
@@ -164,6 +166,34 @@ def structured_combinator_applications(
             if not top_level_arrow_count(term.type_text) and result_head(
                 term.type_text
             ) == result_head(domains[0]):
+                if shallow_functions:
+                    for index, domain in enumerate(domains[1:], 1):
+                        groups = tuple(
+                            group
+                            for part in split_top_level_arrows(domain)[:-1]
+                            for group in split_adjacent_binders(part) or (part,)
+                        )
+                        if not groups or any(
+                            group.lstrip().startswith(("{", "⦃")) for group in groups
+                        ):
+                            continue
+                        arity = len(explicit_domains(domain))
+                        for value in terms:
+                            checkpoint()
+                            if top_level_arrow_count(value.type_text) or result_head(
+                                value.type_text
+                            ) != result_head(domain):
+                                continue
+                            # Do not substitute into a dependent telescope.
+                            # Give Agda a complete constant-function proposal;
+                            # its expected type decides whether dependency,
+                            # modality and the ambient value really fit.
+                            arguments = [term.expression, *("?" for _ in domains[1:])]
+                            arguments[index] = (
+                                f"λ {' '.join('_' for _ in range(arity))} → "
+                                f"{value.expression}"
+                            )
+                            yield render_application(name, tuple(arguments))
                 yield render_application(
                     name, (term.expression, *("?" for _ in domains[1:]))
                 )

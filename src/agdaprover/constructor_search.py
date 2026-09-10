@@ -16,6 +16,7 @@ import re
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
+from itertools import chain
 from typing import Literal
 
 from .bridge.contracts import StateToken
@@ -227,6 +228,13 @@ class _ScopedActions:
             for rank, action in self.entries
             if admission_ranks[rank] <= limit
         }
+
+
+@dataclass(frozen=True)
+class _BuilderProposal:
+    expression: str
+    decision_id: str | None = None
+    candidate_id: str | None = None
 
 
 def _symbol_rarity_band(score: float) -> str:
@@ -527,6 +535,9 @@ class _ConstructorSearch:
         )
         self._local_eliminator_readiness_enabled = (
             os.environ.get("AGDAPROVER_LOCAL_ELIMINATOR_READINESS") == "1"
+        )
+        self._retrieved_builders_enabled = (
+            os.environ.get("AGDAPROVER_SCOPED_BUILDERS") == "1"
         )
         self.stats = ConstructorStats(
             depth_limit=max_depth,
@@ -2211,6 +2222,87 @@ class _ConstructorSearch:
                     goal, checked, depth, ancestors, premise_query_stop
                 )
 
+    def _retrieved_builder_proposals(
+        self,
+        state: StateToken,
+        goal: GoalInfo,
+        terms: tuple[EvidenceTerm, ...],
+    ) -> Iterator[_BuilderProposal]:
+        """Retain retrieval priority for already-supported builder proposals.
+
+        The ordinary admission lane prefers simpler results. A specialized
+        builder can have a large result precisely because it solves the whole
+        goal. Widen its original retrieved order separately, without changing
+        the generator, scope, ordinary admission or proof authority.
+        """
+        pool = self._scoped_actions[(state, goal.goal_id)]
+        metadata = pool.metadata(len(pool.ranking.items))
+        entries = sorted(pool.entries, key=lambda entry: entry[0])
+        seen: set[str] = set()
+        for width in pool.ranking.progressive_limits():
+            if not self._available():
+                return
+            candidates = []
+            for rank, action in entries:
+                if rank > width:
+                    break
+                for expression in structured_combinator_applications(
+                    goal.target,
+                    terms,
+                    ((action.expression, action.type_text),),
+                    shallow_functions=True,
+                ):
+                    if expression in seen:
+                        continue
+                    seen.add(expression)
+                    candidates.append(
+                        policy_candidate(
+                            family="visible-premise",
+                            tag="specialize-structured-builder",
+                            expression=expression,
+                            type_text=action.type_text,
+                            symbolic_key=(rank,),
+                            metadata=metadata[action]
+                            + (("builder-admission", "retrieval-order-v1"),),
+                        )
+                    )
+            self.stats.record_retrieval(
+                "widenings",
+                {
+                    "schema_version": "agdaprover.retrieval-builder-widening.v1",
+                    "search_policy": "retrieved-structured-builders-v1",
+                    "scope_id": pool.ranking.scope_id,
+                    "index_id": pool.ranking.index_id,
+                    "query_id": pool.ranking.query_id,
+                    "width": width,
+                    "new_expressions": [c.expression for c in candidates],
+                    "premise_queries": self._scope_premise_queries,
+                },
+            )
+            before_items = self.policy_router.model_items_scored
+            before_batches = self.policy_router.model_batches
+            before_elapsed = self.policy_router.model_elapsed_ms
+            before_fallbacks = self.policy_router.symbolic_fallbacks
+            ranked = self.policy_router.rank(goal, tuple(candidates))
+            self.stats.model_calls += (
+                self.policy_router.model_items_scored - before_items
+            )
+            self.stats.model_batches += (
+                self.policy_router.model_batches - before_batches
+            )
+            self.stats.model_elapsed_ms += (
+                self.policy_router.model_elapsed_ms - before_elapsed
+            )
+            self.stats.symbolic_fallbacks += (
+                self.policy_router.symbolic_fallbacks - before_fallbacks
+            )
+            yield from (
+                _BuilderProposal(
+                    candidate.expression, ranked.decision_id, candidate.candidate_id
+                )
+                for candidate in ranked.candidates
+            )
+
     def _solve_with_structured_builders(
         self,
         state: StateToken,
@@ -2241,24 +2333,82 @@ class _ConstructorSearch:
             is None
         ):
             return
-        declarations = (
-            *visible_functions,
-            *(
-                (a.expression, a.type_text)
-                for a in self._ordered_premise_actions(state, goal)
-            ),
+        retrieved = (
+            self._retrieved_builders_enabled
+            and (state, goal.goal_id) in self._scoped_actions
         )
-        for expression in structured_combinator_applications(
-            goal.target, terms, declarations
-        ):
+        proposals = (
+            chain(
+                (
+                    _BuilderProposal(expression)
+                    for expression in structured_combinator_applications(
+                        goal.target, terms, visible_functions
+                    )
+                ),
+                self._retrieved_builder_proposals(state, goal, terms),
+            )
+            if retrieved
+            else (
+                _BuilderProposal(expression)
+                for expression in structured_combinator_applications(
+                    goal.target,
+                    terms,
+                    (
+                        *visible_functions,
+                        *(
+                            (a.expression, a.type_text)
+                            for a in self._ordered_premise_actions(state, goal)
+                        ),
+                    ),
+                )
+            )
+        )
+        stop = min(
+            premise_query_stop,
+            self.stats.premise_query_limit,
+            self._scope_premise_queries + _PREMISE_BRANCH_QUERY_SLICE,
+        )
+        attempted: set[str] = set()
+        for proposal in proposals:
+            expression = proposal.expression
+            if retrieved and expression in attempted:
+                continue
+            if retrieved and self._scope_premise_queries >= stop:
+                return
             if not self._charge():
                 return
+            attempted.add(expression)
+            if proposal.candidate_id is not None:
+                # A child's ranking must not steal its parent's outcome when
+                # this iterator resumes after backtracking.
+                self.policy_router.recorder.mark(
+                    proposal.decision_id, proposal.candidate_id
+                )
             checked = self.session.commit_proof_action(
                 state, kind="refine", goal_id=goal.goal_id, expression=expression
             )
             self.stats.actions_generated += 1
             self.stats.premise_queries += 1
             self.stats.premise_refinement_queries += 1
+            if retrieved:
+                self._scope_premise_queries += 1
+                self.stats.premise_candidates += 1
+                attempt = {
+                    "schema_version": "agdaprover.structured-builder-attempt.v1",
+                    "expression": expression,
+                    "goal_target": goal.target,
+                    "accepted": checked.accepted,
+                    "generated_subgoals": len(checked.generated_goals),
+                    "rejection_code": checked.rejection_code,
+                }
+                if len(self.stats.premise_attempts) < _MAX_RECORDED_PREMISE_ATTEMPTS:
+                    self.stats.premise_attempts.append(attempt)
+                else:
+                    self.stats.premise_attempts_omitted += 1
+                if not checked.accepted and proposal.candidate_id is not None:
+                    self.policy_router.recorder.mark(
+                        proposal.decision_id, proposal.candidate_id, outcome="invalid"
+                    )
             yield from self._accepted_introduction(
                 goal, checked, depth, ancestors, premise_query_stop
             )

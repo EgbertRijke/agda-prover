@@ -99,6 +99,40 @@ NATIVE = (
     "opt-in native scoped-retrieval profile is required",
 )
 class FunctionValueKernelTests(unittest.TestCase):
+    def test_retrieved_builder_specializes_a_function_parameter(self):
+        source = """{-# OPTIONS --safe --without-K #-}
+module FunctionValues where
+data Tag (A : Set) : Set where
+  tag : A → Tag A
+abstract
+  Token : {A : Set} → Tag A → (Tag A → Set) → Set
+  Token {A} x F = Tag A → Tag A
+  token : {A : Set} (x : Tag A) (F : Tag A → Set) → Token x F
+  token x F y = y
+record Package {A : Set} (x : Tag A) (F : Tag A → Set) : Set where
+  field witness : Token x F
+build : {A : Set} (x : Tag A) (F : Tag A → Set) → Package x F
+build x F = record { witness = token x F }
+module _ {A : Set} (seed : Tag A) (B : Set) where
+  target : Package seed (λ _ → B)
+  target = {!!}
+"""
+        with patch.dict("os.environ", {"AGDAPROVER_SCOPED_BUILDERS": "1"}):
+            stats = self.check_source(source, "build")
+        attempts = [
+            a
+            for a in stats["search_stats"]["premise_attempts"]
+            if a["schema_version"] == "agdaprover.structured-builder-attempt.v1"
+        ]
+        self.assertTrue(
+            any(
+                a["expression"].startswith("build seed (λ")
+                and a["accepted"]
+                and a["generated_subgoals"] == 0
+                for a in attempts
+            )
+        )
+
     def check_source(self, source, expected, *, control=False, direct=False):
         with (
             tempfile.TemporaryDirectory() as directory,
