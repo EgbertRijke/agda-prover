@@ -19,18 +19,15 @@ import Data.ByteString.Lazy.Char8 qualified as BL
 import Data.Foldable (toList)
 import Data.Map.Strict qualified as Map
 import Data.List (foldl', stripPrefix)
-import Data.Maybe (catMaybes, fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Set qualified as Set
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 
-import Agda.Syntax.Abstract.Name
 import Agda.Syntax.Common
 import Agda.Syntax.Common.Pretty (prettyShow)
 import Agda.Syntax.Internal hiding (arity)
 import Agda.Syntax.Internal.Generic (foldTerm)
-import Agda.Syntax.Internal.MetaVars (noMetas)
-import Agda.Syntax.Literal (Literal (LitQName))
 import Agda.Syntax.Scope.Base
 import Agda.Syntax.Scope.Monad (tryResolveName)
 import Agda.Syntax.Translation.AbstractToConcrete (ToConcrete (..), abstractToConcrete_)
@@ -41,6 +38,7 @@ import Agda.TypeChecking.Reduce (instantiateFull, normalise)
 import QueryReduction qualified as Query
 import TypeSpine qualified as Spine
 import ScopeNames (nameable)
+import ScopeEvidence (Summary (..), key, summarize, dependencies)
 
 data QueryMode = Raw | Normalized | TypeFamilies | TypeHeads deriving (Eq)
 
@@ -99,10 +97,6 @@ schema withDependencies mode
   | otherwise = if withDependencies then "agdaprover.live-scope.v7"
                 else "agdaprover.live-scope.v6"
 
-key :: QName -> String
-key q = case nameId (qnameName q) of
-  NameId n (ModuleNameHash m) -> show m ++ ":" ++ show n
-
 -- Count the syntactic Pi spine, without pretending similarity is unification.
 -- NoAbs does not bind a variable. Context heads use the live de Bruijn index.
 headArity :: Type -> (Maybe String, Int)
@@ -119,13 +113,6 @@ headArity = go 0 0 . unEl
 -- This deliberately small feature view traverses term bodies, not type sorts.
 -- Projections on a neutral/constructor spine are symbols too. Unknown metas
 -- remain unknown; nothing here reduces, solves, or assigns an obligation.
-data Summary = Summary !Integer !(Set.Set String)
-
-summarize :: [Term] -> Summary
-summarize = foldl' (\(Summary count symbols) t ->
-  Summary (count + 1) (foldl' (flip Set.insert) symbols (termSymbols t)))
-  (Summary 0 Set.empty)
-
 features :: Type -> (Value, Integer)
 features ty = featuresWithShape ty ty
 
@@ -150,34 +137,6 @@ project mode ty
              "conversion_checked" .= checked,
              "raw_result_head" .= head', "raw_arity" .= arity]
       pure (f, n + Spine.headReductions evidence, Just witness)
-
-termSymbols :: Term -> [String]
-termSymbols = \case
-  Def q es -> key q : projections es
-  Con h _ es -> key (conName h) : projections es
-  Var _ es -> projections es
-  MetaV _ es -> projections es
-  Lit (LitQName q) -> [key q]
-  _ -> []
- where
-  projections es = [key q | Proj _ q <- es]
-
--- Ordinary lookup preserves abstraction AND opacity. Only original concrete
--- RHSs participate; never compiled clauses, display forms or referenced bodies.
--- Raw metavariables (even assigned ones not instantiated in the RHS) make the
--- evidence unavailable. Filtering endpoints happens before anything is emitted.
-dependencies :: Set.Set String -> QName -> TCM (Maybe [String], Integer)
-dependencies allowed q = do
-  def <- getConstInfo q
-  case theDef def of
-    FunctionDefn f | defAbstract def /= AbstractDef -> do
-      let bodies = catMaybes (map clauseBody (_funClauses f))
-          Summary count symbols = summarize (concatMap (foldTerm (: [])) bodies)
-      pure (if noMetas bodies then
-              Just $ Set.toAscList $ Set.delete (key q) $
-                Set.intersection allowed symbols
-            else Nothing, count)
-    _ -> pure (Nothing, 0)
 
 emit :: Bool -> QueryMode -> InteractionId -> String -> TCM ()
 emit withDependencies mode point payload = do
