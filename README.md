@@ -30,7 +30,7 @@ For solving part of a file while later goals remain open, also install the
 `agdaprover`, and enable `agdaprover-mode` alongside Agda mode.
 Press `C-c C-x C-p` to solve through the goal at the cursor. Outside a goal,
 the same command selects all open goals in the file. `C-c C-x C-s` proposes
-one step; `C-c C-x C-d` selects deep search; `C-c C-x C-k` cancels the run.
+one step; `C-c C-x C-k` cancels the run.
 
 **VS Code:** follow the [extension setup](editor/vscode/README.md).
 The adapter works alongside Agda language extensions.
@@ -72,16 +72,29 @@ are not used. See the [configuration contract](schemas/project-configuration-v1.
 .venv/bin/agda-prover inspect MyFile.agda
 .venv/bin/agda-prover prove MyFile.agda --goal 0
 .venv/bin/agda-prover prove-prefix MyFile.agda
-.venv/bin/agda-prover prove-prefix MyFile.agda --deep
 .venv/bin/agda-prover step MyFile.agda --goal 0
 ```
 
 Commands return JSON results and proposed edits; they do not overwrite your
 source. Add `--timeout 60` to limit a search to one minute. The
 [interactive command](docs/interactive.md) supports progress inspection,
-pause, resume, stop, and accepting an individual completed goal. Deep search
-increases the default whole-run allowance from 500 to 8,000 actions. Explicit
-limits still override it; it does not add a wall-time or proof-depth cap.
+pause, resume, stop, and accepting an individual completed goal.
+
+## Deeper search
+
+For harder goals or larger batches of open goals, start deep search:
+
+- Emacs: press `C-c C-x C-d`.
+- VS Code: run **AgdaProver: Deep Search Through Current Goal or All Goals**
+  from the Command Palette, or press `Ctrl+C Ctrl+X Ctrl+D`.
+- Command line: run `agda-prover prove-prefix MyFile.agda --deep`.
+
+In either editor, this solves through the goal at the cursor, or all open goals
+when the cursor is outside a goal. Deep search raises the default whole-run
+allowance from 500 to 8,000 actions; it can take longer and does not guarantee a
+completion. Explicit resource limits still override the preset. See
+[deep-search settings](docs/interactive.md#deep-search) to make it the default
+or reset an existing action-limit override.
 
 ## What to expect
 
