@@ -4,7 +4,7 @@
 
 -- Query evidence only. Agda's typed traversal supplies the dependent context;
 -- ordinary value/function arguments are not recursively normalized for ranking.
-module QueryReduction (ReducedQuery (..), typeFamilies) where
+module QueryReduction (ReducedQuery (..), typeFamilies, checkedTypeChange) where
 
 import Control.Monad (unless)
 import Control.Monad.Except (catchError, throwError)
@@ -40,12 +40,16 @@ typeFamilies target = do
           liftIO $ modifyIORef' reductions (+ 1)
           reduce term
         else pure term }
-  -- Even a successful observation cannot commit state. A generated meta must
-  -- not escape in the returned type, and conversion must create no obligations.
-  alternate <- localTCState $ catchError
+  alternate <- checkedTypeChange target (C.inferInternal' action target)
+  ReducedQuery alternate <$> liftIO (readIORef visited) <*> liftIO (readIORef reductions)
+
+-- Shared by query and premise observers. Even success cannot commit state;
+-- generated metas and obligations may not escape in an optional type view.
+checkedTypeChange :: Type -> TCM Type -> TCM (Maybe Type)
+checkedTypeChange target change = localTCState $ catchError
     (dontAssignMetas $ reallyNoConstraints $ do
       before <- useTC stFreshMetaId
-      ty <- C.inferInternal' action target
+      ty <- change
       localTC (\e -> e { envRelevance = unitRelevance }) $ equalType target ty
       after <- useTC stFreshMetaId
       unless (before == after) $ genericError "query-reduction-created-meta"
@@ -56,7 +60,6 @@ typeFamilies target = do
       -- Process/IO failures and asynchronous cancellation are not a safe
       -- optional-view miss. The enclosing request retains its normal failure.
       err -> throwError err)
-  ReducedQuery alternate <$> liftIO (readIORef visited) <*> liftIO (readIORef reductions)
 
 typeFamily :: Type -> TCM Bool
 typeFamily original = do

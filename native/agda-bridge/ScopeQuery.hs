@@ -17,7 +17,7 @@ import Data.ByteString.Lazy.Char8 qualified as BL
 import Data.Foldable (toList)
 import Data.Map.Strict qualified as Map
 import Data.List (foldl', stripPrefix)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Set qualified as Set
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
@@ -36,13 +36,15 @@ import Agda.TypeChecking.Conversion (equalType, tryConversion)
 import Agda.TypeChecking.Pretty (prettyTCM)
 import Agda.TypeChecking.Reduce (instantiateFull, normalise)
 import QueryReduction qualified as Query
+import TypeSpine qualified as Spine
 import ScopeNames (nameable)
 
-data QueryMode = Raw | Normalized | TypeFamilies deriving (Eq)
+data QueryMode = Raw | Normalized | TypeFamilies | TypeHeads deriving (Eq)
 
 request :: String -> Maybe (Bool, QueryMode, String)
 request payload = first
-  [("v11", True, TypeFamilies), ("v10", False, TypeFamilies),
+  [("v13", True, TypeHeads), ("v12", False, TypeHeads),
+   ("v11", True, TypeFamilies), ("v10", False, TypeFamilies),
    ("v9", True, Normalized), ("v8", False, Normalized),
    ("v7", True, Raw), ("v6", False, Raw)]
  where
@@ -70,6 +72,8 @@ instance FromJSON ScopeRequest where
 
 schema :: Bool -> QueryMode -> String
 schema withDependencies mode
+  | mode == TypeHeads = if withDependencies then "agdaprover.live-scope.v13"
+                       else "agdaprover.live-scope.v12"
   | mode == TypeFamilies = if withDependencies then "agdaprover.live-scope.v11"
                           else "agdaprover.live-scope.v10"
   | mode == Normalized = if withDependencies then "agdaprover.live-scope.v9"
@@ -105,10 +109,29 @@ summarize = foldl' (\(Summary count symbols) t ->
   (Summary 0 Set.empty)
 
 features :: Type -> (Value, Integer)
-features ty =
+features ty = featuresWithShape ty ty
+
+featuresWithShape :: Type -> Type -> (Value, Integer)
+featuresWithShape ty shape =
   let Summary count symbols = summarize (foldTerm (: []) ty)
-      (head', arity) = headArity ty
+      (head', arity) = headArity shape
   in (object ["result_head" .= head', "symbols" .= Set.toAscList symbols, "arity" .= arity], count)
+
+project :: QueryMode -> Type -> TCM (Value, Integer, Maybe Value)
+project mode ty
+  | mode /= TypeHeads = let (f, n) = features ty in pure (f, n, Nothing)
+  | otherwise = do
+      evidence <- Spine.resultSpine ty
+      let shape = Spine.spineType evidence
+          (f, n) = featuresWithShape ty (fromMaybe ty shape)
+          (head', arity) = headArity ty
+          checked = isJust shape
+          witness = object
+            ["status" .= (if checked then "checked" else "kernel-rejected" :: String),
+             "head_reductions" .= Spine.headReductions evidence,
+             "conversion_checked" .= checked,
+             "raw_result_head" .= head', "raw_arity" .= arity]
+      pure (f, n + Spine.headReductions evidence, Just witness)
 
 termSymbols :: Term -> [String]
 termSymbols = \case
@@ -165,7 +188,7 @@ emit withDependencies mode point payload = do
     -- Membership and exclusions are settled BEFORE querying types/features.
     meta <- lookupInteractionId point
     target <- instantiateFull =<< getMetaTypeInContext meta
-    let (query, goalNodes) = features target
+    (query, goalNodes, targetSpine) <- project mode target
     -- Normalize inside the ORIGINAL interaction telescope. Closing the goal
     -- would change local head coordinates and arity. Ordinary reduction keeps
     -- abstraction/opacity in force; conversion cannot assign unresolved metas.
@@ -198,10 +221,10 @@ emit withDependencies mode point payload = do
     outcome <- runExceptT $ do
      (rows, nodes, dependencyNodes, _) <- foldM (\(previous, total, depTotal, bytesSoFar) (q, as) -> do
       ty <- lift $ instantiateFull =<< typeOfConst q
-      let (f, count) = features ty
+      (f, count, premiseSpine) <- lift $ project mode ty
       -- The existing structural consumers expect the same Normalised view
-      -- as Agda's module-contents command. Keep the ranking features on the
-      -- original type: this view is not a new feature policy or typed IR.
+      -- as Agda's module-contents command. Rendering is independent of the
+      -- selected structural feature policy; it is not authoritative typed IR.
       -- Count the reduced body before rendering it, still under the request
       -- deadline and local-state/dontAssignMetas isolation boundary.
       normalized <- lift $ normalise ty
@@ -212,7 +235,8 @@ emit withDependencies mode point payload = do
         else pure (Nothing, 0)
       let row = object $ ["id" .= key q, "aliases" .= Set.toAscList as,
                           "type" .= view, "features" .= f] ++
-                          ["rhs_dependencies" .= refs | withDependencies]
+                          ["rhs_dependencies" .= refs | withDependencies] ++
+                          maybe [] (\v -> ["type_spine" .= v]) premiseSpine
           size = toInteger (BL.length (encode row))
       -- A lower bound on final encoded bytes permits early refusal, but never
       -- publishes the rows accumulated so far as a complete observation.
@@ -225,13 +249,16 @@ emit withDependencies mode point payload = do
           ["kind" .= ("AgdaProverScope" :: String),
            "schema_version" .= schema withDependencies mode,
            "output_bytes" .= limit,
-           "feature_policy" .= ("agda-term-body-head-symbol-arity-v1" :: String),
+           "feature_policy" .= (if mode == TypeHeads
+             then "agda-result-spine-head-raw-symbols-v1"
+             else "agda-term-body-head-symbol-arity-v1" :: String),
            "type_view_policy" .= ("agda-normalise-contextual-type-v1" :: String),
            "interaction_id" .= interactionId point,
            "excluded_names" .= excluded,
            "omitted_aliases" .= object ["ambiguous" .= ambiguous, "unnameable" .= unnameable],
            "target" .= query, "declarations" .= reverse rows,
            "structure_nodes" .= nodes] ++ extra ++
+          maybe [] (\v -> ["type_spine" .= v]) targetSpine ++
           (if withDependencies then
             ["dependency_policy" .= ("permitted-clause-rhs-references-v1" :: String),
              "dependency_nodes" .= dependencyNodes] else [])

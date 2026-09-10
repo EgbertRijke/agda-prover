@@ -11,7 +11,7 @@ from agdaprover.observability.policy_trace import PolicyTraceRecorder
 from .bridge.resources import current_process_rss
 from .budget import SearchBudget
 from .case_search import batched_case_prove
-from .constructor_search import constructor_tree_prove
+from .constructor_search import ConstructorStats, constructor_tree_prove
 from .contracts import (
     CandidateAttempt,
     GoalInfo,
@@ -397,6 +397,39 @@ def prove(
                 and not opaque_result
                 and isinstance(session, TransactionalKernelSession)
             ):
+
+                def record_constructor_stats(
+                    constructor_stats: ConstructorStats,
+                ) -> None:
+                    search_stats["constructors"] = constructor_stats.to_dict()
+                    result.candidates_generated += constructor_stats.actions_considered
+                    result.model_calls += constructor_stats.model_calls
+                    result.model_elapsed_ms += constructor_stats.model_elapsed_ms
+                    constructor_checks = (
+                        constructor_stats.constructor_queries
+                        + constructor_stats.proof_checks
+                        + constructor_stats.catalog_queries
+                        + constructor_stats.premise_catalog_queries
+                        + constructor_stats.premise_refinement_queries
+                        + constructor_stats.completion_queries
+                    )
+                    result.verifier_calls += constructor_checks
+                    result.cost.add(
+                        actions_generated=constructor_stats.actions_generated,
+                        actions_expanded=constructor_stats.actions_considered,
+                        actions_scored=constructor_stats.model_calls,
+                        goal_inspections=constructor_stats.goal_inspections,
+                        speculative_checks=constructor_checks,
+                        candidate_terms_checked=constructor_stats.proof_checks,
+                        refinement_checks=(
+                            constructor_stats.constructor_queries
+                            + constructor_stats.premise_refinement_queries
+                        ),
+                        model_batches=constructor_stats.model_batches,
+                        model_items_scored=constructor_stats.model_calls,
+                        generated_subgoals=constructor_stats.generated_subgoals,
+                    )
+
                 constructor = constructor_tree_prove(
                     session,
                     goal,
@@ -409,37 +442,9 @@ def prove(
                     excluded_premises=frozenset(
                         (declaration_name_at_goal(source_file.read_text(), goal),)
                     ),
+                    on_statistics=record_constructor_stats,
                 )
-                constructor_stats = constructor.stats
-                budget.account_actions(constructor_stats.actions_considered)
-                result.search_stats["constructors"] = constructor_stats.to_dict()
-                result.candidates_generated += constructor_stats.actions_considered
-                result.model_calls += constructor_stats.model_calls
-                result.model_elapsed_ms += constructor_stats.model_elapsed_ms
-                constructor_checks = (
-                    constructor_stats.constructor_queries
-                    + constructor_stats.proof_checks
-                    + constructor_stats.catalog_queries
-                    + constructor_stats.premise_catalog_queries
-                    + constructor_stats.premise_refinement_queries
-                    + constructor_stats.completion_queries
-                )
-                result.verifier_calls += constructor_checks
-                result.cost.add(
-                    actions_generated=constructor_stats.actions_generated,
-                    actions_expanded=constructor_stats.actions_considered,
-                    actions_scored=constructor_stats.model_calls,
-                    goal_inspections=constructor_stats.goal_inspections,
-                    speculative_checks=constructor_checks,
-                    candidate_terms_checked=constructor_stats.proof_checks,
-                    refinement_checks=(
-                        constructor_stats.constructor_queries
-                        + constructor_stats.premise_refinement_queries
-                    ),
-                    model_batches=constructor_stats.model_batches,
-                    model_items_scored=constructor_stats.model_calls,
-                    generated_subgoals=constructor_stats.generated_subgoals,
-                )
+                budget.account_actions(constructor.stats.actions_considered)
                 if constructor.solutions:
                     solution = constructor.solutions[0]
                     binders, body = solution.plan.clause_parts()

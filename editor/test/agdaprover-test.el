@@ -24,6 +24,8 @@
 
 (defun agdaprover-test--wait-until (predicate timeout)
   "Wait up to TIMEOUT seconds for PREDICATE while processing events."
+  ;; An exited process can still have a pending sentinel.  Integration tests
+  ;; wait for the sentinel to clear `agdaprover--process', not just OS exit.
   (let ((deadline (+ (float-time) timeout)))
     (while (and (not (funcall predicate)) (< (float-time) deadline))
       (accept-process-output nil 0.05))
@@ -518,7 +520,7 @@
           (agdaprover-prove-goal-symbolic)
           (should
            (agdaprover-test--wait-until
-            (lambda () (and (not (process-live-p agdaprover--process))
+            (lambda () (and (null agdaprover--process)
                             agdaprover--last-result))
             20))
           (should (equal (alist-get 'status agdaprover--last-result)
@@ -571,7 +573,7 @@
           (agdaprover-prove-goal-symbolic)
           (should
            (agdaprover-test--wait-until
-            (lambda () (and (not (process-live-p agdaprover--process))
+            (lambda () (and (null agdaprover--process)
                             agdaprover--last-result
                             (not agda2-in-progress)))
             20))
@@ -627,7 +629,7 @@
             (should
              (agdaprover-test--wait-until
               (lambda ()
-                (and (not (process-live-p agdaprover--process))
+                (and (null agdaprover--process)
                      agdaprover--last-result))
               20))
             (should (equal (alist-get 'status agdaprover--last-result)
@@ -670,7 +672,7 @@
           (agdaprover-prove-goal)
           (should
            (agdaprover-test--wait-until
-            (lambda () (and (not (process-live-p agdaprover--process))
+            (lambda () (and (null agdaprover--process)
                             agdaprover--last-result
                             (not agda2-in-progress)))
             20))
@@ -725,7 +727,7 @@
           (agdaprover-step-goal)
           (should
            (agdaprover-test--wait-until
-            (lambda () (and (not (process-live-p agdaprover--process))
+            (lambda () (and (null agdaprover--process)
                             (not agda2-in-progress)
                             (agda2-goal-overlay 0)))
             20))
@@ -740,7 +742,7 @@
           (agdaprover-step-goal)
           (should
            (agdaprover-test--wait-until
-            (lambda () (and (not (process-live-p agdaprover--process))
+            (lambda () (and (null agdaprover--process)
                             (not agda2-in-progress)
                             (not (agda2-goal-overlay 0))))
             20))
@@ -782,7 +784,7 @@
           (agdaprover-step-goal)
           (should
            (agdaprover-test--wait-until
-            (lambda () (and (not (process-live-p agdaprover--process))
+            (lambda () (and (null agdaprover--process)
                             (not agda2-in-progress)))
             20))
           (should (equal (alist-get 'status agdaprover--last-step-result)

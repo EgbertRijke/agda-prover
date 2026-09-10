@@ -14,7 +14,7 @@ import math
 import os
 import re
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
@@ -89,6 +89,7 @@ from .relation_path import (
 )
 from .retrieval import (
     PROGRESSIVE_POLICY,
+    TYPE_SPINE_HEAD_POLICY,
     RetrievalResult,
     ScopedPremises,
     SymbolicPremiseIndex,
@@ -126,6 +127,7 @@ class _ScopedActions:
     entries: tuple[tuple[int, ScopePremiseAction], ...]
     serialized_bytes: int
     admission_order: tuple[int, ...]
+    feature_policy: str | None = None
 
     def through(self, limit: int) -> tuple[ScopePremiseAction, ...]:
         admitted = frozenset(self.admission_order[:limit])
@@ -214,6 +216,11 @@ class _ScopedActions:
                     ),
                 )
                 if self.ranking.type_family_query_policy is not None
+                else ()
+            )
+            + (
+                (("retrieval-feature-policy", self.feature_policy),)
+                if self.feature_policy is not None
                 else ()
             )
             for rank, action in self.entries
@@ -1442,6 +1449,16 @@ class _ConstructorSearch:
             self.stats.premise_catalog_queries += 1
             self.stats.scoped_retrieval_queries += 1
             self.stats.scoped_retrieval_nodes += scoped.structure_nodes
+            if scoped.type_spine_work is not None:
+                self.stats.scoped_retrieval_type_spine_queries += (
+                    scoped.type_spine_work.queries
+                )
+                self.stats.scoped_retrieval_type_spine_reductions += (
+                    scoped.type_spine_work.head_reductions
+                )
+                self.stats.scoped_retrieval_type_spine_rejected += (
+                    scoped.type_spine_work.rejected
+                )
             if scoped.query.type_family is not None:
                 self.stats.scoped_retrieval_type_family_queries += 1
                 self.stats.scoped_retrieval_type_family_term_visits += (
@@ -1589,6 +1606,13 @@ class _ConstructorSearch:
                 query_views_scored=ranked.query_views_scored,
                 scored_count=ranked.scored_count,
             )
+        if scoped.type_spine_work is not None:
+            record.update(
+                schema_version="agdaprover.scoped-retrieval-decision.v9",
+                feature_policy=TYPE_SPINE_HEAD_POLICY,
+                type_spine_work=scoped.type_spine_work.to_dict(),
+                ranking_policy=ranked.policy,
+            )
         self.stats.record_retrieval("decisions", record)
         # Exact state/interaction reuse only; no root/child type substitution
         # or similarity cache. Eviction cannot broaden scope.
@@ -1623,6 +1647,7 @@ class _ConstructorSearch:
             tuple(sorted(entries, key=lambda entry: admission_ranks[entry[0]])),
             size,
             admission_order,
+            TYPE_SPINE_HEAD_POLICY if scoped.type_spine_work is not None else None,
         )
         self.stats.scoped_retrieval_elapsed_ms += (time.monotonic() - started) * 1000
         return actions
@@ -4294,6 +4319,7 @@ def constructor_tree_prove(
     recursive_call: RecursiveCallSpec | None = None,
     preferred_constructor_arity: int | None = None,
     require_recursive_call: bool = False,
+    on_statistics: Callable[[ConstructorStats], None] | None = None,
 ) -> ConstructorResult:
     """Enumerate checked structural-tree inhabitants in one Agda session.
 
@@ -4301,37 +4327,50 @@ def constructor_tree_prove(
     scrutinee returns control before global-premise expansion so the caller can
     try batched cases first. Calling again with the default restores the full
     premise fallback; the hint never removes a kernel action permanently.
+    ``on_statistics`` receives completed-work counters once on every exit,
+    including exceptions. It must only aggregate in-memory evidence, without
+    performing budgeted work; exceptions and control flow remain unchanged.
     """
 
     started = time.monotonic()
     stats = ConstructorStats(depth_limit=max_depth)
     if action_budget <= 0 or timeout_seconds <= 0 or solution_limit <= 0:
+        if on_statistics is not None:
+            on_statistics(stats)
         return ConstructorResult(
             "resource-exhausted",
             (),
             stats,
             "constructor search budget exhausted",
         )
-    search = _ConstructorSearch(
-        session,
-        action_budget=action_budget,
-        deadline=started + timeout_seconds,
-        max_depth=max_depth,
-        solution_limit=solution_limit,
-        focused_model=focused_model,
-        refinement_model=refinement_model,
-        policy_router=policy_router,
-        excluded_premises=excluded_premises,
-        defer_concrete_premises=defer_concrete_premises,
-        recursive_call=recursive_call,
-        preferred_constructor_arity=preferred_constructor_arity,
-        require_recursive_call=require_recursive_call,
-    )
-    solutions = search.solve(root_goal)
-    stats = search.stats
-    stats.elapsed_ms = (time.monotonic() - started) * 1000.0
-    if search.focused_policy is not None:
-        stats.focused["nnue_actions_scored"] = search.focused_policy.actions_scored
+    search = None
+    try:
+        search = _ConstructorSearch(
+            session,
+            action_budget=action_budget,
+            deadline=started + timeout_seconds,
+            max_depth=max_depth,
+            solution_limit=solution_limit,
+            focused_model=focused_model,
+            refinement_model=refinement_model,
+            policy_router=policy_router,
+            excluded_premises=excluded_premises,
+            defer_concrete_premises=defer_concrete_premises,
+            recursive_call=recursive_call,
+            preferred_constructor_arity=preferred_constructor_arity,
+            require_recursive_call=require_recursive_call,
+        )
+        solutions = search.solve(root_goal)
+    finally:
+        if search is not None:
+            stats = search.stats
+            if search.focused_policy is not None:
+                stats.focused["nnue_actions_scored"] = (
+                    search.focused_policy.actions_scored
+                )
+        stats.elapsed_ms = (time.monotonic() - started) * 1000.0
+        if on_statistics is not None:
+            on_statistics(stats)
     if solutions:
         return ConstructorResult("solved", solutions, stats)
     if search.saw_exhaustion:

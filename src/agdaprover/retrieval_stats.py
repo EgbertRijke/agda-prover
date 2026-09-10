@@ -19,6 +19,9 @@ class ScopedRetrievalStats:
     scoped_retrieval_type_family_queries: int = 0
     scoped_retrieval_type_family_term_visits: int = 0
     scoped_retrieval_type_family_reductions: int = 0
+    scoped_retrieval_type_spine_queries: int = 0
+    scoped_retrieval_type_spine_reductions: int = 0
+    scoped_retrieval_type_spine_rejected: int = 0
     scoped_retrieval_postings: int = 0
     scoped_retrieval_nodes: int = 0
     scoped_retrieval_elapsed_ms: float = 0.0
@@ -63,6 +66,9 @@ class ScopedRetrievalStats:
             "type_family_queries",
             "type_family_term_visits",
             "type_family_reductions",
+            "type_spine_queries",
+            "type_spine_reductions",
+            "type_spine_rejected",
             "postings",
             "nodes",
             "elapsed_ms",
@@ -97,6 +103,7 @@ class ScopedRetrievalStats:
                 not (
                     name == "scoped_retrieval_extra_candidate_views"
                     or name.startswith("scoped_retrieval_type_family_")
+                    or name.startswith("scoped_retrieval_type_spine_")
                 )
                 or value != 0
             )

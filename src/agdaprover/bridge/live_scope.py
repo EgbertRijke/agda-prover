@@ -7,6 +7,7 @@ import json
 from ..resource_budget import checkpoint
 from ..retrieval import (
     QUERY_NORMALIZATION_POLICY,
+    TYPE_SPINE_HEAD_POLICY,
     AllowedDependencies,
     AllowedPremise,
     AllowedPremiseSet,
@@ -15,6 +16,7 @@ from ..retrieval import (
     ScopedPremises,
     TypeFamilyQueryView,
     TypeFeatures,
+    TypeSpineWork,
     name_fragments,
 )
 from .contracts import StateToken, stable_hash
@@ -35,11 +37,23 @@ TYPE_FAMILY_SCHEMA = "agdaprover.live-scope.v10"
 DEPENDENCY_TYPE_FAMILY_SCHEMA = "agdaprover.live-scope.v11"
 TYPE_FAMILY_MARKER = "agdaprover:scoped-retrieval:v10:"
 DEPENDENCY_TYPE_FAMILY_MARKER = "agdaprover:scoped-retrieval:v11:"
+TYPE_HEADS_SCHEMA = "agdaprover.live-scope.v12"
+DEPENDENCY_TYPE_HEADS_SCHEMA = "agdaprover.live-scope.v13"
+TYPE_HEADS_MARKER = "agdaprover:scoped-retrieval:v12:"
+DEPENDENCY_TYPE_HEADS_MARKER = "agdaprover:scoped-retrieval:v13:"
+TYPE_HEADS_POLICY = TYPE_SPINE_HEAD_POLICY
 
 
 def scope_schema(
-    include_dependencies: bool, normalize_query: bool, type_family_query: bool = False
+    include_dependencies: bool,
+    normalize_query: bool,
+    type_family_query: bool = False,
+    type_spine_heads: bool = False,
 ) -> str:
+    if type_spine_heads:
+        return (
+            DEPENDENCY_TYPE_HEADS_SCHEMA if include_dependencies else TYPE_HEADS_SCHEMA
+        )
     if type_family_query:
         return (
             DEPENDENCY_TYPE_FAMILY_SCHEMA
@@ -61,6 +75,7 @@ def _validate_request(
     include_dependencies: bool,
     normalize_query: bool = False,
     type_family_query: bool = False,
+    type_spine_heads: bool = False,
 ) -> None:
     if type(include_dependencies) is not bool:
         raise ValueError("invalid dependency capability flag")
@@ -68,7 +83,9 @@ def _validate_request(
         raise ValueError("invalid query normalization capability flag")
     if type(type_family_query) is not bool:
         raise ValueError("invalid type-family query capability flag")
-    if normalize_query and type_family_query:
+    if type(type_spine_heads) is not bool:
+        raise ValueError("invalid type-spine head capability flag")
+    if sum((normalize_query, type_family_query, type_spine_heads)) > 1:
         raise ValueError("query reduction policies are mutually exclusive")
     if type(output_bytes) is not int or output_bytes <= 0:
         raise ValueError("invalid live-scope output reservation")
@@ -87,9 +104,15 @@ def exclusions_payload(
     include_dependencies: bool = False,
     normalize_query: bool = False,
     type_family_query: bool = False,
+    type_spine_heads: bool = False,
 ) -> str:
     _validate_request(
-        excluded, output_bytes, include_dependencies, normalize_query, type_family_query
+        excluded,
+        output_bytes,
+        include_dependencies,
+        normalize_query,
+        type_family_query,
+        type_spine_heads,
     )
     payload = json.dumps(
         {"excluded_names": sorted(excluded), "output_bytes": output_bytes},
@@ -97,7 +120,13 @@ def exclusions_payload(
     )
     checkpoint()
     marker = (
-        (DEPENDENCY_TYPE_FAMILY_MARKER if include_dependencies else TYPE_FAMILY_MARKER)
+        (DEPENDENCY_TYPE_HEADS_MARKER if include_dependencies else TYPE_HEADS_MARKER)
+        if type_spine_heads
+        else (
+            DEPENDENCY_TYPE_FAMILY_MARKER
+            if include_dependencies
+            else TYPE_FAMILY_MARKER
+        )
         if type_family_query
         else (
             DEPENDENCY_QUERY_VIEWS_MARKER
@@ -118,6 +147,7 @@ def decode_resource_limit(
     include_dependencies: bool,
     normalize_query: bool = False,
     type_family_query: bool = False,
+    type_spine_heads: bool = False,
 ) -> int:
     """Validate a complete resource refusal, never a partial scope or rejection."""
     _validate_request(
@@ -126,6 +156,7 @@ def decode_resource_limit(
         include_dependencies,
         normalize_query,
         type_family_query,
+        type_spine_heads,
     )
     if (
         type(goal_id) is not int
@@ -144,7 +175,9 @@ def decode_resource_limit(
         or value["kind"] != "AgdaProverScopeResource"
         or value["schema_version"] != RESOURCE_SCHEMA
         or value["request_schema"]
-        != scope_schema(include_dependencies, normalize_query, type_family_query)
+        != scope_schema(
+            include_dependencies, normalize_query, type_family_query, type_spine_heads
+        )
         or type(value["interaction_id"]) is not int
         or value["interaction_id"] != goal_id
         or value["resource"] != "output-bytes"
@@ -165,6 +198,32 @@ def _features(value: object) -> TypeFeatures:
     ):
         raise ValueError("invalid live-scope type features")
     return TypeFeatures(value["result_head"], tuple(value["symbols"]), value["arity"])
+
+
+def _type_spine(value: object, features: TypeFeatures) -> int:
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "status",
+            "head_reductions",
+            "conversion_checked",
+            "raw_result_head",
+            "raw_arity",
+        }
+        or type(value["status"]) is not str
+        or value["status"] not in {"checked", "kernel-rejected"}
+        or value["conversion_checked"] is not (value["status"] == "checked")
+        or type(value["head_reductions"]) is not int
+        or value["head_reductions"] < 0
+    ):
+        raise ValueError("invalid checked type-spine evidence")
+    raw = TypeFeatures(value["raw_result_head"], features.symbols, value["raw_arity"])
+    if value["status"] == "kernel-rejected" and raw != features:
+        raise ValueError("rejected type-spine evidence changed raw features")
+    if value["status"] == "checked" and value["head_reductions"] != features.arity + 1:
+        raise ValueError("incomplete result-spine traversal")
+    return value["head_reductions"]
 
 
 def _omissions(value: object) -> set[str]:
@@ -201,6 +260,7 @@ def decode_scope(
     include_dependencies: bool = False,
     normalize_query: bool = False,
     type_family_query: bool = False,
+    type_spine_heads: bool = False,
 ) -> ScopedPremises:
     AllowedPremiseSet(adapter_sha256, ())
     if type(goal_id) is not int or goal_id < 0:
@@ -211,6 +271,7 @@ def decode_scope(
         include_dependencies,
         normalize_query,
         type_family_query,
+        type_spine_heads,
     )
     fields = {
         "kind",
@@ -231,13 +292,18 @@ def decode_scope(
         fields.add("normalized_query")
     if type_family_query:
         fields.add("type_family_query")
+    if type_spine_heads:
+        fields.add("type_spine")
     if not isinstance(value, dict) or set(value) != fields:
         raise ValueError("invalid closed live-scope record")
     if (
         value["kind"] != "AgdaProverScope"
         or value["schema_version"]
-        != scope_schema(include_dependencies, normalize_query, type_family_query)
-        or value["feature_policy"] != FEATURE_POLICY
+        != scope_schema(
+            include_dependencies, normalize_query, type_family_query, type_spine_heads
+        )
+        or value["feature_policy"]
+        != (TYPE_HEADS_POLICY if type_spine_heads else FEATURE_POLICY)
         or value["type_view_policy"] != TYPE_VIEW_POLICY
         or type(value["interaction_id"]) is not int
         or value["interaction_id"] != goal_id
@@ -304,6 +370,11 @@ def decode_scope(
     if not isinstance(declarations, list):
         raise ValueError("invalid live-scope declaration array")
     omitted = _omissions(value["omitted_aliases"])
+    spine_work = (
+        _type_spine(value["type_spine"], _features(value["target"]))
+        if type_spine_heads
+        else 0
+    )
     premises, views, references = [], [], []
     for row in declarations:
         checkpoint()
@@ -315,6 +386,8 @@ def decode_scope(
         }
         if include_dependencies:
             row_fields.add("rhs_dependencies")
+        if type_spine_heads:
+            row_fields.add("type_spine")
         if not isinstance(row, dict) or set(row) != row_fields:
             raise ValueError("invalid live-scope declaration")
         aliases, ty = row["aliases"], row["type"]
@@ -347,6 +420,8 @@ def decode_scope(
             "contextual",
             stable_hash({"state": state.to_dict(), "declaration": row}),
         )
+        if type_spine_heads:
+            spine_work += _type_spine(row["type_spine"], premise.features)
         if any(
             a in excluded_names or a.rsplit(".", 1)[-1] in excluded_names
             for a in premise.aliases
@@ -355,6 +430,11 @@ def decode_scope(
         premises.append(premise)
         views.append((premise.declaration_id, ty))
     checkpoint()
+    if type_spine_heads and (
+        type(value["structure_nodes"]) is not int
+        or spine_work > value["structure_nodes"]
+    ):
+        raise ValueError("invalid type-spine work accounting")
     scope_id = stable_hash(
         {
             "state": state.to_dict(),
@@ -408,5 +488,15 @@ def decode_scope(
         value["structure_nodes"],
         AllowedDependencies(scope_id, tuple(sorted(references)))
         if include_dependencies
+        else None,
+        type_spine_work=TypeSpineWork(
+            len(premises) + 1,
+            spine_work,
+            sum(
+                v["status"] == "kernel-rejected"
+                for v in [value["type_spine"], *(r["type_spine"] for r in declarations)]
+            ),
+        )
+        if type_spine_heads
         else None,
     )

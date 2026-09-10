@@ -34,6 +34,7 @@ DEPENDENCY_SYMBOL_RARITY_POLICY = (
 QUERY_VIEWS_POLICY = "raw-normalized-query-interleave-v1"
 QUERY_NORMALIZATION_POLICY = "agda-normalise-query-type-v1"
 TYPE_FAMILY_QUERY_POLICY = "agda-type-family-whnf-query-v1"
+TYPE_SPINE_HEAD_POLICY = "agda-result-spine-head-raw-symbols-v1"
 TYPE_FAMILY_VIEWS_POLICY = "raw-stable-type-family-query-interleave-v1"
 DEPENDENCY_SCHEMA = "agdaprover.allowed-dependencies.v1"
 PROGRESSIVE_POLICY = "scoped-progressive-premises-v3"
@@ -1145,6 +1146,35 @@ class SymbolicPremiseIndex:
 
 
 @dataclass(frozen=True)
+class TypeSpineWork:
+    """Physical work of a checked feature policy, not proof evidence."""
+
+    queries: int
+    head_reductions: int
+    rejected: int
+
+    def __post_init__(self) -> None:
+        if (
+            any(
+                type(n) is not int or n < 0
+                for n in (self.queries, self.head_reductions, self.rejected)
+            )
+            or self.queries < 1
+            or self.rejected > self.queries
+            or self.head_reductions < self.queries - self.rejected
+        ):
+            raise ValueError("invalid type-spine work")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "policy": TYPE_SPINE_HEAD_POLICY,
+            "queries": self.queries,
+            "head_reductions": self.head_reductions,
+            "rejected": self.rejected,
+        }
+
+
+@dataclass(frozen=True)
 class ScopedPremises:
     """Checked goal-local ranking inputs with non-authoritative rendering views.
 
@@ -1157,6 +1187,7 @@ class ScopedPremises:
     type_views: tuple[tuple[str, str], ...]
     structure_nodes: int
     dependencies: AllowedDependencies | None = None
+    type_spine_work: TypeSpineWork | None = None
 
     def __post_init__(self) -> None:
         checkpoint()
@@ -1183,6 +1214,17 @@ class ScopedPremises:
             raise ValueError("scoped type views do not cover the allowed set")
         if type(self.structure_nodes) is not int or self.structure_nodes < 0:
             raise ValueError("invalid scoped retrieval work count")
+        if self.type_spine_work is not None:
+            if type(self.type_spine_work) is not TypeSpineWork:
+                raise ValueError("invalid type-spine feature evidence")
+            self.type_spine_work.__post_init__()
+            if (
+                self.type_spine_work.queries != len(self.allowed.premises) + 1
+                or self.type_spine_work.head_reductions > self.structure_nodes
+                or self.query.normalized is not None
+                or self.query.type_family is not None
+            ):
+                raise ValueError("type-spine feature coverage/policy mismatch")
 
     def declarations(self) -> tuple[tuple[str, str], ...]:
         types = dict(self.type_views)

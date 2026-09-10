@@ -18,7 +18,7 @@ from .artifacts import file_sha256
 from .bridge.resources import current_process_rss, temporary_workspace
 from .budget import SearchBudget
 from .case_search import CaseBatchStats, batched_case_prove
-from .constructor_search import constructor_tree_prove
+from .constructor_search import ConstructorStats, constructor_tree_prove
 from .contracts import (
     GoalInfo,
     ProverResult,
@@ -2163,6 +2163,160 @@ def prove_joint_prefix(
                         and isinstance(session, TransactionalKernelSession)
                         and remaining_goal_actions() > 0
                     ):
+
+                        def record_constructor_stats(
+                            constructor_stats: ConstructorStats,
+                        ) -> None:
+                            stats.merge_retrieval(constructor_stats)
+                            stats.actions_considered += (
+                                constructor_stats.actions_considered
+                            )
+                            stats.actions_generated += (
+                                constructor_stats.actions_generated
+                            )
+                            stats.refinement_queries += (
+                                constructor_stats.constructor_queries
+                                + constructor_stats.premise_refinement_queries
+                                + constructor_stats.local_refinement_queries
+                            )
+                            stats.constructor_queries += (
+                                constructor_stats.constructor_queries
+                            )
+                            stats.local_refinement_candidates += (
+                                constructor_stats.local_refinement_candidates
+                            )
+                            stats.local_refinement_queries += (
+                                constructor_stats.local_refinement_queries
+                            )
+                            stats.skeleton_queries += constructor_stats.skeleton_queries
+                            stats.skeleton_candidates += (
+                                constructor_stats.skeleton_candidates
+                            )
+                            stats.skeleton_frontier_peak = max(
+                                stats.skeleton_frontier_peak,
+                                constructor_stats.skeleton_frontier_peak,
+                            )
+                            remaining_skeleton_slots = max(
+                                0,
+                                _MAX_RECORDED_SKELETON_ATTEMPTS
+                                - len(stats.skeleton_attempts),
+                            )
+                            retained_skeleton_attempts = (
+                                constructor_stats.skeleton_attempts[
+                                    :remaining_skeleton_slots
+                                ]
+                            )
+                            stats.skeleton_attempts.extend(retained_skeleton_attempts)
+                            stats.skeleton_attempts_omitted += (
+                                constructor_stats.skeleton_attempts_omitted
+                                + len(constructor_stats.skeleton_attempts)
+                                - len(retained_skeleton_attempts)
+                            )
+                            stats.premise_catalog_queries += (
+                                constructor_stats.premise_catalog_queries
+                            )
+                            stats.constructor_catalog_queries += (
+                                constructor_stats.catalog_queries
+                            )
+                            stats.premise_queries += constructor_stats.premise_queries
+                            stats.premise_refinement_queries += (
+                                constructor_stats.premise_refinement_queries
+                            )
+                            stats.premise_candidates += (
+                                constructor_stats.premise_candidates
+                            )
+                            stats.evidence_inference_queries += (
+                                constructor_stats.evidence_inference_queries
+                            )
+                            stats.evidence_terms += constructor_stats.evidence_terms
+                            stats.evidence_path_queries += (
+                                constructor_stats.evidence_path_queries
+                            )
+                            remaining_premise_slots = max(
+                                0,
+                                _MAX_RECORDED_PREMISE_ATTEMPTS
+                                - len(stats.premise_attempts),
+                            )
+                            retained_premise_attempts = (
+                                constructor_stats.premise_attempts[
+                                    :remaining_premise_slots
+                                ]
+                            )
+                            stats.premise_attempts.extend(retained_premise_attempts)
+                            stats.premise_attempts_omitted += (
+                                constructor_stats.premise_attempts_omitted
+                                + len(constructor_stats.premise_attempts)
+                                - len(retained_premise_attempts)
+                            )
+                            stats.completion_queries += (
+                                constructor_stats.completion_queries
+                            )
+                            stats.incomplete_solutions_pruned += (
+                                constructor_stats.incomplete_solutions_pruned
+                            )
+                            stats.recursive_subject_search_actions += (
+                                constructor_stats.recursive_subject_search_actions
+                            )
+                            stats.recursive_subject_inference_queries += (
+                                constructor_stats.recursive_subject_inference_queries
+                            )
+                            stats.recursive_subjects_generated += (
+                                constructor_stats.recursive_subjects_generated
+                            )
+                            stats.recursive_catalog_queries += (
+                                constructor_stats.recursive_catalog_queries
+                            )
+                            stats.recursive_wrappers_generated += (
+                                constructor_stats.recursive_wrappers_generated
+                            )
+                            stats.recursive_applications_generated += (
+                                constructor_stats.recursive_applications_generated
+                            )
+                            stats.recursive_inference_queries += (
+                                constructor_stats.recursive_inference_queries
+                            )
+                            stats.recursive_applications_inferred += (
+                                constructor_stats.recursive_applications_inferred
+                            )
+                            stats.recursive_applications_pruned += (
+                                constructor_stats.recursive_applications_pruned
+                            )
+                            stats.recursive_compositions_generated += (
+                                constructor_stats.recursive_compositions_generated
+                            )
+                            stats.recursive_composition_inference_queries += constructor_stats.recursive_composition_inference_queries
+                            stats.recursive_compositions_inferred += (
+                                constructor_stats.recursive_compositions_inferred
+                            )
+                            stats.recursive_proof_checks += (
+                                constructor_stats.recursive_proof_checks
+                            )
+                            stats.proof_checks += constructor_stats.proof_checks
+                            stats.goal_inspections += constructor_stats.goal_inspections
+                            stats.generated_subgoals += (
+                                constructor_stats.generated_subgoals
+                            )
+                            stats.model_calls += constructor_stats.model_calls
+                            stats.model_batches += constructor_stats.model_batches
+                            stats.model_elapsed_ms += constructor_stats.model_elapsed_ms
+                            for name, value in constructor_stats.focused.items():
+                                stats.focused[name] = stats.focused.get(name, 0) + value
+                            result.verifier_calls += (
+                                constructor_stats.constructor_queries
+                                + constructor_stats.proof_checks
+                                + constructor_stats.catalog_queries
+                                + constructor_stats.premise_catalog_queries
+                                + constructor_stats.premise_refinement_queries
+                                + constructor_stats.completion_queries
+                                + constructor_stats.local_refinement_queries
+                                + constructor_stats.recursive_subject_inference_queries
+                                + constructor_stats.recursive_inference_queries
+                                + constructor_stats.recursive_catalog_queries
+                                + constructor_stats.recursive_composition_inference_queries
+                                + constructor_stats.evidence_inference_queries
+                                + constructor_stats.evidence_path_queries
+                            )
+
                         constructor = constructor_tree_prove(
                             session,
                             goal,
@@ -2193,148 +2347,10 @@ def prove_joint_prefix(
                                 )
                             ),
                             defer_concrete_premises=not case_batch_attempted,
+                            on_statistics=record_constructor_stats,
                         )
                         constructor_stats = constructor.stats
-                        stats.merge_retrieval(constructor_stats)
-                        budget.account_actions(constructor_stats.actions_considered)
-                        stats.actions_considered += constructor_stats.actions_considered
-                        stats.actions_generated += constructor_stats.actions_generated
-                        stats.refinement_queries += (
-                            constructor_stats.constructor_queries
-                            + constructor_stats.premise_refinement_queries
-                            + constructor_stats.local_refinement_queries
-                        )
-                        stats.constructor_queries += (
-                            constructor_stats.constructor_queries
-                        )
-                        stats.local_refinement_candidates += (
-                            constructor_stats.local_refinement_candidates
-                        )
-                        stats.local_refinement_queries += (
-                            constructor_stats.local_refinement_queries
-                        )
-                        stats.skeleton_queries += constructor_stats.skeleton_queries
-                        stats.skeleton_candidates += (
-                            constructor_stats.skeleton_candidates
-                        )
-                        stats.skeleton_frontier_peak = max(
-                            stats.skeleton_frontier_peak,
-                            constructor_stats.skeleton_frontier_peak,
-                        )
-                        remaining_skeleton_slots = max(
-                            0,
-                            _MAX_RECORDED_SKELETON_ATTEMPTS
-                            - len(stats.skeleton_attempts),
-                        )
-                        retained_skeleton_attempts = (
-                            constructor_stats.skeleton_attempts[
-                                :remaining_skeleton_slots
-                            ]
-                        )
-                        stats.skeleton_attempts.extend(retained_skeleton_attempts)
-                        stats.skeleton_attempts_omitted += (
-                            constructor_stats.skeleton_attempts_omitted
-                            + len(constructor_stats.skeleton_attempts)
-                            - len(retained_skeleton_attempts)
-                        )
-                        stats.premise_catalog_queries += (
-                            constructor_stats.premise_catalog_queries
-                        )
-                        stats.constructor_catalog_queries += (
-                            constructor_stats.catalog_queries
-                        )
-                        stats.premise_queries += constructor_stats.premise_queries
-                        stats.premise_refinement_queries += (
-                            constructor_stats.premise_refinement_queries
-                        )
-                        stats.premise_candidates += constructor_stats.premise_candidates
-                        stats.evidence_inference_queries += (
-                            constructor_stats.evidence_inference_queries
-                        )
-                        stats.evidence_terms += constructor_stats.evidence_terms
-                        stats.evidence_path_queries += (
-                            constructor_stats.evidence_path_queries
-                        )
-                        remaining_premise_slots = max(
-                            0,
-                            _MAX_RECORDED_PREMISE_ATTEMPTS
-                            - len(stats.premise_attempts),
-                        )
-                        retained_premise_attempts = constructor_stats.premise_attempts[
-                            :remaining_premise_slots
-                        ]
-                        stats.premise_attempts.extend(retained_premise_attempts)
-                        stats.premise_attempts_omitted += (
-                            constructor_stats.premise_attempts_omitted
-                            + len(constructor_stats.premise_attempts)
-                            - len(retained_premise_attempts)
-                        )
-                        stats.completion_queries += constructor_stats.completion_queries
-                        stats.incomplete_solutions_pruned += (
-                            constructor_stats.incomplete_solutions_pruned
-                        )
-                        stats.recursive_subject_search_actions += (
-                            constructor_stats.recursive_subject_search_actions
-                        )
-                        stats.recursive_subject_inference_queries += (
-                            constructor_stats.recursive_subject_inference_queries
-                        )
-                        stats.recursive_subjects_generated += (
-                            constructor_stats.recursive_subjects_generated
-                        )
-                        stats.recursive_catalog_queries += (
-                            constructor_stats.recursive_catalog_queries
-                        )
-                        stats.recursive_wrappers_generated += (
-                            constructor_stats.recursive_wrappers_generated
-                        )
-                        stats.recursive_applications_generated += (
-                            constructor_stats.recursive_applications_generated
-                        )
-                        stats.recursive_inference_queries += (
-                            constructor_stats.recursive_inference_queries
-                        )
-                        stats.recursive_applications_inferred += (
-                            constructor_stats.recursive_applications_inferred
-                        )
-                        stats.recursive_applications_pruned += (
-                            constructor_stats.recursive_applications_pruned
-                        )
-                        stats.recursive_compositions_generated += (
-                            constructor_stats.recursive_compositions_generated
-                        )
-                        stats.recursive_composition_inference_queries += (
-                            constructor_stats.recursive_composition_inference_queries
-                        )
-                        stats.recursive_compositions_inferred += (
-                            constructor_stats.recursive_compositions_inferred
-                        )
-                        stats.recursive_proof_checks += (
-                            constructor_stats.recursive_proof_checks
-                        )
-                        stats.proof_checks += constructor_stats.proof_checks
-                        stats.goal_inspections += constructor_stats.goal_inspections
-                        stats.generated_subgoals += constructor_stats.generated_subgoals
-                        stats.model_calls += constructor_stats.model_calls
-                        stats.model_batches += constructor_stats.model_batches
-                        stats.model_elapsed_ms += constructor_stats.model_elapsed_ms
-                        for name, value in constructor_stats.focused.items():
-                            stats.focused[name] = stats.focused.get(name, 0) + value
-                        result.verifier_calls += (
-                            constructor_stats.constructor_queries
-                            + constructor_stats.proof_checks
-                            + constructor_stats.catalog_queries
-                            + constructor_stats.premise_catalog_queries
-                            + constructor_stats.premise_refinement_queries
-                            + constructor_stats.completion_queries
-                            + constructor_stats.local_refinement_queries
-                            + constructor_stats.recursive_subject_inference_queries
-                            + constructor_stats.recursive_inference_queries
-                            + constructor_stats.recursive_catalog_queries
-                            + constructor_stats.recursive_composition_inference_queries
-                            + constructor_stats.evidence_inference_queries
-                            + constructor_stats.evidence_path_queries
-                        )
+                        budget.account_actions(constructor.stats.actions_considered)
                         if constructor.status == "resource-exhausted":
                             saw_exhaustion = True
                         constructor_accepted = bool(constructor.solutions)

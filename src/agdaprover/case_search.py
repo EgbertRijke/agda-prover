@@ -1567,8 +1567,8 @@ def batched_case_prove(
                                         ),
                                         recursive_call=program_spec,
                                         require_recursive_call=True,
+                                        on_statistics=record_structural_stats,
                                     )
-                                    record_structural_stats(structural_program.stats)
                                     if structural_program.solutions:
                                         program_edit = reconstruct_hole_completion(
                                             current_source,
@@ -5190,8 +5190,8 @@ def batched_case_prove(
                                 else None
                             ),
                             preferred_constructor_arity=preferred_constructor_arity,
+                            on_statistics=record_structural_stats,
                         )
-                        record_structural_stats(structural.stats)
                         if structural.solutions:
                             stats.structural_leaf_closures += 1
                             edits.append(

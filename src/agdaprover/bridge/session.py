@@ -192,6 +192,7 @@ class ConformingKernelSession:
         self._live_scope_enabled = False
         self._scope_dependencies_enabled = False
         self._scope_query_views_enabled = False
+        self._scope_type_heads_enabled = False
         self._scope_type_family_enabled = False
         self._scope_adapter_hash: str | None = None
 
@@ -364,6 +365,14 @@ class ConformingKernelSession:
         scoped_dependencies = os.environ.get("AGDAPROVER_SCOPED_DEPENDENCIES") == "1"
         query_views = os.environ.get("AGDAPROVER_SCOPED_QUERY_VIEWS") == "1"
         type_family = os.environ.get("AGDAPROVER_SCOPED_TYPE_FAMILY_QUERY") == "1"
+        type_heads = os.environ.get("AGDAPROVER_SCOPED_TYPE_SPINE_HEADS") == "1"
+        if type_heads and (not live_scope or query_views or type_family):
+            raise self._error(
+                BridgeFailure.UNSUPPORTED_CAPABILITY,
+                "type-spine-heads-require-exclusive-live-scope",
+                "Type-spine heads require AGDAPROVER_SCOPED_RETRIEVAL=1 "
+                "and cannot be combined with query-normalization modes",
+            )
         if type_family and (not live_scope or query_views):
             raise self._error(
                 BridgeFailure.UNSUPPORTED_CAPABILITY,
@@ -403,6 +412,7 @@ class ConformingKernelSession:
         self._scope_dependencies_enabled = scoped_dependencies
         self._scope_query_views_enabled = query_views
         self._scope_type_family_enabled = type_family
+        self._scope_type_heads_enabled = type_heads
         self._scope_adapter_hash = (
             executable_sha256(str(bridge_executable), deadline=budget.deadline)
             if self._live_scope_enabled and bridge_executable is not None
@@ -413,7 +423,13 @@ class ConformingKernelSession:
                 result.capabilities,
                 adapter=result.capabilities.adapter
                 + (
-                    ("+live-scope-v11:" if scoped_dependencies else "+live-scope-v10:")
+                    ("+live-scope-v13:" if scoped_dependencies else "+live-scope-v12:")
+                    if type_heads
+                    else (
+                        "+live-scope-v11:"
+                        if scoped_dependencies
+                        else "+live-scope-v10:"
+                    )
                     if type_family
                     else (
                         "+live-scope-v9:" if scoped_dependencies else "+live-scope-v8:"
@@ -1099,6 +1115,7 @@ class ConformingKernelSession:
                     include_dependencies=self._scope_dependencies_enabled,
                     normalize_query=self._scope_query_views_enabled,
                     type_family_query=self._scope_type_family_enabled,
+                    type_spine_heads=self._scope_type_heads_enabled,
                 ),
             ),
             transactional=True,
@@ -1125,6 +1142,7 @@ class ConformingKernelSession:
                     include_dependencies=self._scope_dependencies_enabled,
                     normalize_query=self._scope_query_views_enabled,
                     type_family_query=self._scope_type_family_enabled,
+                    type_spine_heads=self._scope_type_heads_enabled,
                 )
                 raise self._error(
                     BridgeFailure.RESOURCE_EXHAUSTED,
@@ -1142,6 +1160,7 @@ class ConformingKernelSession:
                 include_dependencies=self._scope_dependencies_enabled,
                 normalize_query=self._scope_query_views_enabled,
                 type_family_query=self._scope_type_family_enabled,
+                type_spine_heads=self._scope_type_heads_enabled,
             )
         except ValueError as error:
             raise self._error(
