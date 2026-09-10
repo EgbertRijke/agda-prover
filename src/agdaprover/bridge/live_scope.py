@@ -6,9 +6,11 @@ import json
 
 from ..resource_budget import checkpoint
 from ..retrieval import (
+    QUERY_NORMALIZATION_POLICY,
     AllowedDependencies,
     AllowedPremise,
     AllowedPremiseSet,
+    NormalizedQueryView,
     RetrievalQuery,
     ScopedPremises,
     TypeFeatures,
@@ -24,13 +26,32 @@ DEPENDENCY_SCHEMA = "agdaprover.live-scope.v7"
 DEPENDENCY_POLICY = "permitted-clause-rhs-references-v1"
 DEPENDENCY_MARKER = "agdaprover:scoped-retrieval:v7:"
 RESOURCE_SCHEMA = "agdaprover.live-scope-resource.v1"
+QUERY_VIEWS_SCHEMA = "agdaprover.live-scope.v8"
+DEPENDENCY_QUERY_VIEWS_SCHEMA = "agdaprover.live-scope.v9"
+QUERY_VIEWS_MARKER = "agdaprover:scoped-retrieval:v8:"
+DEPENDENCY_QUERY_VIEWS_MARKER = "agdaprover:scoped-retrieval:v9:"
+
+
+def scope_schema(include_dependencies: bool, normalize_query: bool) -> str:
+    if normalize_query:
+        return (
+            DEPENDENCY_QUERY_VIEWS_SCHEMA
+            if include_dependencies
+            else QUERY_VIEWS_SCHEMA
+        )
+    return DEPENDENCY_SCHEMA if include_dependencies else SCHEMA
 
 
 def _validate_request(
-    excluded: frozenset[str], output_bytes: int, include_dependencies: bool
+    excluded: frozenset[str],
+    output_bytes: int,
+    include_dependencies: bool,
+    normalize_query: bool = False,
 ) -> None:
     if type(include_dependencies) is not bool:
         raise ValueError("invalid dependency capability flag")
+    if type(normalize_query) is not bool:
+        raise ValueError("invalid query normalization capability flag")
     if type(output_bytes) is not int or output_bytes <= 0:
         raise ValueError("invalid live-scope output reservation")
     if type(excluded) is not frozenset:
@@ -42,22 +63,36 @@ def _validate_request(
 
 
 def exclusions_payload(
-    excluded: frozenset[str], *, output_bytes: int, include_dependencies: bool = False
+    excluded: frozenset[str],
+    *,
+    output_bytes: int,
+    include_dependencies: bool = False,
+    normalize_query: bool = False,
 ) -> str:
-    _validate_request(excluded, output_bytes, include_dependencies)
+    _validate_request(excluded, output_bytes, include_dependencies, normalize_query)
     payload = json.dumps(
         {"excluded_names": sorted(excluded), "output_bytes": output_bytes},
         ensure_ascii=False,
     )
     checkpoint()
-    return (DEPENDENCY_MARKER if include_dependencies else MARKER) + payload
+    marker = (
+        (DEPENDENCY_QUERY_VIEWS_MARKER if include_dependencies else QUERY_VIEWS_MARKER)
+        if normalize_query
+        else (DEPENDENCY_MARKER if include_dependencies else MARKER)
+    )
+    return marker + payload
 
 
 def decode_resource_limit(
-    value: object, *, goal_id: int, output_bytes: int, include_dependencies: bool
+    value: object,
+    *,
+    goal_id: int,
+    output_bytes: int,
+    include_dependencies: bool,
+    normalize_query: bool = False,
 ) -> int:
     """Validate a complete resource refusal, never a partial scope or rejection."""
-    _validate_request(frozenset(), output_bytes, include_dependencies)
+    _validate_request(frozenset(), output_bytes, include_dependencies, normalize_query)
     if (
         type(goal_id) is not int
         or goal_id < 0
@@ -75,7 +110,7 @@ def decode_resource_limit(
         or value["kind"] != "AgdaProverScopeResource"
         or value["schema_version"] != RESOURCE_SCHEMA
         or value["request_schema"]
-        != (DEPENDENCY_SCHEMA if include_dependencies else SCHEMA)
+        != scope_schema(include_dependencies, normalize_query)
         or type(value["interaction_id"]) is not int
         or value["interaction_id"] != goal_id
         or value["resource"] != "output-bytes"
@@ -130,11 +165,14 @@ def decode_scope(
     adapter_sha256: str,
     output_bytes: int,
     include_dependencies: bool = False,
+    normalize_query: bool = False,
 ) -> ScopedPremises:
     AllowedPremiseSet(adapter_sha256, ())
     if type(goal_id) is not int or goal_id < 0:
         raise ValueError("invalid live-scope goal identity")
-    _validate_request(excluded_names, output_bytes, include_dependencies)
+    _validate_request(
+        excluded_names, output_bytes, include_dependencies, normalize_query
+    )
     fields = {
         "kind",
         "schema_version",
@@ -150,12 +188,14 @@ def decode_scope(
     }
     if include_dependencies:
         fields |= {"dependency_policy", "dependency_nodes"}
+    if normalize_query:
+        fields.add("normalized_query")
     if not isinstance(value, dict) or set(value) != fields:
         raise ValueError("invalid closed live-scope record")
     if (
         value["kind"] != "AgdaProverScope"
         or value["schema_version"]
-        != (DEPENDENCY_SCHEMA if include_dependencies else SCHEMA)
+        != scope_schema(include_dependencies, normalize_query)
         or value["feature_policy"] != FEATURE_POLICY
         or value["type_view_policy"] != TYPE_VIEW_POLICY
         or type(value["interaction_id"]) is not int
@@ -172,6 +212,21 @@ def decode_scope(
         or not 0 <= value["dependency_nodes"] <= value["structure_nodes"]
     ):
         raise ValueError("invalid live-scope dependency policy/work count")
+    normalized_target = None
+    if normalize_query:
+        normalized = value["normalized_query"]
+        if (
+            not isinstance(normalized, dict)
+            or set(normalized)
+            != {"policy", "features", "structure_nodes", "conversion_checked"}
+            or normalized["policy"] != QUERY_NORMALIZATION_POLICY
+            or normalized["conversion_checked"] is not True
+            or type(normalized["structure_nodes"]) is not int
+            or type(value["structure_nodes"]) is not int
+            or not 0 < normalized["structure_nodes"] <= value["structure_nodes"]
+        ):
+            raise ValueError("invalid checked query normalization evidence")
+        normalized_target = _features(normalized["features"])
     declarations = value["declarations"]
     if not isinstance(declarations, list):
         raise ValueError("invalid live-scope declaration array")
@@ -238,20 +293,32 @@ def decode_scope(
         scope_id, tuple(sorted(premises, key=lambda p: p.declaration_id))
     )
     target = _features(value["target"])
-    target_symbols = set(target.symbols)
-    query_aliases = tuple(
-        sorted(
-            {
-                a
-                for p in allowed.premises
-                if p.declaration_id in target_symbols
-                for a in p.aliases
-            }
+
+    def tokens(features: TypeFeatures) -> tuple[str, ...]:
+        target_symbols = set(features.symbols)
+        return name_fragments(
+            tuple(
+                sorted(
+                    {
+                        a
+                        for p in allowed.premises
+                        if p.declaration_id in target_symbols
+                        for a in p.aliases
+                    }
+                )
+            )
         )
-    )
+
     return ScopedPremises(
         allowed,
-        RetrievalQuery(scope_id, target, name_fragments(query_aliases)),
+        RetrievalQuery(
+            scope_id,
+            target,
+            tokens(target),
+            normalized=NormalizedQueryView(normalized_target, tokens(normalized_target))
+            if normalized_target is not None
+            else None,
+        ),
         tuple(sorted(views)),
         value["structure_nodes"],
         AllowedDependencies(scope_id, tuple(sorted(references)))

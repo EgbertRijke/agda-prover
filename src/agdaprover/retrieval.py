@@ -13,7 +13,7 @@ import math
 import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import InitVar, dataclass, field
+from dataclasses import InitVar, dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, TypeVar
 
@@ -31,6 +31,8 @@ SYMBOL_RARITY_POLICY = "head-symbol-arity-lexical-query-symbol-rarity-interleave
 DEPENDENCY_SYMBOL_RARITY_POLICY = (
     "head-dependency-symbol-arity-lexical-query-symbol-rarity-interleave-v1"
 )
+QUERY_VIEWS_POLICY = "raw-normalized-query-interleave-v1"
+QUERY_NORMALIZATION_POLICY = "agda-normalise-query-type-v1"
 DEPENDENCY_SCHEMA = "agdaprover.allowed-dependencies.v1"
 PROGRESSIVE_POLICY = "scoped-progressive-premises-v3"
 PROGRESSIVE_WIDTHS = (8, 32, 128, 512)
@@ -235,12 +237,41 @@ class AllowedPremiseSet:
 
 
 @dataclass(frozen=True)
+class NormalizedQueryView:
+    """Gateway-supplied equivalent type in the original interaction telescope.
+
+    This value carries ranking evidence, not conversion or scope authority.
+    The producer must check conversion without assigning metas and charge the
+    normalization to its request envelope before constructing this view.
+    """
+
+    features: TypeFeatures
+    tokens: tuple[str, ...] = ()
+    policy: str = QUERY_NORMALIZATION_POLICY
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.features, TypeFeatures):
+            raise ValueError("invalid normalized query type features")
+        _strings(self.tokens)
+        if self.policy != QUERY_NORMALIZATION_POLICY:
+            raise ValueError("unsupported query normalization policy")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "policy": self.policy,
+            "features": self.features.to_dict(),
+            "tokens": list(self.tokens),
+        }
+
+
+@dataclass(frozen=True)
 class RetrievalQuery:
     scope_id: str
     features: TypeFeatures
     tokens: tuple[str, ...] = ()
     query_symbol_lane: bool = False
     symbol_rarity_lane: bool = False
+    normalized: NormalizedQueryView | None = None
 
     def __post_init__(self) -> None:
         _hash(self.scope_id)
@@ -253,6 +284,10 @@ class RetrievalQuery:
             raise ValueError("symbol-rarity lane must be a Boolean")
         if self.symbol_rarity_lane and not self.query_symbol_lane:
             raise ValueError("symbol-rarity lane requires the query-symbol lane")
+        if self.normalized is not None and not isinstance(
+            self.normalized, NormalizedQueryView
+        ):
+            raise ValueError("invalid normalized query view")
 
     @property
     def query_id(self) -> str:
@@ -266,6 +301,14 @@ class RetrievalQuery:
                 else QUERY_SYMBOL_POLICY
                 if self.query_symbol_lane
                 else POLICY,
+                **(
+                    {
+                        "query_views_policy": QUERY_VIEWS_POLICY,
+                        "normalized": self.normalized.to_dict(),
+                    }
+                    if self.normalized is not None
+                    else {}
+                ),
             }
         )
 
@@ -391,6 +434,8 @@ class RankedPremise:
     dependency_score: int = 0
     query_symbol_match: int = 0
     symbol_rarity: float = 0.0
+    query_view: str | None = None
+    query_view_rank: int | None = None
 
     @property
     def sort_key(self) -> tuple[object, ...]:
@@ -411,10 +456,16 @@ class RankedPremise:
         include_dependencies: bool = False,
         include_query_symbols: bool = False,
         include_symbol_rarity: bool = False,
+        include_query_views: bool = False,
     ) -> dict[str, object]:
         return {
             "rank": rank,
             "premise": self.premise.to_dict(),
+            **(
+                {"query_view": self.query_view, "query_view_rank": self.query_view_rank}
+                if include_query_views
+                else {}
+            ),
             "components": {
                 "head_match": self.head_match,
                 "symbol_overlap": self.symbol_overlap,
@@ -451,9 +502,18 @@ class RetrievalResult:
     dependency_postings_visited: int = 0
     query_symbol_lane: bool = False
     symbol_rarity_lane: bool = False
+    normalized_query_policy: str | None = None
+    query_views_scored: int = 1
+
+    @property
+    def scored_count(self) -> int:
+        return self.candidate_count * self.query_views_scored
 
     @property
     def policy(self) -> str:
+        if self.normalized_query_policy is not None:
+            base = replace(self, normalized_query_policy=None).policy
+            return f"{QUERY_VIEWS_POLICY}/{base}"
         if self.symbol_rarity_lane:
             return (
                 DEPENDENCY_SYMBOL_RARITY_POLICY
@@ -487,7 +547,9 @@ class RetrievalResult:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_version": "agdaprover.symbolic-retrieval.v4"
+            "schema_version": "agdaprover.symbolic-retrieval.v5"
+            if self.normalized_query_policy is not None
+            else "agdaprover.symbolic-retrieval.v4"
             if self.symbol_rarity_lane
             else "agdaprover.symbolic-retrieval.v3"
             if self.query_symbol_lane
@@ -499,7 +561,7 @@ class RetrievalResult:
             "query_id": self.query_id,
             "scope_id": self.scope_id,
             "candidate_count": self.candidate_count,
-            "scored_count": self.candidate_count,
+            "scored_count": self.scored_count,
             "postings_visited": self.postings_visited,
             "usage_authority": "ranking-only-requires-agda-elaboration",
             "items": [
@@ -508,9 +570,18 @@ class RetrievalResult:
                     include_dependencies=self.dependency_graph_id is not None,
                     include_query_symbols=self.query_symbol_lane,
                     include_symbol_rarity=self.symbol_rarity_lane,
+                    include_query_views=self.normalized_query_policy is not None,
                 )
                 for i, item in enumerate(self.items, 1)
             ],
+            **(
+                {
+                    "normalized_query_policy": self.normalized_query_policy,
+                    "query_views_scored": self.query_views_scored,
+                }
+                if self.normalized_query_policy is not None
+                else {}
+            ),
             **(
                 {
                     "dependency_graph_id": self.dependency_graph_id,
@@ -753,6 +824,8 @@ class SymbolicPremiseIndex:
             raise ValueError("retrieval query scope does not match pinned index")
         if type(limit) is not int or limit < 1:
             raise ValueError("retrieval limit must be a positive integer")
+        if query.normalized is not None:
+            return self._retrieve_query_views(query, limit=limit)
         symbols: Counter[str] = Counter()
         lexical: Counter[str] = Counter()
         rarity_weights: dict[str, float] = {}
@@ -886,6 +959,64 @@ class SymbolicPremiseIndex:
             dependency_visits,
             query.query_symbol_lane,
             query.symbol_rarity_lane,
+        )
+
+    def _retrieve_query_views(
+        self, query: RetrievalQuery, *, limit: int
+    ) -> RetrievalResult:
+        """Two bounded rankings over one index; never a union of scopes.
+
+        Raw goes first. Each view's top k suffices for the merged top k;
+        duplicate removal is deterministic and the order is prefix-stable.
+        Components and view rank belong to the view that emitted the item.
+        """
+        view = query.normalized
+        assert view is not None
+        raw = self.retrieve(replace(query, normalized=None), limit=limit)
+        if view.features == query.features and view.tokens == query.tokens:
+            # Normalization often exposes no new ranking evidence. Do not
+            # repeat a full candidate pass merely to give it another label.
+            return replace(
+                raw,
+                query_id=_query_identity(query, self.dependencies is not None),
+                items=tuple(
+                    replace(item, query_view="raw", query_view_rank=rank)
+                    for rank, item in _checked(enumerate(raw.items, 1))
+                ),
+                normalized_query_policy=view.policy,
+            )
+        normalized = self.retrieve(
+            replace(query, features=view.features, tokens=view.tokens, normalized=None),
+            limit=limit,
+        )
+        lanes = (
+            ("raw", iter(enumerate(raw.items, 1))),
+            ("normalized", iter(enumerate(normalized.items, 1))),
+        )
+        selected: list[RankedPremise] = []
+        emitted: set[str] = set()
+        while len(selected) < min(limit, raw.candidate_count):
+            checkpoint()
+            for name, lane in lanes:
+                for rank, item in _checked(lane):
+                    if item.premise.declaration_id not in emitted:
+                        emitted.add(item.premise.declaration_id)
+                        selected.append(
+                            replace(item, query_view=name, query_view_rank=rank)
+                        )
+                        break
+                if len(selected) == limit:
+                    break
+        return replace(
+            raw,
+            query_id=_query_identity(query, self.dependencies is not None),
+            postings_visited=raw.postings_visited + normalized.postings_visited,
+            dependency_postings_visited=(
+                raw.dependency_postings_visited + normalized.dependency_postings_visited
+            ),
+            items=tuple(selected),
+            normalized_query_policy=view.policy,
+            query_views_scored=2,
         )
 
 

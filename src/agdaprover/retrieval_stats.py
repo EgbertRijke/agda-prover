@@ -15,6 +15,7 @@ TRACE_RECORDS = 64
 class ScopedRetrievalStats:
     scoped_retrieval_queries: int = 0
     scoped_retrieval_candidates: int = 0
+    scoped_retrieval_extra_candidate_views: int = 0
     scoped_retrieval_postings: int = 0
     scoped_retrieval_nodes: int = 0
     scoped_retrieval_elapsed_ms: float = 0.0
@@ -55,6 +56,7 @@ class ScopedRetrievalStats:
         for name in (
             "queries",
             "candidates",
+            "extra_candidate_views",
             "postings",
             "nodes",
             "elapsed_ms",
@@ -85,6 +87,7 @@ class ScopedRetrievalStats:
             for name, value in self.__dict__.items()
             if value is not None
             and not name.startswith("_")
+            and (name != "scoped_retrieval_extra_candidate_views" or value != 0)
             and (
                 self.scoped_retrieval_queries
                 or not name.startswith("scoped_retrieval_")

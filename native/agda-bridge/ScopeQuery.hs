@@ -33,14 +33,20 @@ import Agda.Syntax.Literal (Literal (LitQName))
 import Agda.Syntax.Scope.Base
 import Agda.Syntax.Scope.Monad (tryResolveName)
 import Agda.TypeChecking.Monad
+import Agda.TypeChecking.Conversion (equalType, tryConversion)
 import Agda.TypeChecking.Pretty (prettyTCM)
 import Agda.TypeChecking.Reduce (instantiateFull, normalise)
 
-request :: String -> Maybe (Bool, String)
-request payload = case stripPrefix "agdaprover:scoped-retrieval:v7:" payload of
-  Just exclusions -> Just (True, exclusions)
-  Nothing -> (\exclusions -> (False, exclusions)) <$>
-    stripPrefix "agdaprover:scoped-retrieval:v6:" payload
+request :: String -> Maybe (Bool, Bool, String)
+request payload = first
+  [("v9", True, True), ("v8", False, True),
+   ("v7", True, False), ("v6", False, False)]
+ where
+  first [] = Nothing
+  first ((version, deps, views) : rest) =
+    case stripPrefix ("agdaprover:scoped-retrieval:" ++ version ++ ":") payload of
+      Just exclusions -> Just (deps, views, exclusions)
+      Nothing -> first rest
 
 -- The caller owns the operational output reservation. Geometry is evidence,
 -- not a second implicit allowance. The transport separately enforces CPU,
@@ -58,9 +64,12 @@ instance FromJSON ScopeRequest where
       fail "invalid scope request"
     pure (ScopeRequest excluded limit)
 
-schema :: Bool -> String
-schema withDependencies = if withDependencies then "agdaprover.live-scope.v7"
-                         else "agdaprover.live-scope.v6"
+schema :: Bool -> Bool -> String
+schema withDependencies withQueryViews
+  | withQueryViews = if withDependencies then "agdaprover.live-scope.v9"
+                    else "agdaprover.live-scope.v8"
+  | otherwise = if withDependencies then "agdaprover.live-scope.v7"
+                else "agdaprover.live-scope.v6"
 
 key :: QName -> String
 key q = case nameId (qnameName q) of
@@ -123,8 +132,8 @@ dependencies allowed q = do
             else Nothing, count)
     _ -> pure (Nothing, 0)
 
-emit :: Bool -> InteractionId -> String -> TCM ()
-emit withDependencies point payload = do
+emit :: Bool -> Bool -> InteractionId -> String -> TCM ()
+emit withDependencies withQueryViews point payload = do
   ScopeRequest excluded limit <- either (const $ genericError "invalid-scope-request") pure $
     eitherDecodeStrict' (Text.encodeUtf8 (Text.pack payload))
   withInteractionId point $ dontAssignMetas $ do
@@ -152,6 +161,20 @@ emit withDependencies point payload = do
     meta <- lookupInteractionId point
     target <- instantiateFull =<< getMetaTypeInContext meta
     let (query, goalNodes) = features target
+    -- Normalize inside the ORIGINAL interaction telescope. Closing the goal
+    -- would change local head coordinates and arity. Ordinary reduction keeps
+    -- abstraction/opacity in force; conversion cannot assign unresolved metas.
+    (queryFields, queryNodes) <- if withQueryViews then do
+      normalized <- normalise target
+      ok <- localTC (\e -> e { envRelevance = unitRelevance }) $
+        tryConversion $ equalType target normalized
+      unless ok $ genericError "query-normalization-conversion-failed"
+      let (f, count) = features normalized
+      pure (["normalized_query" .= object
+        ["policy" .= ("agda-normalise-query-type-v1" :: String),
+         "features" .= f, "structure_nodes" .= count,
+         "conversion_checked" .= True]], count)
+     else pure ([], 0)
     outcome <- runExceptT $ do
      (rows, nodes, dependencyNodes, _) <- foldM (\(previous, total, depTotal, bytesSoFar) (q, as) -> do
       ty <- lift $ instantiateFull =<< typeOfConst q
@@ -177,10 +200,10 @@ emit withDependencies point payload = do
       let !nextTotal = total + count + viewCount + depCount
           !nextDeps = depTotal + depCount
       pure (row : previous, nextTotal, nextDeps, bytesSoFar + size))
-      ([], goalNodes, 0, 0) (Map.toAscList allowed)
+      ([], goalNodes + queryNodes, 0, 0) (Map.toAscList allowed)
      let bytes = encode $ object $
           ["kind" .= ("AgdaProverScope" :: String),
-           "schema_version" .= schema withDependencies,
+           "schema_version" .= schema withDependencies withQueryViews,
            "output_bytes" .= limit,
            "feature_policy" .= ("agda-term-body-head-symbol-arity-v1" :: String),
            "type_view_policy" .= ("agda-normalise-contextual-type-v1" :: String),
@@ -188,7 +211,7 @@ emit withDependencies point payload = do
            "excluded_names" .= excluded,
            "omitted_aliases" .= object ["ambiguous" .= ambiguous, "unnameable" .= unnameable],
            "target" .= query, "declarations" .= reverse rows,
-           "structure_nodes" .= nodes] ++
+           "structure_nodes" .= nodes] ++ queryFields ++
           (if withDependencies then
             ["dependency_policy" .= ("permitted-clause-rhs-references-v1" :: String),
              "dependency_nodes" .= dependencyNodes] else [])
@@ -200,7 +223,7 @@ emit withDependencies point payload = do
       Left observed -> encode $ object
         ["kind" .= ("AgdaProverScopeResource" :: String),
          "schema_version" .= ("agdaprover.live-scope-resource.v1" :: String),
-         "request_schema" .= schema withDependencies,
+         "request_schema" .= schema withDependencies withQueryViews,
          "interaction_id" .= interactionId point,
          "resource" .= ("output-bytes" :: String),
          "limit" .= limit,

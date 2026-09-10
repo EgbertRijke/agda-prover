@@ -191,6 +191,7 @@ class ConformingKernelSession:
         self._overlays_removed = 0
         self._live_scope_enabled = False
         self._scope_dependencies_enabled = False
+        self._scope_query_views_enabled = False
         self._scope_adapter_hash: str | None = None
 
     def __enter__(self) -> ConformingKernelSession:
@@ -360,6 +361,13 @@ class ConformingKernelSession:
             )
         live_scope = os.environ.get("AGDAPROVER_SCOPED_RETRIEVAL") == "1"
         scoped_dependencies = os.environ.get("AGDAPROVER_SCOPED_DEPENDENCIES") == "1"
+        query_views = os.environ.get("AGDAPROVER_SCOPED_QUERY_VIEWS") == "1"
+        if query_views and not live_scope:
+            raise self._error(
+                BridgeFailure.UNSUPPORTED_CAPABILITY,
+                "query-views-require-live-scope",
+                "Query views require AGDAPROVER_SCOPED_RETRIEVAL=1",
+            )
         if scoped_dependencies and not live_scope:
             raise self._error(
                 BridgeFailure.UNSUPPORTED_CAPABILITY,
@@ -384,6 +392,7 @@ class ConformingKernelSession:
         bridge_executable = _transactional_bridge_executable(project.toolchain.version)
         self._live_scope_enabled = live_scope
         self._scope_dependencies_enabled = scoped_dependencies
+        self._scope_query_views_enabled = query_views
         self._scope_adapter_hash = (
             executable_sha256(str(bridge_executable), deadline=budget.deadline)
             if self._live_scope_enabled and bridge_executable is not None
@@ -393,7 +402,13 @@ class ConformingKernelSession:
             capabilities = replace(
                 result.capabilities,
                 adapter=result.capabilities.adapter
-                + ("+live-scope-v7:" if scoped_dependencies else "+live-scope-v6:")
+                + (
+                    ("+live-scope-v9:" if scoped_dependencies else "+live-scope-v8:")
+                    if query_views
+                    else (
+                        "+live-scope-v7:" if scoped_dependencies else "+live-scope-v6:"
+                    )
+                )
                 + self._scope_adapter_hash,
                 operations=tuple(
                     sorted(
@@ -1068,6 +1083,7 @@ class ConformingKernelSession:
                     excluded_names,
                     output_bytes=budget.output_bytes,
                     include_dependencies=self._scope_dependencies_enabled,
+                    normalize_query=self._scope_query_views_enabled,
                 ),
             ),
             transactional=True,
@@ -1092,6 +1108,7 @@ class ConformingKernelSession:
                     goal_id=interaction_id.value,
                     output_bytes=budget.output_bytes,
                     include_dependencies=self._scope_dependencies_enabled,
+                    normalize_query=self._scope_query_views_enabled,
                 )
                 raise self._error(
                     BridgeFailure.RESOURCE_EXHAUSTED,
@@ -1107,6 +1124,7 @@ class ConformingKernelSession:
                 adapter_sha256=self._scope_adapter_hash,
                 output_bytes=budget.output_bytes,
                 include_dependencies=self._scope_dependencies_enabled,
+                normalize_query=self._scope_query_views_enabled,
             )
         except ValueError as error:
             raise self._error(

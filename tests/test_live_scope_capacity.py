@@ -43,7 +43,9 @@ GOAL = "goal : U\ngoal = {!!}\n"
 
 
 @contextmanager
-def source_session(source, *, output_bytes=32 * 1024 * 1024, dependencies=False):
+def source_session(
+    source, *, output_bytes=32 * 1024 * 1024, dependencies=False, query_views=False
+):
     with (
         tempfile.TemporaryDirectory() as directory,
         patch.dict(
@@ -53,6 +55,7 @@ def source_session(source, *, output_bytes=32 * 1024 * 1024, dependencies=False)
                 "AGDAPROVER_DISABLE_AGDA_BRIDGE": "0",
                 "AGDAPROVER_SCOPED_RETRIEVAL": "1",
                 "AGDAPROVER_SCOPED_DEPENDENCIES": "1" if dependencies else "0",
+                "AGDAPROVER_SCOPED_QUERY_VIEWS": "1" if query_views else "0",
             },
         ),
     ):

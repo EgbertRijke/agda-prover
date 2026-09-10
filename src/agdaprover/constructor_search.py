@@ -190,6 +190,20 @@ class _ScopedActions:
                 if self.ranking.symbol_rarity_lane
                 else ()
             )
+            + (
+                (
+                    (
+                        "retrieval-query-view",
+                        str(self.ranking.items[rank - 1].query_view),
+                    ),
+                    (
+                        "retrieval-query-view-rank",
+                        str(self.ranking.items[rank - 1].query_view_rank),
+                    ),
+                )
+                if self.ranking.normalized_query_policy is not None
+                else ()
+            )
             for rank, action in self.entries
             if admission_ranks[rank] <= limit
         }
@@ -1472,6 +1486,9 @@ class _ConstructorSearch:
         )
         ranked = index.retrieve(scoped.query, limit=512)
         self.stats.scoped_retrieval_candidates += ranked.candidate_count
+        self.stats.scoped_retrieval_extra_candidate_views += (
+            ranked.scored_count - ranked.candidate_count
+        )
         self.stats.scoped_retrieval_postings += ranked.postings_visited
         actions = scoped_premise_actions(scoped, ranked)
         record: dict[str, object] = {
@@ -1508,6 +1525,14 @@ class _ConstructorSearch:
                         if ranked.symbol_rarity_lane
                         else {}
                     ),
+                    **(
+                        {
+                            "query_view": item.query_view,
+                            "query_view_rank": item.query_view_rank,
+                        }
+                        if ranked.normalized_query_policy is not None
+                        else {}
+                    ),
                 }
                 for item in ranked.items
             ],
@@ -1526,6 +1551,14 @@ class _ConstructorSearch:
             record["ranking_policy"] = ranked.policy
         if ranked.symbol_rarity_lane:
             record["schema_version"] = "agdaprover.scoped-retrieval-decision.v6"
+        if ranked.normalized_query_policy is not None:
+            record.update(
+                schema_version="agdaprover.scoped-retrieval-decision.v7",
+                ranking_policy=ranked.policy,
+                normalized_query_policy=ranked.normalized_query_policy,
+                query_views_scored=ranked.query_views_scored,
+                scored_count=ranked.scored_count,
+            )
         self.stats.record_retrieval("decisions", record)
         # Exact state/interaction reuse only; no root/child type substitution
         # or similarity cache. Eviction cannot broaden scope.

@@ -24,7 +24,7 @@ import Control.Monad.Trans (lift)
 import Data.Aeson (encode)
 import Data.ByteString.Lazy.Char8 qualified as BS
 import Data.Char (isSpace)
-import Data.List (sort, stripPrefix)
+import Data.List (sort)
 import System.Environment (getArgs, getProgName)
 import System.IO
   ( BufferMode (LineBuffering)
@@ -142,13 +142,13 @@ runTransactionalInteraction :: IOTCM -> CommandM ()
 runTransactionalInteraction command =
   case command Nothing of
     IOTCM current _ _ (Cmd_show_module_contents _ point _ payload)
-      | Just (withDependencies, exclusions) <- ScopeQuery.request payload ->
+      | Just (withDependencies, withQueryViews, exclusions) <- ScopeQuery.request payload ->
         handleCommand_ $ localStateCommandM $ do
           path <- liftIO $ absolute current
           loaded <- gets theCurrentFile
           unless (Just path == (currentFilePath <$> loaded)) $
             lift $ genericError "live-scope-current-file-mismatch"
-          lift $ ScopeQuery.emit withDependencies point exclusions
+          lift $ ScopeQuery.emit withDependencies withQueryViews point exclusions
     IOTCM _ _ Indirect _ ->
       localStateCommandM (runInteraction (forceDirect command))
     IOTCM _ _ Direct _ -> runInteraction command
