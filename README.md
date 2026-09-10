@@ -9,6 +9,8 @@ including dependent fields and inductive values stored in records.
 It runs locally, without an online service or LLM. Optional NNUE models guide
 proof search; no model is required to get started.
 
+The AgdaProver project is initiated and maintained by Egbert Rijke. The code-base is implemented by ChatGPT-5.6 (early development) and ChatGPT-6.
+
 ## Install
 
 Requires Python 3.11+ and Agda 2.8.0.
