@@ -109,6 +109,7 @@ class ORPolicyRouter:
         self.model_items_scored = 0
         self.model_elapsed_ms = 0.0
         self.symbolic_fallbacks = 0
+        self.unsupported_family_fallbacks = 0
         self.family_counts: dict[str, int] = {}
         self._latest: dict[DecisionFamily, tuple[str | None, dict[str, str]]] = {}
         self._latest_goals: dict[DecisionFamily, GoalInfo] = {}
@@ -152,6 +153,16 @@ class ORPolicyRouter:
             len(symbolic) > 1
         )
         model = self.refinement_model
+        provenance = self.provenance
+        if model is not None and not model.supports_policy_family(family):
+            model = None
+            if len(symbolic) > 1:
+                self.symbolic_fallbacks += 1
+                self.unsupported_family_fallbacks += 1
+            provenance = {
+                **self.provenance,
+                "policy_fallback_reason": "unsupported-decision-family",
+            }
         if model is not None and len(symbolic) > 1:
             started = time.monotonic()
             try:
@@ -204,7 +215,7 @@ class ORPolicyRouter:
             model_scores=scores_by_id,
             model_id=model.model_id if model is not None else None,
             budget_envelope=self.budget_envelope,
-            provenance=self.provenance,
+            provenance=provenance,
         )
         self._latest[family] = (
             decision_id,
@@ -325,6 +336,7 @@ class ORPolicyRouter:
             "model_items_scored": self.model_items_scored,
             "model_elapsed_ms": self.model_elapsed_ms,
             "symbolic_fallbacks": self.symbolic_fallbacks,
+            "unsupported_family_fallbacks": self.unsupported_family_fallbacks,
             "decision_families": dict(sorted(self.family_counts.items())),
             "trace_decisions": len(self.recorder.to_list()),
             "trace_decisions_omitted": self.recorder.omitted,

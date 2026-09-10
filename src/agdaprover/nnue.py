@@ -29,9 +29,11 @@ from .terms import Term
 FocusedNNUEPolicy = FocusedPolicy
 
 MODEL_SCHEMA_VERSION = "agdaprover.nnue.p0.v2"
+SCOPED_MODEL_SCHEMA_VERSION = "agdaprover.nnue.p0.v3"
 LEGACY_MODEL_SCHEMA_VERSION = "agdaprover.nnue.p0.v1"
 FEATURE_SCHEMA_VERSION = "agdaprover.features.p0.v2"
 MAGIC = b"APNNUE2\0"
+SCOPED_MAGIC = b"APNNUE3\0"
 LEGACY_MAGIC = b"APNNUE1\0"
 
 MODEL_FEATURE_FAMILIES: dict[ModelRole, str] = {
@@ -45,8 +47,35 @@ MAX_HIDDEN_SIZE = 4_096
 MAX_PARAMETER_BYTES = 16 * 1024 * 1024
 MAX_HEADER_BYTES = 64 * 1024
 MAX_MODEL_FILE_BYTES = (
-    max(len(MAGIC), len(LEGACY_MAGIC)) + 4 + MAX_HEADER_BYTES + MAX_PARAMETER_BYTES
+    max(len(MAGIC), len(LEGACY_MAGIC), len(SCOPED_MAGIC))
+    + 4
+    + MAX_HEADER_BYTES
+    + MAX_PARAMETER_BYTES
 )
+
+
+def validate_policy_families(role: ModelRole, families: tuple[str, ...] | None) -> None:
+    """Validate the inference domain, independently of training sidecars."""
+
+    if families is None:
+        return
+    supported = {
+        "case-variable",
+        "constructor-choice",
+        "recursive-call",
+        "visible-premise",
+    }
+    if (
+        role != "or-decision-ranking"
+        or not isinstance(families, tuple)
+        or not families
+        or any(
+            not isinstance(family, str) or family not in supported
+            for family in families
+        )
+        or tuple(sorted(set(families))) != families
+    ):
+        raise ValueError("NNUE policy families must be a nonempty canonical OR domain")
 
 
 def _validate_dimensions(input_size: int, hidden_size: int) -> None:
@@ -92,6 +121,7 @@ class NNUEModel:
     output_bias: float
     seed: int
     model_id: str = "unpersisted"
+    policy_families: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         _validate_dimensions(self.input_size, self.hidden_size)
@@ -104,6 +134,7 @@ class NNUEModel:
             raise ValueError("NNUE output-weight length does not match header")
         if self.role not in MODEL_FEATURE_FAMILIES:
             raise ValueError(f"unsupported NNUE model role: {self.role!r}")
+        validate_policy_families(self.role, self.policy_families)
         values = chain(
             self.hidden_bias,
             self.embeddings,
@@ -225,6 +256,11 @@ class NNUEModel:
                 f"NNUE role mismatch: expected {expected!r}, found {self.role!r}"
             )
 
+    def supports_policy_family(self, family: str) -> bool:
+        """Legacy models are unscoped; scoped models rank only declared families."""
+
+        return self.policy_families is None or family in self.policy_families
+
     @classmethod
     def load(
         cls,
@@ -246,8 +282,15 @@ class NNUEModel:
                     raise ValueError("NNUE model file exceeds safety cap")
                 chunks.append(block)
         contents = b"".join(chunks)
-        magic = MAGIC if contents.startswith(MAGIC) else LEGACY_MAGIC
-        if not contents.startswith(magic):
+        formats = {
+            SCOPED_MAGIC: SCOPED_MODEL_SCHEMA_VERSION,
+            MAGIC: MODEL_SCHEMA_VERSION,
+            LEGACY_MAGIC: LEGACY_MODEL_SCHEMA_VERSION,
+        }
+        magic = next(
+            (prefix for prefix in formats if contents.startswith(prefix)), None
+        )
+        if magic is None:
             raise ValueError("invalid NNUE model magic")
         if len(contents) < len(magic) + 4:
             raise ValueError("truncated NNUE model header")
@@ -262,9 +305,11 @@ class NNUEModel:
             header = json.loads(contents[header_start:header_end])
         except (json.JSONDecodeError, UnicodeDecodeError) as error:
             raise ValueError("invalid NNUE model header") from error
+        if not isinstance(header, dict):
+            raise ValueError("NNUE model header must be an object")
         schema = header.get("schema_version")
-        if schema not in {MODEL_SCHEMA_VERSION, LEGACY_MODEL_SCHEMA_VERSION}:
-            raise ValueError("unsupported NNUE model schema")
+        if schema != formats[magic]:
+            raise ValueError("NNUE model magic and schema must agree")
         if header.get("feature_schema_version") != FEATURE_SCHEMA_VERSION:
             raise ValueError("unsupported NNUE feature schema")
         try:
@@ -279,10 +324,19 @@ class NNUEModel:
             raise ValueError(
                 f"NNUE role mismatch: expected {expected_role!r}, found {role!r}"
             )
-        if schema == MODEL_SCHEMA_VERSION:
+        if schema != LEGACY_MODEL_SCHEMA_VERSION:
             expected_family = MODEL_FEATURE_FAMILIES[role]
             if header.get("feature_family") != expected_family:
                 raise ValueError("NNUE feature family does not match its model role")
+        policy_families = None
+        if schema == SCOPED_MODEL_SCHEMA_VERSION:
+            raw_families = header.get("policy_families")
+            if not isinstance(raw_families, list):
+                raise ValueError("scoped NNUE model requires policy families")
+            policy_families = tuple(raw_families)
+            validate_policy_families(role, policy_families)
+        elif "policy_families" in header:
+            raise ValueError("policy families require the scoped NNUE format")
         count = hidden_size + input_size * hidden_size + hidden_size + 1
         expected_bytes = count * 4
         payload = contents[header_end:]
@@ -309,4 +363,5 @@ class NNUEModel:
             output_bias=output_bias,
             seed=seed,
             model_id=hashlib.sha256(contents).hexdigest(),
+            policy_families=policy_families,
         )
