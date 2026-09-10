@@ -52,7 +52,7 @@ Time and depth limits are unset by default. Deep search does not remove
 explicit limits or increase the other resource allowances. See
 [deep search](interactive.md#deep-search).
 
-## Optional NNUE models
+## NNUE models
 
 | Setting | Emacs variable | VS Code setting |
 | --- | --- | --- |
@@ -62,17 +62,20 @@ explicit limits or increase the other resource allowances. See
 | One-step model | `agdaprover-step-model-file` | `agdaprover.stepModel` |
 | OR-decision model | `agdaprover-action-model-file` | `agdaprover.actionModel` |
 
-No model is required. Emacs defaults to `auto`: it selects NNUE when the
-model for that operation is readable, and symbolic ranking otherwise.
-Its one-step ranker follows the main ranker unless overridden. VS Code
-defaults to `symbolic`; select `nnue` to use its configured models.
+Models are bundled: no model paths are required. Emacs defaults to `auto`
+(an alias for `nnue`); its one-step ranker follows the main ranker unless
+overridden. VS Code defaults to `nnue`. Select `symbolic` to disable neural
+ranking. Unset model paths use the operation's bundled defaults; setting a
+path overrides that slot independently.
 
 Proof search and one-step refinement need different model roles. A one-step
 model must have the `one-step-refinement-ranking` role; an optional model
 for internal search choices must have the `or-decision-ranking` role.
 These artifacts are not interchangeable. In the editors, the OR-decision
 model accompanies NNUE proof search, not symbolic or one-step search.
-Explicit NNUE requests require a compatible model for the operation.
+Custom paths must be readable and compatible; invalid overrides are reported,
+not silently replaced. See [bundled model coverage](bundled-models.md) and the
+[selection contract](../schemas/model-defaults-v1.md).
 
 ## Applying results
 

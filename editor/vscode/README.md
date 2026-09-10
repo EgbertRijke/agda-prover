@@ -56,7 +56,9 @@ It requests 8,000 actions instead of 500. Keep `agdaprover.maxCandidates` at
 `null` to use the preset; explicit action/time limits remain authoritative.
 Cancel remains available. See [deep search](../../docs/interactive.md#deep-search).
 
-NNUE roles have separate settings: `agdaprover.model` is the proof or
+NNUE is enabled by default and needs no model setup. Set `agdaprover.ranker`
+to `symbolic` to opt out. Model paths override the bundled weights independently;
+empty paths use the defaults. NNUE roles have separate settings: `agdaprover.model` is the proof or
 focused-branch model, `agdaprover.stepModel` is the one-step model, and the
 optional `agdaprover.actionModel` must be an OR-decision model. The extension
 never substitutes one role's artifact for another.

@@ -57,7 +57,7 @@ class EditorRequest:
     source_file: Path
     source_sha256: str
     goal_position: int
-    ranker: Literal["symbolic", "nnue"] = "symbolic"
+    ranker: Literal["symbolic", "nnue"] = "nnue"
     model: Path | None = None
     action_model: Path | None = None
     max_candidates: int = 500
@@ -100,7 +100,7 @@ class EditorRequest:
         position = value.get("goal_position")
         if type(position) is not int or position < 1:
             raise ValueError("editor goal_position must be a positive integer")
-        ranker = value.get("ranker", "symbolic")
+        ranker = value.get("ranker", "nnue")
         if ranker not in {"symbolic", "nnue"}:
             raise ValueError("unsupported editor ranker")
 

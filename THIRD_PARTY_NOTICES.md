@@ -29,5 +29,16 @@ build; this source notice is not a complete binary dependency inventory.
 AgdaProver's original code and contributed changes are licensed under
 GPL-3.0-or-later; see [LICENSE](LICENSE) and [AUTHORS.md](AUTHORS.md). This does
 not remove the upstream MIT notice above or relicense separately obtained Agda
-libraries, training corpora or model weights. No third-party model weights or
-training corpus are bundled in this product.
+libraries or training corpora.
+
+## Agda standard library training sources
+
+The bundled OR-policy weights were trained locally on a small, reviewed subset
+of the [Agda standard library](https://github.com/agda/agda-stdlib), licensed
+under MIT. Its unmodified copyright and permission notice is preserved in
+[licenses/agda-stdlib-MIT.txt](licenses/agda-stdlib-MIT.txt).
+
+The three bundled models are distributed by AgdaProver's authors under
+GPL-3.0-or-later. Their roles, data identities and limitations are documented in
+[the model card](docs/bundled-models.md). No training corpus or training
+infrastructure is included in this product.

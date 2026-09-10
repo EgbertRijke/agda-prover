@@ -154,22 +154,23 @@
         "agdaprover.ranker": {
           "type": "string",
           "enum": ["symbolic", "nnue"],
-          "default": "symbolic"
+          "default": "nnue",
+          "description": "Use the bundled NNUE models by default, or select symbolic to disable neural ranking."
         },
         "agdaprover.model": {
           "type": "string",
           "default": "",
-          "description": "Proof-term or focused-branch NNUE model used by complete proof search."
+          "description": "Override the bundled proof/focused-branch NNUE model. Empty uses the default."
         },
         "agdaprover.stepModel": {
           "type": "string",
           "default": "",
-          "description": "One-step-refinement NNUE model used only by the step command."
+          "description": "Override the bundled one-step NNUE model. Empty uses the default."
         },
         "agdaprover.actionModel": {
           "type": "string",
           "default": "",
-          "description": "Optional OR-decision NNUE model used only by complete proof search."
+          "description": "Override the bundled OR-decision NNUE policy for complete proof search. Empty uses the default."
         },
         "agdaprover.searchProfile": {
           "type": "string",

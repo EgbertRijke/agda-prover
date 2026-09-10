@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from ..artifacts import optional_file_sha256
 from ..contracts import TaskSpec
 from ..nnue import NNUEModel
+from .bundled import FOCUSED_MODEL, OR_MODEL, STEP_MODEL
 from .protocol import ProofTermRanker, SparsePolicyRanker, StepActionRanker
 
 
@@ -20,13 +21,27 @@ class LoadedProofModels:
 
 
 def configured_model_ids(
-    task: TaskSpec, *, deadline: float | None
+    task: TaskSpec, *, deadline: float | None, command: str = "prove"
 ) -> dict[str, str | None]:
     """Hash configured model artifacts before their role is interpreted."""
 
+    if command == "step":
+        paths = {
+            "step": (task.model_path or STEP_MODEL.path)
+            if task.ranker == "nnue"
+            else None
+        }
+    else:
+        paths = {
+            "primary": (task.model_path or FOCUSED_MODEL.path)
+            if task.ranker == "nnue"
+            else None,
+            "refinement": task.action_model_path
+            or (OR_MODEL.path if task.ranker == "nnue" else None),
+        }
     return {
-        "primary": optional_file_sha256(task.model_path, deadline=deadline),
-        "refinement": optional_file_sha256(task.action_model_path, deadline=deadline),
+        role: optional_file_sha256(path, deadline=deadline)
+        for role, path in paths.items()
     }
 
 
@@ -44,9 +59,11 @@ def load_proof_models(
     primary_id: str | None = None
     refinement_id: str | None = None
     if task.ranker == "nnue":
-        if task.model_path is None:
-            raise ValueError("--model is required for NNUE ranking")
-        primary = NNUEModel.load(task.model_path, deadline=deadline)
+        primary = (
+            NNUEModel.load(task.model_path, deadline=deadline)
+            if task.model_path is not None
+            else FOCUSED_MODEL.load(deadline=deadline)
+        )
         primary_id = primary.model_id
         if primary.role == "proof-term-ranking":
             term = primary
@@ -64,6 +81,9 @@ def load_proof_models(
         )
         refinement = concrete_refinement
         refinement_id = concrete_refinement.model_id
+    elif task.ranker == "nnue":
+        refinement = OR_MODEL.load(deadline=deadline)
+        refinement_id = refinement.model_id
     return LoadedProofModels(
         term,
         focused,
@@ -81,7 +101,7 @@ def load_step_model(
     if task.ranker != "nnue":
         return None
     if task.model_path is None:
-        raise ValueError("--model is required for NNUE ranking")
+        return STEP_MODEL.load(deadline=deadline)
     return NNUEModel.load(
         task.model_path,
         expected_role="one-step-refinement-ranking",

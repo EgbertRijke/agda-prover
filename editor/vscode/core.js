@@ -216,6 +216,12 @@ function buildProjectConfiguration({executable = '', libraryFile = '', options =
   };
 }
 
+function modelsForOperation(config, operation) {
+  if (config.ranker !== 'nnue') return {model: null, actionModel: null};
+  if (operation === 'step') return {model: config.stepModel || null, actionModel: null};
+  return {model: config.model || null, actionModel: config.actionModel || null};
+}
+
 function searchRequestOptions(config) {
   const profile = config.searchProfile === undefined ? 'standard' : config.searchProfile;
   if (!['standard', 'deep'].includes(profile)) throw new Error('Unknown search profile');
@@ -238,6 +244,7 @@ module.exports = {
   buildProjectConfiguration,
   isAgdaProverRoot,
   isSupportedAgdaPath,
+  modelsForOperation,
   resolveProjectRoot,
   searchRequestOptions,
   selectAgdaReloadCommand

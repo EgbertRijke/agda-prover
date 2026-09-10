@@ -100,9 +100,9 @@ separate library and source-file flags."
 (defcustom agdaprover-ranker 'auto
   "Candidate ranker used by `agdaprover-prove-goal'.
 
-`auto' uses NNUE when its model is readable and otherwise uses the complete
-symbolic fallback."
-  :type '(choice (const :tag "NNUE with symbolic fallback" auto)
+`auto' and `nnue' use the bundled NNUE models unless overridden.
+`symbolic' disables neural ranking."
+  :type '(choice (const :tag "Bundled NNUE defaults" auto)
                  (const :tag "Deterministic symbolic" symbolic)
                  (const :tag "NNUE" nnue))
   :group 'agdaprover)
@@ -117,32 +117,33 @@ When nil, one-step search follows `agdaprover-ranker'."
   :group 'agdaprover)
 
 (defcustom agdaprover-model-file nil
-  "Proof-term or focused-branch NNUE model used by complete proof search."
-  :type '(choice (const :tag "No model selected" nil) file)
+  "Override the bundled proof/focused-branch NNUE model, or nil for the default."
+  :type '(choice (const :tag "Use bundled model" nil) file)
   :group 'agdaprover)
 
 (defcustom agdaprover-step-model-file nil
   "NNUE model trained for one-step refinement ranking.
 
-When nil, automatic one-step ranking uses the symbolic fallback.  An explicit
-NNUE step request requires a model with the `one-step-refinement-ranking'
-role."
-  :type '(choice (const :tag "Use symbolic one-step ordering" nil) file)
+When nil, NNUE one-step ranking uses the bundled one-step model.
+Overrides must have the `one-step-refinement-ranking' role."
+  :type '(choice (const :tag "Use bundled one-step model" nil) file)
   :group 'agdaprover)
 
 (defcustom agdaprover-action-model-file nil
   "NNUE model trained for shared solver OR-decision ranking.
 
-This optional model is used only by complete proof and joint-prefix search.
+When nil, use the bundled OR policy.  This model is used only by complete
+proof and joint-prefix search with NNUE ranking.
 It must have the `or-decision-ranking' role.  In particular, a
 `one-step-refinement-ranking' model belongs in
 `agdaprover-step-model-file', not here."
-  :type '(choice (const :tag "Use symbolic OR-decision ordering" nil) file)
+  :type '(choice (const :tag "Use bundled OR policy" nil) file)
   :group 'agdaprover)
 
 (defcustom agdaprover-search-profile 'standard
   "Search effort preset: `standard' (500 actions) or `deep' (8000 actions).
-Explicit limits override preset values.  Neither preset adds a time or depth cap."
+Explicit limits override preset values.
+Neither preset adds a time or depth cap."
   :type '(choice (const standard) (const deep))
   :group 'agdaprover)
 
@@ -207,16 +208,16 @@ without prompting.  `never' only records and displays the result."
                 (agdaprover--project-root)))
   (unless (executable-find agdaprover-python-command)
     (user-error "Python executable not found: %s" agdaprover-python-command))
-  (when (eq ranker 'nnue)
-    (unless (and model-file (file-readable-p model-file))
+  (when (and (eq ranker 'nnue) model-file)
+    (unless (file-readable-p model-file)
       (user-error "Select a readable NNUE model for this operation"))))
 
-(defun agdaprover--resolve-ranker (ranker model-file)
-  "Resolve RANKER to `nnue' or `symbolic' using MODEL-FILE.
+(defun agdaprover--resolve-ranker (ranker _model-file)
+  "Resolve RANKER to `nnue' or `symbolic'.
 
-An automatic configuration fails closed to local symbolic search."
+The backend supplies operation-specific bundled models when none is selected."
   (if (eq ranker 'auto)
-      (if (and model-file (file-readable-p model-file)) 'nnue 'symbolic)
+      'nnue
     ranker))
 
 (defun agdaprover--action-model-for-operation (operation)
@@ -252,10 +253,9 @@ RANKER and MODEL-FILE select the candidate ordering implementation."
      (list "--max-depth" (number-to-string agdaprover-max-depth)))
    (when (eq ranker 'nnue)
      (append
-      (list "--model" (expand-file-name model-file))
+      (when model-file (list "--model" (expand-file-name model-file)))
       (when (and (member operation '("prove" "prove-prefix"))
-                 action-model-file
-                 (file-readable-p action-model-file))
+                 action-model-file)
         (list "--action-model" (expand-file-name action-model-file)))))))
 
 (defun agdaprover--command (source-file goal-position ranker)
@@ -309,7 +309,6 @@ editor client."
                     :null))
       (action_model . ,(or (and (eq ranker 'nnue)
                                 action-model-file
-                                (file-readable-p action-model-file)
                                 (expand-file-name action-model-file))
                            :null))
       ,@(unless (eq agdaprover-search-profile 'standard)

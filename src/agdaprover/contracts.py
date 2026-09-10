@@ -103,7 +103,7 @@ class TaskSpec:
     max_term_size: int = 8
     max_depth: int | None = None
     timeout_seconds: float | None = None
-    ranker: Literal["symbolic", "nnue"] = "symbolic"
+    ranker: Literal["symbolic", "nnue"] = "nnue"
     model_path: Path | None = None
     action_model_path: Path | None = None
     goal_position: int | None = None

@@ -3,8 +3,10 @@
 AgdaProver fills holes in Agda code by searching for definitions and proofs.
 It helps with routine proof steps, case splits, and related goals that need to
 be solved together. Completed proofs are independently checked by Agda. It runs
-locally. Optional NNUE models guide proof search; no model is required to get
-started.
+locally, using bundled NNUE models to guide proof search. No model setup or
+download is required.
+
+The strength of AgdaProver is measured by [ProverStrength](https://egbertrijke.github.io/ProverStrength/).
 
 The AgdaProver project was initiated and is maintained by Egbert Rijke. The
 codebase is implemented by GPT-5.6 (early development) and GPT-6.
@@ -95,6 +97,11 @@ Open Emacs settings with `M-x customize-group RET agdaprover RET`, or use
 VS Code's AgdaProver settings. The
 [editor configuration guide](docs/editor-configuration.md) lists all options.
 
+NNUE ranking is enabled by default. Select `symbolic` for `agdaprover-ranker`
+(Emacs) or `agdaprover.ranker` (VS Code) to opt out. The models are small
+experimental prototypes and apply across Agda files. Decision kinds without
+trained weights keep symbolic ordering. See [model coverage and provenance](docs/bundled-models.md).
+
 ## Try an example
 
 [Eckmann–Hilton](examples/EckmannHilton.agda) has 12 open goals ending in
@@ -122,6 +129,7 @@ From the checkout:
 .venv/bin/agda-prover prove-prefix MyFile.agda
 .venv/bin/agda-prover prove-prefix MyFile.agda --deep
 .venv/bin/agda-prover step MyFile.agda --goal 0
+.venv/bin/agda-prover prove-prefix MyFile.agda --ranker symbolic
 ```
 
 Commands return JSON results and proposed edits without overwriting your
@@ -131,6 +139,10 @@ select a compiler, and `--agda-option=--FLAG` for global checking options.
 Both editors and the CLI preserve library and file-specific options and
 ignore ambient default libraries; see the
 [configuration contract](schemas/project-configuration-v1.md).
+
+Use `--model PATH` to replace the bundled proof/focused model (or the one-step
+model for `step`), and `--action-model PATH` to replace the internal OR policy.
+The slots have distinct roles; see [model selection](schemas/model-defaults-v1.md).
 
 The [interactive command](docs/interactive.md) supports progress inspection,
 pause, resume, stop, and accepting individual completed goals.

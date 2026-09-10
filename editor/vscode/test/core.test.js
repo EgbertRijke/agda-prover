@@ -8,6 +8,23 @@ const test = require('node:test');
 
 const core = require('../core');
 
+test('bundled NNUE is the editor default with independent optional overrides', () => {
+  const settings = require('../package.json').contributes.configuration.properties;
+  assert.equal(settings['agdaprover.ranker'].default, 'nnue');
+  for (const name of ['model', 'stepModel', 'actionModel']) {
+    assert.equal(settings[`agdaprover.${name}`].default, '');
+  }
+  for (const operation of ['prove', 'prove-prefix', 'step']) {
+    assert.deepEqual(core.modelsForOperation({ranker: 'nnue'}, operation),
+      {model: null, actionModel: null});
+  }
+  const custom = {ranker: 'nnue', model: '/proof', stepModel: '/step', actionModel: '/or'};
+  assert.deepEqual(core.modelsForOperation(custom, 'step'), {model: '/step', actionModel: null});
+  assert.deepEqual(core.modelsForOperation(custom, 'prove-prefix'), {model: '/proof', actionModel: '/or'});
+  assert.deepEqual(core.modelsForOperation({...custom, ranker: 'symbolic'}, 'prove-prefix'),
+    {model: null, actionModel: null});
+});
+
 test('deep search delegates preset defaults and preserves explicit action limits', () => {
   assert.deepEqual(core.searchRequestOptions({}), {});
   assert.deepEqual(core.searchRequestOptions({searchProfile: 'deep', maxCandidates: null}),

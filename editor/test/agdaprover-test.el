@@ -104,9 +104,8 @@
   (let ((agdaprover-project-root agdaprover-test--root)
         (agdaprover-model-file "/tmp/policy.apnnue")
         (agdaprover-step-model-file nil))
-    (should-error
-     (agdaprover--step-command "/tmp/Tiny.agda" 17 'nnue)
-     :type 'user-error)))
+    (should-not
+     (member "--model" (agdaprover--step-command "/tmp/Tiny.agda" 17 'nnue)))))
 
 (ert-deftest agdaprover-test-command-joint-prefix ()
   (let ((agdaprover-project-root agdaprover-test--root)
@@ -258,18 +257,24 @@
     (setf (alist-get 'schema_version metadata) "future")
     (should-not (agdaprover--formatter-metadata-p metadata))))
 
-(ert-deftest agdaprover-test-nnue-requires-model ()
+(ert-deftest agdaprover-test-nnue-uses-bundled-model-by-default ()
   (let ((agdaprover-project-root agdaprover-test--root)
         (agdaprover-model-file nil))
-    (should-error
-     (agdaprover--command "/tmp/Tiny.agda" 0 'nnue)
-     :type 'user-error)))
+    (should-not
+     (member "--model" (agdaprover--command "/tmp/Tiny.agda" 0 'nnue)))))
+
+(ert-deftest agdaprover-test-nnue-rejects-missing-custom-model ()
+  (let ((agdaprover-project-root agdaprover-test--root)
+        (agdaprover-model-file "/missing/custom.apnnue"))
+    (cl-letf (((symbol-function 'file-readable-p) (lambda (_path) nil)))
+      (should-error (agdaprover--command "/tmp/Tiny.agda" 0 'nnue)
+                    :type 'user-error))))
 
 (ert-deftest agdaprover-test-auto-ranker-prefers-nnue-with-model ()
   (cl-letf (((symbol-function 'file-readable-p) (lambda (_path) t)))
     (should (eq (agdaprover--resolve-ranker 'auto "/tmp/policy.apnnue")
                 'nnue)))
-  (should (eq (agdaprover--resolve-ranker 'auto nil) 'symbolic)))
+  (should (eq (agdaprover--resolve-ranker 'auto nil) 'nnue)))
 
 (ert-deftest agdaprover-test-n-key-is-reserved-no-op ()
   (should (eq (lookup-key agdaprover-mode-map (kbd "C-c C-x C-n"))

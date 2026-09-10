@@ -133,13 +133,20 @@ def add_search_options(
     )
     if allow_model:
         parser.add_argument(
-            "--ranker", choices=("symbolic", "nnue"), default="symbolic"
+            "--ranker",
+            choices=("symbolic", "nnue"),
+            default="nnue",
+            help="NNUE with bundled models (default), or symbolic ordering",
         )
-        parser.add_argument("--model", type=Path)
+        parser.add_argument(
+            "--model",
+            type=Path,
+            help="override the bundled proof/focused model (step: one-step model)",
+        )
         parser.add_argument(
             "--action-model",
             type=Path,
-            help="optional role-checked NNUE model for this command's decisions",
+            help="override the bundled OR policy; explicit use also enables it with symbolic primary ranking",
         )
 
 

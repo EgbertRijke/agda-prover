@@ -1334,6 +1334,7 @@ class _ConstructorSearch:
         ranked = self.policy_router.rank(
             goal,
             candidates,
+            priority_tiers=tuple(structural_key(name)[0] for name in ordered),
             classification=classify_structural_scheduling(
                 construction_result_head_matches_goal=constructor_matches_goal,
                 structural_construction_available=bool(ordered),
@@ -1751,6 +1752,10 @@ class _ConstructorSearch:
                     views.append(action)
             ordered = tuple(views[0] for views in grouped.values())
         by_expression = {action.expression: action for action in ordered}
+        # The final key is only a spelling tie-breaker. Preserve the preceding
+        # type-directed priorities; NNUE replaces spelling order within a tier.
+        tier_keys = list(dict.fromkeys(priorities[action][:-1] for action in ordered))
+        tiers = {key: index for index, key in enumerate(tier_keys)}
         candidates = tuple(
             policy_candidate(
                 family="visible-premise",
@@ -1778,6 +1783,7 @@ class _ConstructorSearch:
         ranked = self.policy_router.rank(
             goal,
             candidates,
+            priority_tiers=tuple(tiers[priorities[action][:-1]] for action in ordered),
             classification=classify_structural_scheduling(
                 recursive_result_head_matches_goal=(
                     any(

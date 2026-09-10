@@ -55,6 +55,7 @@ class LicensingTests(unittest.TestCase):
                 "AUTHORS.md",
                 "THIRD_PARTY_NOTICES.md",
                 "licenses/Agda-MIT.txt",
+                "licenses/agda-stdlib-MIT.txt",
             },
         )
         editor_files = config["tool"]["setuptools"]["data-files"][

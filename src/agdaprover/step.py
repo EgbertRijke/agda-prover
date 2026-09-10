@@ -11,7 +11,6 @@ from .actions import (
     RefinementCandidate,
     action_result,
 )
-from .artifacts import optional_file_sha256
 from .bridge.resources import current_process_rss
 from .budget import SearchBudget
 from .contracts import GoalInfo, StepResult, TaskSpec, task_identity
@@ -27,7 +26,7 @@ from .offline import assert_offline_configuration
 from .presentation import reconstruct_case_split, reconstruct_intro
 from .project import attach_module_scope, choose_goal, require_agda_source_file
 from .ranking.protocol import StepActionRanker
-from .ranking.runtime import load_step_model
+from .ranking.runtime import configured_model_ids, load_step_model
 from .reasoning.providers import (
     ActionProvider,
     refinement_action_provider,
@@ -131,9 +130,9 @@ def propose_step(
             mode="step",
             policy_profile=result.policy_profile,
             toolchain_id=None,
-            model_ids={
-                "step": optional_file_sha256(task.model_path, deadline=budget.deadline)
-            },
+            model_ids=configured_model_ids(
+                task, deadline=budget.deadline, command="step"
+            ),
         )
 
         model = load_step_model(task, deadline=budget.deadline)

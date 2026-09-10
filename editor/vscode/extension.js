@@ -11,6 +11,7 @@ const {
   buildBackend,
   buildProjectConfiguration,
   isSupportedAgdaPath,
+  modelsForOperation,
   resolveProjectRoot,
   searchRequestOptions,
   selectAgdaReloadCommand
@@ -66,7 +67,7 @@ function configuration(context, document) {
   return {
     backend,
     rootResolution,
-    ranker: settings.get('ranker', 'symbolic'),
+    ranker: settings.get('ranker', 'nnue'),
     model: settings.get('model', '') || null,
     stepModel: settings.get('stepModel', '') || null,
     actionModel: settings.get('actionModel', '') || null,
@@ -87,22 +88,6 @@ function configuration(context, document) {
 
 function digestFile(filename) {
   return crypto.createHash('sha256').update(fs.readFileSync(filename)).digest('hex');
-}
-
-function modelsForOperation(config, operation) {
-  if (config.ranker !== 'nnue') {
-    return {model: null, actionModel: null};
-  }
-  if (operation === 'step') {
-    return {
-      model: config.stepModel,
-      actionModel: null
-    };
-  }
-  return {
-    model: config.model,
-    actionModel: config.actionModel
-  };
 }
 
 function isSupportedDocument(document) {

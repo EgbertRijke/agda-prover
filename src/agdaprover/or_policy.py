@@ -132,7 +132,16 @@ class ORPolicyRouter:
         candidates: tuple[PolicyCandidate, ...],
         *,
         classification: StructuralClassification | None = None,
+        priority_tiers: tuple[int, ...] | None = None,
     ) -> RankedPolicyBatch:
+        if priority_tiers is not None and (
+            len(priority_tiers) != len(candidates)
+            or any(type(tier) is not int or tier < 0 for tier in priority_tiers)
+            or tuple(sorted(priority_tiers)) != priority_tiers
+        ):
+            raise ValueError(
+                "policy priority tiers must follow the complete symbolic order"
+            )
         if not candidates:
             return RankedPolicyBatch((), None)
         active_classification = classification or StructuralClassification()
@@ -154,13 +163,19 @@ class ORPolicyRouter:
         )
         model = self.refinement_model
         provenance = self.provenance
+        if priority_tiers is not None:
+            provenance = {
+                **provenance,
+                "ranking_policy": "structural-tiers-v1",
+                "priority_tiers": list(priority_tiers),
+            }
         if model is not None and not model.supports_policy_family(family):
             model = None
             if len(symbolic) > 1:
                 self.symbolic_fallbacks += 1
                 self.unsupported_family_fallbacks += 1
             provenance = {
-                **self.provenance,
+                **provenance,
                 "policy_fallback_reason": "unsupported-decision-family",
             }
         if model is not None and len(symbolic) > 1:
@@ -193,6 +208,9 @@ class ORPolicyRouter:
                     sorted(
                         symbolic,
                         key=lambda candidate: (
+                            priority_tiers[symbolic_position[candidate.candidate_id]]
+                            if priority_tiers is not None
+                            else 0,
                             -scores_by_id[candidate.candidate_id],
                             symbolic_position[candidate.candidate_id],
                         ),
