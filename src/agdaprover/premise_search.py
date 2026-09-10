@@ -1978,6 +1978,29 @@ def premise_type_pattern_matches(
     )
 
 
+def premise_has_local_source(
+    goal: GoalInfo, type_text: str, source_domains: tuple[str, ...]
+) -> bool:
+    """Recognize a source already available for an early eliminator attempt.
+
+    This is scheduling evidence, not applicability or a proof of irrelevance.
+    A surface mismatch (including an unrecognized alias) must leave ordinary
+    premise search available. Bindings are scoped to this goal, never inherited
+    from a sibling whose source may have a different type or module instance.
+    """
+
+    return any(
+        premise_type_pattern_matches(type_text, domain, entry.type)
+        for entry in goal.context
+        if entry.in_scope
+        and entry.name
+        and not top_level_arrow_count(entry.type)
+        and not result_head(entry.type).startswith("Set")
+        and result_head(entry.type) != "Level"
+        for domain in source_domains
+    )
+
+
 def premise_function_shape_matches(goal: GoalInfo, action: ScopePremiseAction) -> bool:
     """Propose reusing a supplied function at its complete expected telescope.
 

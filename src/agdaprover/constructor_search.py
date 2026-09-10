@@ -38,6 +38,7 @@ from .premise_search import (
     premise_eliminator_source_domains,
     premise_expected_arguments,
     premise_function_shape_matches,
+    premise_has_local_source,
     premise_has_shallow_support,
     premise_independent_result_domains,
     premise_inferred_application,
@@ -441,6 +442,7 @@ class ConstructorStats(ScopedRetrievalStats):
     evidence_terms: int = 0
     evidence_path_queries: int = 0
     contextual_evidence_enabled: bool = True
+    eliminator_readiness_policy: str | None = None
     premise_attempts: list[dict[str, object]] = field(default_factory=list)
     premise_attempts_omitted: int = 0
     completion_queries: int = 0
@@ -523,9 +525,17 @@ class _ConstructorSearch:
         self.contextual_evidence_enabled = (
             os.environ.get("AGDAPROVER_CONTEXTUAL_EVIDENCE", "1") != "0"
         )
+        self._local_eliminator_readiness_enabled = (
+            os.environ.get("AGDAPROVER_LOCAL_ELIMINATOR_READINESS") == "1"
+        )
         self.stats = ConstructorStats(
             depth_limit=max_depth,
             contextual_evidence_enabled=self.contextual_evidence_enabled,
+            eliminator_readiness_policy=(
+                "local-source-readiness-v1"
+                if self._local_eliminator_readiness_enabled
+                else None
+            ),
         )
         self.policy_router = policy_router or ORPolicyRouter(
             focused_model=focused_model,
@@ -560,7 +570,10 @@ class _ConstructorSearch:
             None
         )
         self._focused_visible_eliminators: tuple[tuple[str, tuple[str, ...]], ...] = ()
-        self._has_ready_nonrecursive_eliminators = False
+        self._focused_eliminator_types: dict[str, str] = {}
+        self._nonrecursive_eliminator_sources: tuple[
+            tuple[str, tuple[str, ...]], ...
+        ] = ()
         self._scope_premise_queries = 0
         self._goal_hints: dict[tuple[str, int], str] = {}
         self._recursive_action_cache: dict[
@@ -759,7 +772,8 @@ class _ConstructorSearch:
         """Refine by a local function so dependent arguments become subgoals."""
 
         target_head = result_head(goal.target)
-        if self._has_ready_nonrecursive_eliminators:
+        ready_eliminators = self._has_ready_nonrecursive_eliminators(goal)
+        if ready_eliminators:
             target_relation = parse_relation(goal.target)
 
             def continuation_depth(entry: ContextEntry) -> int:
@@ -865,7 +879,7 @@ class _ConstructorSearch:
                     premise_query_stop,
                     deprioritized_locals=(
                         deprioritized_terms | frozenset((entry.name,))
-                        if self._has_ready_nonrecursive_eliminators
+                        if ready_eliminators
                         else frozenset()
                     ),
                 )
@@ -1533,6 +1547,11 @@ class _ConstructorSearch:
             if ranked.dependency_graph_id is not None
             else "agdaprover.scoped-retrieval-decision.v2",
             "search_policy": PROGRESSIVE_POLICY,
+            **(
+                {"eliminator_readiness_policy": self.stats.eliminator_readiness_policy}
+                if self._local_eliminator_readiness_enabled
+                else {}
+            ),
             "retrieval_limit": 512,
             "index_id": ranked.index_id,
             "query_id": ranked.query_id,
@@ -1771,6 +1790,14 @@ class _ConstructorSearch:
             )
         )
 
+    def _has_ready_nonrecursive_eliminators(self, goal: GoalInfo) -> bool:
+        if not self._local_eliminator_readiness_enabled:
+            return bool(self._nonrecursive_eliminator_sources)
+        return any(
+            premise_has_local_source(goal, type_text, domains)
+            for type_text, domains in self._nonrecursive_eliminator_sources
+        )
+
     def _progressive_eliminators(
         self,
         goal: GoalInfo,
@@ -1782,7 +1809,16 @@ class _ConstructorSearch:
         return tuple(
             (expression, domains)
             for expression, domains in self._focused_visible_eliminators
-            if all(
+            if (
+                not self._local_eliminator_readiness_enabled
+                or all(
+                    premise_has_local_source(
+                        goal, self._focused_eliminator_types[expression], (domain,)
+                    )
+                    for domain in domains
+                )
+            )
+            and all(
                 (
                     _canonicalize_internal_metas(domain),
                     visible_context,
@@ -2739,12 +2775,13 @@ class _ConstructorSearch:
             yield state, plans
             return
         child_id = children[index].goal_id
-        if self._goal(state, child_id) is None:
+        child_goal = self._goal(state, child_id)
+        if child_goal is None:
             return
         used_atomic_siblings = frozenset(
             plan.render() for plan in plans if not plan.children
         )
-        if self._has_ready_nonrecursive_eliminators:
+        if self._has_ready_nonrecursive_eliminators(child_goal):
             used_atomic_siblings |= deprioritized_locals
         for solution in self._solve_goal(
             state,
@@ -2899,6 +2936,7 @@ class _ConstructorSearch:
         goal = self._goal(state, goal_id)
         if goal is None:
             return
+        ready_eliminators = self._has_ready_nonrecursive_eliminators(goal)
         self.stats.states_expanded += 1
         self.stats.max_depth = max(self.stats.max_depth, depth)
         key = (
@@ -3337,7 +3375,7 @@ class _ConstructorSearch:
         if refinement_solved:
             return
 
-        if self._has_ready_nonrecursive_eliminators:
+        if ready_eliminators:
             continuation_solved = False
             for solution in self._solve_with_local_refinements(
                 state,
@@ -3424,7 +3462,7 @@ class _ConstructorSearch:
             if ready_eliminator_solved:
                 return
 
-            if self._has_ready_nonrecursive_eliminators:
+            if ready_eliminators:
                 ready_structured_solved = False
                 for solution in self._solve_with_ready_structured_results(
                     state,
@@ -3440,27 +3478,23 @@ class _ConstructorSearch:
                     return
 
         local_refinement_solved = False
-        if self.recursive_call is not None or self._has_ready_nonrecursive_eliminators:
+        if self.recursive_call is not None or ready_eliminators:
             for solution in self._solve_with_local_refinements(
                 state,
                 goal,
                 depth,
                 descendants,
                 premise_query_stop,
-                continuation_only=(
-                    False if self._has_ready_nonrecursive_eliminators else None
-                ),
+                continuation_only=(False if ready_eliminators else None),
                 deprioritized_terms=deprioritized_locals,
-                deprioritized_only=(
-                    False if self._has_ready_nonrecursive_eliminators else None
-                ),
+                deprioritized_only=(False if ready_eliminators else None),
             ):
                 local_refinement_solved = True
                 yield solution
         if local_refinement_solved:
             return
 
-        if self._has_ready_nonrecursive_eliminators:
+        if ready_eliminators:
             deferred_local_solved = False
             for solution in self._solve_with_local_refinements(
                 state,
@@ -4224,9 +4258,12 @@ class _ConstructorSearch:
             # declarations instead of silently shrinking to the current
             # module's textual prefix.
             self._scope_catalog = root_catalog
-            self._has_ready_nonrecursive_eliminators = any(
-                premise_eliminator_source_domains(type_text)
+            self._nonrecursive_eliminator_sources = tuple(
+                (type_text, domains)
                 for _name, type_text in root_catalog
+                if not self._local_eliminator_readiness_enabled
+                or _name not in self.excluded_premises
+                if (domains := premise_eliminator_source_domains(type_text))
             )
             if scoped is not None:
                 self._rank_scoped_premises(state, root_goal, scoped)
@@ -4242,6 +4279,9 @@ class _ConstructorSearch:
                 for action in root_actions
                 if (domains := premise_independent_result_domains(action.type_text))
             )[:8]
+            self._focused_eliminator_types = {
+                action.expression: action.type_text for action in root_actions
+            }
         for solution in self._solve_goal(state, root_goal.goal_id, 0, frozenset()):
             try:
                 rendered = solution.proof_text

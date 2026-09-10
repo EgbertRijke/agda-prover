@@ -29,6 +29,14 @@ GHC. Set `AGDAPROVER_AGDA_BRIDGE` to its executable to opt in. The stock Agda
 interaction process remains the default. Fresh proof validation remains
 independent of either speculative backend.
 
+With the optional adapter, `AGDAPROVER_SCOPED_RETRIEVAL=1` enables live library
+premise retrieval. `AGDAPROVER_LOCAL_ELIMINATOR_READINESS=1` additionally tries
+generic eliminators early only when their source is recognized in the current
+local context. This can keep imported projections from crowding out local
+proofs; unrecognized premises remain available to ordinary search. Both search
+options are experimental and off by default. Unset the variables to compare
+with the existing search order.
+
 ## Emacs checkout configuration
 
 ```elisp
