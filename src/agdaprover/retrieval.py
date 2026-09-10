@@ -33,6 +33,8 @@ DEPENDENCY_SYMBOL_RARITY_POLICY = (
 )
 QUERY_VIEWS_POLICY = "raw-normalized-query-interleave-v1"
 QUERY_NORMALIZATION_POLICY = "agda-normalise-query-type-v1"
+TYPE_FAMILY_QUERY_POLICY = "agda-type-family-whnf-query-v1"
+TYPE_FAMILY_VIEWS_POLICY = "raw-stable-type-family-query-interleave-v1"
 DEPENDENCY_SCHEMA = "agdaprover.allowed-dependencies.v1"
 PROGRESSIVE_POLICY = "scoped-progressive-premises-v3"
 PROGRESSIVE_WIDTHS = (8, 32, 128, 512)
@@ -265,6 +267,70 @@ class NormalizedQueryView:
 
 
 @dataclass(frozen=True)
+class TypeFamilyQueryView:
+    """Optional typed reduction evidence, explicitly not a full normal form.
+
+    An unavailable alternate retains raw retrieval. Operational exhaustion and
+    cancellation of the whole request are errors, not unavailable evidence.
+    Native traversal work is retained even when the alternate is declined.
+    """
+
+    features: TypeFeatures | None
+    tokens: tuple[str, ...] = ()
+    status: str = "checked"
+    policy: str = TYPE_FAMILY_QUERY_POLICY
+    term_visits: int = 0
+    type_position_reductions: int = 0
+
+    def __post_init__(self) -> None:
+        _strings(self.tokens)
+        if self.policy != TYPE_FAMILY_QUERY_POLICY:
+            raise ValueError("unsupported type-family query policy")
+        if not isinstance(self.status, str) or self.status not in {
+            "checked",
+            "kernel-rejected",
+            "output-limited",
+        }:
+            raise ValueError("invalid type-family query status")
+        if self.status == "checked":
+            if not isinstance(self.features, TypeFeatures):
+                raise ValueError("checked type-family query requires features")
+        elif self.features is not None or self.tokens:
+            raise ValueError("unavailable type-family query cannot supply features")
+        if (
+            type(self.term_visits) is not int
+            or type(self.type_position_reductions) is not int
+            or not 0 <= self.type_position_reductions <= self.term_visits
+        ):
+            raise ValueError("invalid type-family traversal work")
+
+    def classification(self, raw: TypeFeatures, tokens: tuple[str, ...]) -> str:
+        """Similarity scheduling only: no premise is rejected by this gate."""
+        alternate = self.features
+        if alternate is None:
+            return self.status
+        if raw.result_head is None or alternate.result_head is None:
+            return "unknown-head"
+        if raw.result_head != alternate.result_head:
+            return "changed-head"
+        if raw.arity != alternate.arity:
+            return "changed-arity"
+        if raw == alternate and tokens == self.tokens:
+            return "identical"
+        return "stable-head-and-arity"
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "policy": self.policy,
+            "status": self.status,
+            "features": self.features.to_dict() if self.features is not None else None,
+            "tokens": list(self.tokens),
+            "term_visits": self.term_visits,
+            "type_position_reductions": self.type_position_reductions,
+        }
+
+
+@dataclass(frozen=True)
 class RetrievalQuery:
     scope_id: str
     features: TypeFeatures
@@ -272,6 +338,7 @@ class RetrievalQuery:
     query_symbol_lane: bool = False
     symbol_rarity_lane: bool = False
     normalized: NormalizedQueryView | None = None
+    type_family: TypeFamilyQueryView | None = None
 
     def __post_init__(self) -> None:
         _hash(self.scope_id)
@@ -288,6 +355,12 @@ class RetrievalQuery:
             self.normalized, NormalizedQueryView
         ):
             raise ValueError("invalid normalized query view")
+        if self.type_family is not None and not isinstance(
+            self.type_family, TypeFamilyQueryView
+        ):
+            raise ValueError("invalid type-family query view")
+        if self.normalized is not None and self.type_family is not None:
+            raise ValueError("query reduction policies are mutually exclusive")
 
     @property
     def query_id(self) -> str:
@@ -307,6 +380,14 @@ class RetrievalQuery:
                         "normalized": self.normalized.to_dict(),
                     }
                     if self.normalized is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "query_views_policy": TYPE_FAMILY_VIEWS_POLICY,
+                        "type_family": self.type_family.to_dict(),
+                    }
+                    if self.type_family is not None
                     else {}
                 ),
             }
@@ -504,6 +585,15 @@ class RetrievalResult:
     symbol_rarity_lane: bool = False
     normalized_query_policy: str | None = None
     query_views_scored: int = 1
+    type_family_query_policy: str | None = None
+    type_family_classification: str | None = None
+
+    @property
+    def has_query_views(self) -> bool:
+        return (
+            self.normalized_query_policy is not None
+            or self.type_family_query_policy is not None
+        )
 
     @property
     def scored_count(self) -> int:
@@ -511,6 +601,9 @@ class RetrievalResult:
 
     @property
     def policy(self) -> str:
+        if self.type_family_query_policy is not None:
+            base = replace(self, type_family_query_policy=None).policy
+            return f"{TYPE_FAMILY_VIEWS_POLICY}/{base}"
         if self.normalized_query_policy is not None:
             base = replace(self, normalized_query_policy=None).policy
             return f"{QUERY_VIEWS_POLICY}/{base}"
@@ -547,7 +640,9 @@ class RetrievalResult:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_version": "agdaprover.symbolic-retrieval.v5"
+            "schema_version": "agdaprover.symbolic-retrieval.v6"
+            if self.type_family_query_policy is not None
+            else "agdaprover.symbolic-retrieval.v5"
             if self.normalized_query_policy is not None
             else "agdaprover.symbolic-retrieval.v4"
             if self.symbol_rarity_lane
@@ -570,7 +665,7 @@ class RetrievalResult:
                     include_dependencies=self.dependency_graph_id is not None,
                     include_query_symbols=self.query_symbol_lane,
                     include_symbol_rarity=self.symbol_rarity_lane,
-                    include_query_views=self.normalized_query_policy is not None,
+                    include_query_views=self.has_query_views,
                 )
                 for i, item in enumerate(self.items, 1)
             ],
@@ -580,6 +675,15 @@ class RetrievalResult:
                     "query_views_scored": self.query_views_scored,
                 }
                 if self.normalized_query_policy is not None
+                else {}
+            ),
+            **(
+                {
+                    "type_family_query_policy": self.type_family_query_policy,
+                    "type_family_classification": self.type_family_classification,
+                    "query_views_scored": self.query_views_scored,
+                }
+                if self.type_family_query_policy is not None
                 else {}
             ),
             **(
@@ -824,7 +928,7 @@ class SymbolicPremiseIndex:
             raise ValueError("retrieval query scope does not match pinned index")
         if type(limit) is not int or limit < 1:
             raise ValueError("retrieval limit must be a positive integer")
-        if query.normalized is not None:
+        if query.normalized is not None or query.type_family is not None:
             return self._retrieve_query_views(query, limit=limit)
         symbols: Counter[str] = Counter()
         lexical: Counter[str] = Counter()
@@ -970,28 +1074,49 @@ class SymbolicPremiseIndex:
         duplicate removal is deterministic and the order is prefix-stable.
         Components and view rank belong to the view that emitted the item.
         """
-        view = query.normalized
+        view = query.normalized or query.type_family
         assert view is not None
-        raw = self.retrieve(replace(query, normalized=None), limit=limit)
-        if view.features == query.features and view.tokens == query.tokens:
+        raw_query = replace(query, normalized=None, type_family=None)
+        raw = self.retrieve(raw_query, limit=limit)
+        classification = (
+            query.type_family.classification(query.features, query.tokens)
+            if query.type_family is not None
+            else None
+        )
+        raw = replace(
+            raw,
+            query_id=_query_identity(query, self.dependencies is not None),
+            normalized_query_policy=view.policy
+            if query.normalized is not None
+            else None,
+            type_family_query_policy=view.policy
+            if query.type_family is not None
+            else None,
+            type_family_classification=classification,
+        )
+        if (
+            classification is not None and classification != "stable-head-and-arity"
+        ) or (view.features == query.features and view.tokens == query.tokens):
             # Normalization often exposes no new ranking evidence. Do not
             # repeat a full candidate pass merely to give it another label.
             return replace(
                 raw,
-                query_id=_query_identity(query, self.dependencies is not None),
                 items=tuple(
                     replace(item, query_view="raw", query_view_rank=rank)
                     for rank, item in _checked(enumerate(raw.items, 1))
                 ),
-                normalized_query_policy=view.policy,
             )
+        assert view.features is not None
         normalized = self.retrieve(
-            replace(query, features=view.features, tokens=view.tokens, normalized=None),
+            replace(raw_query, features=view.features, tokens=view.tokens),
             limit=limit,
         )
         lanes = (
             ("raw", iter(enumerate(raw.items, 1))),
-            ("normalized", iter(enumerate(normalized.items, 1))),
+            (
+                "normalized" if query.normalized is not None else "type-family",
+                iter(enumerate(normalized.items, 1)),
+            ),
         )
         selected: list[RankedPremise] = []
         emitted: set[str] = set()
@@ -1015,7 +1140,6 @@ class SymbolicPremiseIndex:
                 raw.dependency_postings_visited + normalized.dependency_postings_visited
             ),
             items=tuple(selected),
-            normalized_query_policy=view.policy,
             query_views_scored=2,
         )
 

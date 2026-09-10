@@ -16,6 +16,9 @@ class ScopedRetrievalStats:
     scoped_retrieval_queries: int = 0
     scoped_retrieval_candidates: int = 0
     scoped_retrieval_extra_candidate_views: int = 0
+    scoped_retrieval_type_family_queries: int = 0
+    scoped_retrieval_type_family_term_visits: int = 0
+    scoped_retrieval_type_family_reductions: int = 0
     scoped_retrieval_postings: int = 0
     scoped_retrieval_nodes: int = 0
     scoped_retrieval_elapsed_ms: float = 0.0
@@ -57,6 +60,9 @@ class ScopedRetrievalStats:
             "queries",
             "candidates",
             "extra_candidate_views",
+            "type_family_queries",
+            "type_family_term_visits",
+            "type_family_reductions",
             "postings",
             "nodes",
             "elapsed_ms",
@@ -87,7 +93,13 @@ class ScopedRetrievalStats:
             for name, value in self.__dict__.items()
             if value is not None
             and not name.startswith("_")
-            and (name != "scoped_retrieval_extra_candidate_views" or value != 0)
+            and (
+                not (
+                    name == "scoped_retrieval_extra_candidate_views"
+                    or name.startswith("scoped_retrieval_type_family_")
+                )
+                or value != 0
+            )
             and (
                 self.scoped_retrieval_queries
                 or not name.startswith("scoped_retrieval_")

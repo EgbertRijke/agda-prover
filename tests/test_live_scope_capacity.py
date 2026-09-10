@@ -44,7 +44,12 @@ GOAL = "goal : U\ngoal = {!!}\n"
 
 @contextmanager
 def source_session(
-    source, *, output_bytes=32 * 1024 * 1024, dependencies=False, query_views=False
+    source,
+    *,
+    output_bytes=32 * 1024 * 1024,
+    dependencies=False,
+    query_views=False,
+    type_family=False,
 ):
     with (
         tempfile.TemporaryDirectory() as directory,
@@ -56,6 +61,7 @@ def source_session(
                 "AGDAPROVER_SCOPED_RETRIEVAL": "1",
                 "AGDAPROVER_SCOPED_DEPENDENCIES": "1" if dependencies else "0",
                 "AGDAPROVER_SCOPED_QUERY_VIEWS": "1" if query_views else "0",
+                "AGDAPROVER_SCOPED_TYPE_FAMILY_QUERY": "1" if type_family else "0",
             },
         ),
     ):

@@ -201,7 +201,17 @@ class _ScopedActions:
                         str(self.ranking.items[rank - 1].query_view_rank),
                     ),
                 )
-                if self.ranking.normalized_query_policy is not None
+                if self.ranking.has_query_views
+                else ()
+            )
+            + (
+                (
+                    (
+                        "retrieval-type-family-classification",
+                        str(self.ranking.type_family_classification),
+                    ),
+                )
+                if self.ranking.type_family_query_policy is not None
                 else ()
             )
             for rank, action in self.entries
@@ -1430,6 +1440,14 @@ class _ConstructorSearch:
             self.stats.premise_catalog_queries += 1
             self.stats.scoped_retrieval_queries += 1
             self.stats.scoped_retrieval_nodes += scoped.structure_nodes
+            if scoped.query.type_family is not None:
+                self.stats.scoped_retrieval_type_family_queries += 1
+                self.stats.scoped_retrieval_type_family_term_visits += (
+                    scoped.query.type_family.term_visits
+                )
+                self.stats.scoped_retrieval_type_family_reductions += (
+                    scoped.query.type_family.type_position_reductions
+                )
         return scoped
 
     def _rank_scoped_premises(
@@ -1530,7 +1548,7 @@ class _ConstructorSearch:
                             "query_view": item.query_view,
                             "query_view_rank": item.query_view_rank,
                         }
-                        if ranked.normalized_query_policy is not None
+                        if ranked.has_query_views
                         else {}
                     ),
                 }
@@ -1556,6 +1574,16 @@ class _ConstructorSearch:
                 schema_version="agdaprover.scoped-retrieval-decision.v7",
                 ranking_policy=ranked.policy,
                 normalized_query_policy=ranked.normalized_query_policy,
+                query_views_scored=ranked.query_views_scored,
+                scored_count=ranked.scored_count,
+            )
+        if ranked.type_family_query_policy is not None:
+            assert scoped.query.type_family is not None
+            record.update(
+                schema_version="agdaprover.scoped-retrieval-decision.v8",
+                ranking_policy=ranked.policy,
+                type_family_query=scoped.query.type_family.to_dict(),
+                type_family_classification=ranked.type_family_classification,
                 query_views_scored=ranked.query_views_scored,
                 scored_count=ranked.scored_count,
             )

@@ -13,6 +13,7 @@ from ..retrieval import (
     NormalizedQueryView,
     RetrievalQuery,
     ScopedPremises,
+    TypeFamilyQueryView,
     TypeFeatures,
     name_fragments,
 )
@@ -30,9 +31,21 @@ QUERY_VIEWS_SCHEMA = "agdaprover.live-scope.v8"
 DEPENDENCY_QUERY_VIEWS_SCHEMA = "agdaprover.live-scope.v9"
 QUERY_VIEWS_MARKER = "agdaprover:scoped-retrieval:v8:"
 DEPENDENCY_QUERY_VIEWS_MARKER = "agdaprover:scoped-retrieval:v9:"
+TYPE_FAMILY_SCHEMA = "agdaprover.live-scope.v10"
+DEPENDENCY_TYPE_FAMILY_SCHEMA = "agdaprover.live-scope.v11"
+TYPE_FAMILY_MARKER = "agdaprover:scoped-retrieval:v10:"
+DEPENDENCY_TYPE_FAMILY_MARKER = "agdaprover:scoped-retrieval:v11:"
 
 
-def scope_schema(include_dependencies: bool, normalize_query: bool) -> str:
+def scope_schema(
+    include_dependencies: bool, normalize_query: bool, type_family_query: bool = False
+) -> str:
+    if type_family_query:
+        return (
+            DEPENDENCY_TYPE_FAMILY_SCHEMA
+            if include_dependencies
+            else TYPE_FAMILY_SCHEMA
+        )
     if normalize_query:
         return (
             DEPENDENCY_QUERY_VIEWS_SCHEMA
@@ -47,11 +60,16 @@ def _validate_request(
     output_bytes: int,
     include_dependencies: bool,
     normalize_query: bool = False,
+    type_family_query: bool = False,
 ) -> None:
     if type(include_dependencies) is not bool:
         raise ValueError("invalid dependency capability flag")
     if type(normalize_query) is not bool:
         raise ValueError("invalid query normalization capability flag")
+    if type(type_family_query) is not bool:
+        raise ValueError("invalid type-family query capability flag")
+    if normalize_query and type_family_query:
+        raise ValueError("query reduction policies are mutually exclusive")
     if type(output_bytes) is not int or output_bytes <= 0:
         raise ValueError("invalid live-scope output reservation")
     if type(excluded) is not frozenset:
@@ -68,15 +86,24 @@ def exclusions_payload(
     output_bytes: int,
     include_dependencies: bool = False,
     normalize_query: bool = False,
+    type_family_query: bool = False,
 ) -> str:
-    _validate_request(excluded, output_bytes, include_dependencies, normalize_query)
+    _validate_request(
+        excluded, output_bytes, include_dependencies, normalize_query, type_family_query
+    )
     payload = json.dumps(
         {"excluded_names": sorted(excluded), "output_bytes": output_bytes},
         ensure_ascii=False,
     )
     checkpoint()
     marker = (
-        (DEPENDENCY_QUERY_VIEWS_MARKER if include_dependencies else QUERY_VIEWS_MARKER)
+        (DEPENDENCY_TYPE_FAMILY_MARKER if include_dependencies else TYPE_FAMILY_MARKER)
+        if type_family_query
+        else (
+            DEPENDENCY_QUERY_VIEWS_MARKER
+            if include_dependencies
+            else QUERY_VIEWS_MARKER
+        )
         if normalize_query
         else (DEPENDENCY_MARKER if include_dependencies else MARKER)
     )
@@ -90,9 +117,16 @@ def decode_resource_limit(
     output_bytes: int,
     include_dependencies: bool,
     normalize_query: bool = False,
+    type_family_query: bool = False,
 ) -> int:
     """Validate a complete resource refusal, never a partial scope or rejection."""
-    _validate_request(frozenset(), output_bytes, include_dependencies, normalize_query)
+    _validate_request(
+        frozenset(),
+        output_bytes,
+        include_dependencies,
+        normalize_query,
+        type_family_query,
+    )
     if (
         type(goal_id) is not int
         or goal_id < 0
@@ -110,7 +144,7 @@ def decode_resource_limit(
         or value["kind"] != "AgdaProverScopeResource"
         or value["schema_version"] != RESOURCE_SCHEMA
         or value["request_schema"]
-        != scope_schema(include_dependencies, normalize_query)
+        != scope_schema(include_dependencies, normalize_query, type_family_query)
         or type(value["interaction_id"]) is not int
         or value["interaction_id"] != goal_id
         or value["resource"] != "output-bytes"
@@ -166,12 +200,17 @@ def decode_scope(
     output_bytes: int,
     include_dependencies: bool = False,
     normalize_query: bool = False,
+    type_family_query: bool = False,
 ) -> ScopedPremises:
     AllowedPremiseSet(adapter_sha256, ())
     if type(goal_id) is not int or goal_id < 0:
         raise ValueError("invalid live-scope goal identity")
     _validate_request(
-        excluded_names, output_bytes, include_dependencies, normalize_query
+        excluded_names,
+        output_bytes,
+        include_dependencies,
+        normalize_query,
+        type_family_query,
     )
     fields = {
         "kind",
@@ -190,12 +229,14 @@ def decode_scope(
         fields |= {"dependency_policy", "dependency_nodes"}
     if normalize_query:
         fields.add("normalized_query")
+    if type_family_query:
+        fields.add("type_family_query")
     if not isinstance(value, dict) or set(value) != fields:
         raise ValueError("invalid closed live-scope record")
     if (
         value["kind"] != "AgdaProverScope"
         or value["schema_version"]
-        != scope_schema(include_dependencies, normalize_query)
+        != scope_schema(include_dependencies, normalize_query, type_family_query)
         or value["feature_policy"] != FEATURE_POLICY
         or value["type_view_policy"] != TYPE_VIEW_POLICY
         or type(value["interaction_id"]) is not int
@@ -227,6 +268,38 @@ def decode_scope(
         ):
             raise ValueError("invalid checked query normalization evidence")
         normalized_target = _features(normalized["features"])
+    type_family = None
+    if type_family_query:
+        reduced = value["type_family_query"]
+        if (
+            not isinstance(reduced, dict)
+            or set(reduced)
+            != {
+                "policy",
+                "status",
+                "features",
+                "structure_nodes",
+                "conversion_checked",
+                "term_visits",
+                "type_position_reductions",
+            }
+            or type(reduced["status"]) is not str
+            or reduced["conversion_checked"]
+            is not (reduced["status"] != "kernel-rejected")
+            or type(reduced["structure_nodes"]) is not int
+            or type(value["structure_nodes"]) is not int
+            or not 0 <= reduced["structure_nodes"] <= value["structure_nodes"]
+            or (reduced["structure_nodes"] == 0)
+            != (reduced["status"] == "kernel-rejected")
+        ):
+            raise ValueError("invalid type-family query evidence")
+        type_family = TypeFamilyQueryView(
+            _features(reduced["features"]) if reduced["features"] is not None else None,
+            status=reduced["status"],
+            policy=reduced["policy"],
+            term_visits=reduced["term_visits"],
+            type_position_reductions=reduced["type_position_reductions"],
+        )
     declarations = value["declarations"]
     if not isinstance(declarations, list):
         raise ValueError("invalid live-scope declaration array")
@@ -317,6 +390,18 @@ def decode_scope(
             tokens(target),
             normalized=NormalizedQueryView(normalized_target, tokens(normalized_target))
             if normalized_target is not None
+            else None,
+            type_family=TypeFamilyQueryView(
+                type_family.features,
+                tokens(type_family.features)
+                if type_family.features is not None
+                else (),
+                type_family.status,
+                type_family.policy,
+                type_family.term_visits,
+                type_family.type_position_reductions,
+            )
+            if type_family is not None
             else None,
         ),
         tuple(sorted(views)),
