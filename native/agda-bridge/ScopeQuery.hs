@@ -2,6 +2,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
 
 -- A ranking-only projection from the live interaction closure. No source
 -- scanner, private inventory, held-out proof, or unfiltered corpus participates.
@@ -11,6 +12,7 @@ import Control.Monad (foldM, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Except (runExceptT, throwError)
 import Control.Monad.Trans (lift)
+import Control.Monad.Reader (ask, runReaderT)
 import Data.Aeson (FromJSON (parseJSON), Value, eitherDecodeStrict', encode, object, withObject, (.:), (.=))
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy.Char8 qualified as BL
@@ -31,15 +33,31 @@ import Agda.Syntax.Internal.MetaVars (noMetas)
 import Agda.Syntax.Literal (Literal (LitQName))
 import Agda.Syntax.Scope.Base
 import Agda.Syntax.Scope.Monad (tryResolveName)
+import Agda.Syntax.Translation.AbstractToConcrete (ToConcrete (..), abstractToConcrete_)
+import Agda.Syntax.Translation.InternalToAbstract (reify)
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Conversion (equalType, tryConversion)
-import Agda.TypeChecking.Pretty (prettyTCM)
 import Agda.TypeChecking.Reduce (instantiateFull, normalise)
 import QueryReduction qualified as Query
 import TypeSpine qualified as Spine
 import ScopeNames (nameable)
 
 data QueryMode = Raw | Normalized | TypeFamilies | TypeHeads deriving (Eq)
+
+-- Agda's ordinary prettyTCM initializes its naming environment for each type.
+-- Use its exported conversion interface to prepare that environment once per
+-- scope query. Each call still reifies/concretizes the entire type, in order,
+-- under the live TCM context and state. Binder-local Reader changes do not
+-- escape the call; Agda's concrete-name state behaves as in ordinary rendering.
+-- This closure stays inside withInteractionId/dontAssignMetas and is never
+-- retained across queries. In particular, it is not a type/proof/state cache.
+data ScopeRenderer = ScopeRenderer
+
+instance ToConcrete ScopeRenderer where
+  type ConOfAbs ScopeRenderer = Type -> TCM String
+  toConcrete _ = do
+    environment <- ask
+    pure $ \ty -> prettyShow <$> runReaderT (toConcrete =<< reify ty) environment
 
 request :: String -> Maybe (Bool, QueryMode, String)
 request payload = first
@@ -218,6 +236,7 @@ emit withDependencies mode point payload = do
             maybe missing (const $ fields "output-limited" (Nothing :: Maybe Value)) evidence,
             count)
      else pure ([], [], 0)
+    renderType <- abstractToConcrete_ ScopeRenderer
     outcome <- runExceptT $ do
      (rows, nodes, dependencyNodes, _) <- foldM (\(previous, total, depTotal, bytesSoFar) (q, as) -> do
       ty <- lift $ instantiateFull =<< typeOfConst q
@@ -229,7 +248,7 @@ emit withDependencies mode point payload = do
       -- deadline and local-state/dontAssignMetas isolation boundary.
       normalized <- lift $ normalise ty
       let !viewCount = foldl' (\n _ -> n + 1) 0 (foldTerm (: []) normalized)
-      view <- lift $ prettyShow <$> prettyTCM normalized
+      view <- lift $ renderType normalized
       (refs, depCount) <- if withDependencies
         then lift $ dependencies allowedIds q
         else pure (Nothing, 0)
