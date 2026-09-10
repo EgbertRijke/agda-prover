@@ -16,6 +16,7 @@ DecisionFamily = Literal[
     "case-variable",
     "visible-premise",
     "recursive-call",
+    "evidence-application-v1",
 ]
 CandidateOutcome = Literal[
     "invalid",
@@ -108,6 +109,7 @@ class PolicyCandidate:
             "case-variable",
             "visible-premise",
             "recursive-call",
+            "evidence-application-v1",
         }:
             raise ValueError("unsupported policy decision family")
         _bounded_text(self.tag, "policy candidate tag")

@@ -53,18 +53,22 @@ MAX_MODEL_FILE_BYTES = (
     + MAX_PARAMETER_BYTES
 )
 
+LEGACY_POLICY_FAMILIES = frozenset(
+    {
+        "case-variable",
+        "constructor-choice",
+        "recursive-call",
+        "visible-premise",
+    }
+)
+
 
 def validate_policy_families(role: ModelRole, families: tuple[str, ...] | None) -> None:
     """Validate the inference domain, independently of training sidecars."""
 
     if families is None:
         return
-    supported = {
-        "case-variable",
-        "constructor-choice",
-        "recursive-call",
-        "visible-premise",
-    }
+    supported = LEGACY_POLICY_FAMILIES | {"evidence-application-v1"}
     if (
         role != "or-decision-ranking"
         or not isinstance(families, tuple)
@@ -257,9 +261,13 @@ class NNUEModel:
             )
 
     def supports_policy_family(self, family: str) -> bool:
-        """Legacy models are unscoped; scoped models rank only declared families."""
+        """Legacy weights cannot silently acquire newly introduced families."""
 
-        return self.policy_families is None or family in self.policy_families
+        return family in (
+            LEGACY_POLICY_FAMILIES
+            if self.policy_families is None
+            else self.policy_families
+        )
 
     @classmethod
     def load(

@@ -133,6 +133,7 @@ class PolicyDomainTests(unittest.TestCase):
             model = NNUEModel.load(path)
             self.assertIsNone(model.policy_families)
             self.assertTrue(model.supports_policy_family("visible-premise"))
+            self.assertFalse(model.supports_policy_family("evidence-application-v1"))
             # Scope cannot be smuggled into an old format that old runtimes ignore.
             header["policy_families"] = ["case-variable"]
             encoded = json.dumps(header).encode()
@@ -149,3 +150,11 @@ class PolicyDomainTests(unittest.TestCase):
             path.write_bytes(MAGIC + path.read_bytes()[len(SCOPED_MAGIC) :])
             with self.assertRaises(ValueError):
                 NNUEModel.load(path)
+
+    def test_new_evidence_domain_requires_explicit_scoped_weights(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "evidence.apnnue"
+            self.model_file(path, policy_families=["evidence-application-v1"])
+            model = NNUEModel.load(path)
+            self.assertTrue(model.supports_policy_family("evidence-application-v1"))
+            self.assertFalse(model.supports_policy_family("constructor-choice"))

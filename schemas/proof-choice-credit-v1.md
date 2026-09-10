@@ -24,6 +24,10 @@ partial positive publication.
 
 Coverage currently includes ordinary constructors, visible-premise refinement,
 whole-function reuse, retrieved structure builders and batched case selections.
+The [composed-evidence extension](evidence-application-policy-v1.md) also carries
+selected application dependencies through direct completion, relation paths,
+and consumers of the parent-local evidence observations. Independent builders
+that reconstruct an equivalent expression do not inherit those earlier choices.
 Not every search path carries credit yet. Joint source-queue choices and other
 opaque proof-building paths remain unlabeled; their successful result is not
 permission to mark all explored decisions positive. Singleton/omitted trace

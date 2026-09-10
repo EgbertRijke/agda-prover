@@ -76,6 +76,7 @@ class RelationTerm:
     edge: RelationView
     generators: frozenset[str]
     node_count: int
+    inputs: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -100,6 +101,7 @@ class RelationPathStats:
 class RelationPathResult:
     expression: str | None
     stats: RelationPathStats
+    inputs: frozenset[str] = frozenset()
 
 
 def explicit_arity(type_text: str) -> int:
@@ -388,11 +390,14 @@ def solve_relation_path(
     terms: list[RelationTerm] = []
     expressions: set[str] = set()
     edge_expressions: dict[tuple[str, str], list[RelationTerm]] = {}
+    completed_inputs: frozenset[str] = frozenset()
 
     def retain(term: RelationTerm) -> str | None:
+        nonlocal completed_inputs
         if term.expression in expressions:
             return None
         if term.edge.key == target.key and term.expression not in excluded_expressions:
+            completed_inputs = term.inputs
             return term.expression
         if term.expression in excluded_expressions and term.node_count > 1:
             # Already-returned completions need not become fresh generators
@@ -439,11 +444,12 @@ def solve_relation_path(
                 edge,
                 frozenset({expression}),
                 1,
+                frozenset({expression}),
             )
         )
         if solved is not None:
             stats.elapsed_ms = (time.monotonic() - started) * 1000.0
-            return RelationPathResult(solved, stats)
+            return RelationPathResult(solved, stats, completed_inputs)
     initial = tuple(terms)
     if not initial:
         stats.elapsed_ms = (time.monotonic() - started) * 1000.0
@@ -489,6 +495,9 @@ def solve_relation_path(
                 edge,
                 frozenset().union(*(argument.generators for argument in arguments)),
                 1 + sum(argument.node_count for argument in arguments),
+                frozenset({head.expression}).union(
+                    *(argument.inputs for argument in arguments)
+                ),
             )
         )
 
@@ -523,7 +532,7 @@ def solve_relation_path(
     if prefix_heads:
         if (solved := close_boundary()) is not None:
             stats.elapsed_ms = (time.monotonic() - started) * 1000.0
-            return RelationPathResult(solved, stats)
+            return RelationPathResult(solved, stats, completed_inputs)
         # Interleave operators across the shortest observed generators.
         # A large set of edges must not spend the entire slice on the first
         # unary operation before another map can connect the goal boundary.
@@ -534,7 +543,7 @@ def solve_relation_path(
                 solved = infer(head, (term,)) or close_boundary()
                 if solved is not None:
                     stats.elapsed_ms = (time.monotonic() - started) * 1000.0
-                    return RelationPathResult(solved, stats)
+                    return RelationPathResult(solved, stats, completed_inputs)
 
     # First observe how the visible declarations act on the local generators.
     unary_terms: list[RelationTerm] = []
@@ -543,17 +552,17 @@ def solve_relation_path(
         for term in initial:
             if (solved := infer(head, (term,))) is not None:
                 stats.elapsed_ms = (time.monotonic() - started) * 1000.0
-                return RelationPathResult(solved, stats)
+                return RelationPathResult(solved, stats, completed_inputs)
         unary_terms.extend(terms[before:])
         if prefix_heads and (solved := close_boundary()) is not None:
             stats.elapsed_ms = (time.monotonic() - started) * 1000.0
-            return RelationPathResult(solved, stats)
+            return RelationPathResult(solved, stats, completed_inputs)
     for head in binary_heads:
         for left in initial:
             for right in initial:
                 if (solved := infer(head, (left, right))) is not None:
                     stats.elapsed_ms = (time.monotonic() - started) * 1000.0
-                    return RelationPathResult(solved, stats)
+                    return RelationPathResult(solved, stats, completed_inputs)
 
     # Congruence-like operators become visible from pairs of useful unary
     # observations.  Endpoint overlap and generator coverage bound the cross
@@ -630,7 +639,7 @@ def solve_relation_path(
         for head in binary_heads:
             if (solved := infer(head, (left, right))) is not None:
                 stats.elapsed_ms = (time.monotonic() - started) * 1000.0
-                return RelationPathResult(solved, stats)
+                return RelationPathResult(solved, stats, completed_inputs)
             if stats.inference_queries >= second_layer_stop or len(terms) >= max_terms:
                 break
         if stats.inference_queries >= second_layer_stop or len(terms) >= max_terms:
@@ -656,7 +665,7 @@ def solve_relation_path(
         for head in unary_heads:
             if (solved := infer(head, (term,))) is not None:
                 stats.elapsed_ms = (time.monotonic() - started) * 1000.0
-                return RelationPathResult(solved, stats)
+                return RelationPathResult(solved, stats, completed_inputs)
 
     # Saturate only composable edges.  This is the small-category/path-algebra
     # core: binary declarations are proposed at matching boundaries, their
@@ -685,7 +694,7 @@ def solve_relation_path(
             for head in binary_heads:
                 if (solved := infer(head, (left, right))) is not None:
                     stats.elapsed_ms = (time.monotonic() - started) * 1000.0
-                    return RelationPathResult(solved, stats)
+                    return RelationPathResult(solved, stats, completed_inputs)
                 if stats.inference_queries >= round_stop or len(terms) >= max_terms:
                     break
             if stats.inference_queries >= round_stop or len(terms) >= max_terms:

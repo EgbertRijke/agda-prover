@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import product
 
 from ..notation import binary_mixfix_head, render_application, strip_outer_parentheses
@@ -35,6 +35,29 @@ class EvidenceTerm:
     expression: str
     type_text: str
     depth: int = 0
+
+
+@dataclass(frozen=True)
+class EvidenceApplication:
+    """Typed inputs to a proposal; its result type is not yet known."""
+
+    function: EvidenceTerm
+    arguments: tuple[EvidenceTerm, ...]
+    expression: str = field(init=False)
+    depth: int = field(init=False)
+    type_text: str = field(default="", init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "expression",
+            render_application(
+                self.function.expression, tuple(a.expression for a in self.arguments)
+            ),
+        )
+        object.__setattr__(
+            self, "depth", 1 + max(t.depth for t in (self.function, *self.arguments))
+        )
 
 
 @dataclass(frozen=True)
@@ -378,7 +401,7 @@ def evidence_applications(
     *,
     endpoint_terms: frozenset[str],
     relation_heads: frozenset[str],
-) -> Iterator[EvidenceTerm]:
+) -> Iterator[EvidenceApplication]:
     """Project ready structured inputs, then apply their observed functions.
 
     Exact text/head tests order a conservative proposal fragment only. They
@@ -411,11 +434,7 @@ def evidence_applications(
                 strip_outer_parentheses(value.type_text)
             ) != normalize_type_text(strip_outer_parentheses(domain)):
                 continue
-            yield EvidenceTerm(
-                render_application(function.expression, (value.expression,)),
-                "",
-                1 + max(function.depth, value.depth),
-            )
+            yield EvidenceApplication(function, (value,))
     for name, ty in declarations:
         checkpoint()
         domains = explicit_domains(ty)
@@ -426,11 +445,7 @@ def evidence_applications(
                 if _plain_function_argument(function.type_text) and len(
                     explicit_domains(function.type_text)
                 ) == len(explicit_domains(domains[0])):
-                    yield EvidenceTerm(
-                        render_application(name, (function.expression,)),
-                        "",
-                        function.depth + 1,
-                    )
+                    yield EvidenceApplication(EvidenceTerm(name, ty), (function,))
                     # The function may not determine parameters appearing
                     # only in the following structured input. Infer this
                     # supported prefix together instead of retaining an
@@ -445,12 +460,8 @@ def evidence_applications(
                             if _evidence_application_head(
                                 value.type_text
                             ) == _evidence_application_head(domains[1]):
-                                yield EvidenceTerm(
-                                    render_application(
-                                        name, (function.expression, value.expression)
-                                    ),
-                                    "",
-                                    1 + max(function.depth, value.depth),
+                                yield EvidenceApplication(
+                                    EvidenceTerm(name, ty), (function, value)
                                 )
             continue
         domain_head = _evidence_application_head(domains[0]) or result_head(domains[0])
@@ -461,9 +472,7 @@ def evidence_applications(
                 _evidence_application_head(value.type_text)
                 or result_head(value.type_text)
             ) == domain_head:
-                yield EvidenceTerm(
-                    render_application(name, (value.expression,)), "", value.depth + 1
-                )
+                yield EvidenceApplication(EvidenceTerm(name, ty), (value,))
 
 
 def _evidence_application_head(type_text: str) -> str | None:

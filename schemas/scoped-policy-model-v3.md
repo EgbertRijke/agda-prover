@@ -14,6 +14,7 @@ of unique strings in lexical order, drawn from:
 - `constructor-choice`
 - `recursive-call`
 - `visible-premise`
+- `evidence-application-v1` ([composed-evidence contract](evidence-application-policy-v1.md))
 
 Other families retain the complete symbolic candidate order. The router skips
 feature extraction and scoring for them, increments
@@ -21,7 +22,8 @@ feature extraction and scoring for them, increments
 `policy_fallback_reason: unsupported-decision-family` with no ranking model ID.
 This fallback does not remove candidates or alter kernel validation.
 
-Version 1 and 2 unscoped models retain their existing behavior. They may not
+Version 1 and 2 unscoped models retain their existing four-family domain; they
+do not acquire newly introduced evidence-application choices. They may not
 carry `policy_families`: older readers could ignore that field and apply an
 inappropriately scoped model. Older readers reject version 3 rather than silently
 discarding its applicability restriction. Corrupt, empty, unknown or wrong-role

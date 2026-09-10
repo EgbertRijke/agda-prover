@@ -58,6 +58,7 @@ from .premise_search import (
     scoped_premise_admission,
     shallow_composition_actions,
 )
+from .ranking.evidence_policy import EvidencePolicy
 from .ranking.protocol import SparsePolicyRanker
 from .reasoning.classifications import (
     classify_structural_scheduling,
@@ -579,6 +580,7 @@ class _ConstructorSearch:
         self._evidence_heads: dict[
             tuple[StateToken, int], tuple[RelationHead, ...]
         ] = {}
+        self._evidence_policy: dict[tuple[StateToken, int], EvidencePolicy] = {}
         self._active_evidence_eliminations: set[tuple[str, str]] = set()
         self._scoped_actions: dict[tuple[StateToken, int], _ScopedActions] = {}
         self._scoped_index_reuse_enabled = (
@@ -2021,16 +2023,30 @@ class _ConstructorSearch:
         )
         solutions: list[ConstructorSolution] = []
 
-        def infer(expression: str) -> str | None:
+        evidence_policy = EvidencePolicy(self.policy_router, goal)
+        self._evidence_policy[(state, goal.goal_id)] = evidence_policy
+
+        def infer(expression: str, choice: PolicyChoice | None = None) -> str | None:
             if self.stats.actions_considered >= stop or not self._charge():
                 return None
             self.stats.actions_generated += 1
             self.stats.evidence_inference_queries += 1
-            return session.infer_type(
+            if choice is not None:
+                self.policy_router.recorder.mark(
+                    choice.decision_id, choice.candidate_id
+                )
+            inferred = session.infer_type(
                 state, goal_id=goal.goal_id, expression=expression
             )
+            if inferred is None and choice is not None:
+                self.policy_router.recorder.mark(
+                    choice.decision_id, choice.candidate_id, outcome="invalid"
+                )
+            return inferred
 
-        def finish(solution: str) -> tuple[ConstructorSolution, ...]:
+        def finish(
+            solution: str, inputs: tuple[str, ...]
+        ) -> tuple[ConstructorSolution, ...]:
             if not self._charge():
                 return ()
             checked = self.session.commit_proof_action(
@@ -2038,12 +2054,24 @@ class _ConstructorSearch:
             )
             self.stats.proof_checks += 1
             if checked.accepted and checked.child_state is not None:
-                return (ConstructorSolution(checked.child_state, ProofPlan(solution)),)
+                return (
+                    ConstructorSolution(
+                        checked.child_state,
+                        ProofPlan(
+                            solution,
+                            policy_choices=evidence_policy.dependencies(inputs),
+                        ),
+                    ),
+                )
             return ()
 
         while self._available() and self.stats.actions_considered < collection_stop:
-            proposal = min(
-                (
+            before_items = self.policy_router.model_items_scored
+            before_batches = self.policy_router.model_batches
+            before_elapsed = self.policy_router.model_elapsed_ms
+            before_fallbacks = self.policy_router.symbolic_fallbacks
+            try:
+                selection = evidence_policy.select(
                     p
                     for p in evidence_applications(
                         tuple(terms),
@@ -2052,11 +2080,21 @@ class _ConstructorSearch:
                         relation_heads=edge_heads,
                     )
                     if p.expression not in attempted
-                ),
-                key=lambda p: (p.depth, len(p.expression), p.expression),
-                default=None,
-            )
-            if proposal is None:
+                )
+            finally:
+                self.stats.model_calls += (
+                    self.policy_router.model_items_scored - before_items
+                )
+                self.stats.model_batches += (
+                    self.policy_router.model_batches - before_batches
+                )
+                self.stats.model_elapsed_ms += (
+                    self.policy_router.model_elapsed_ms - before_elapsed
+                )
+                self.stats.symbolic_fallbacks += (
+                    self.policy_router.symbolic_fallbacks - before_fallbacks
+                )
+            if selection is None:
                 limit = next(evidence_limits, None)
                 if limit is None:
                     break
@@ -2094,10 +2132,12 @@ class _ConstructorSearch:
                 # Keep successful observations and exact-parent rejections;
                 # widening spends the original allowance, never a fresh one.
                 continue
+            proposal = selection.application
             attempted.add(proposal.expression)
-            ty = infer(proposal.expression)
+            ty = infer(proposal.expression, selection.choice)
             if ty is None or _INTERNAL_META.search(ty):
                 continue
+            evidence_policy.retain(selection)
             self.stats.evidence_terms += 1
             edge = (
                 parse_relation(
@@ -2118,7 +2158,7 @@ class _ConstructorSearch:
             else:
                 terms.append(EvidenceTerm(proposal.expression, ty, proposal.depth))
             if solution is not None:
-                if solved := finish(solution):
+                if solved := finish(solution, (proposal.expression,)):
                     solutions.extend(solved)
                     if len(solutions) >= self.solution_limit:
                         return tuple(solutions)
@@ -2179,11 +2219,17 @@ class _ConstructorSearch:
             self.stats.actions_considered += path.stats.inference_queries
             self.stats.actions_generated += path.stats.applications_generated
             if path.expression is not None:
-                solutions.extend(finish(path.expression))
+                solutions.extend(finish(path.expression, tuple(path.inputs)))
             else:
                 break
             remaining = stop - self.stats.actions_considered
         return tuple(solutions)
+
+    def _evidence_choices(
+        self, state: StateToken, goal: GoalInfo, *inputs: str
+    ) -> tuple[PolicyChoice, ...]:
+        policy = self._evidence_policy.get((state, goal.goal_id))
+        return policy.dependencies(inputs) if policy is not None else ()
 
     def _solve_with_indexed_evidence(
         self,
@@ -2523,6 +2569,9 @@ class _ConstructorSearch:
                     depth,
                     ancestors,
                     premise_query_stop,
+                    evidence_choices=self._evidence_choices(
+                        state, goal, term.expression
+                    ),
                 )
             finally:
                 self._active_evidence_eliminations.remove(key)
@@ -2554,7 +2603,7 @@ class _ConstructorSearch:
         # family parameters. Give the complete inferred application: unlike
         # recursive refinement this cannot invent an unconstrained input tree.
         closed_queries = 0
-        closed_evidence: list[str] = []
+        closed_evidence: list[tuple[str, str]] = []
         for action in sorted(actions, key=lambda a: len(explicit_domains(a.type_text))):
             if closed_queries >= 24:
                 break
@@ -2586,7 +2635,7 @@ class _ConstructorSearch:
                 expression = render_application(
                     action.expression, (term.expression, *("_" for _ in domains[1:]))
                 )
-                closed_evidence.append(expression)
+                closed_evidence.append((expression, term.expression))
                 checked = self.session.commit_proof_action(
                     state, kind="give", goal_id=goal.goal_id, expression=expression
                 )
@@ -2595,7 +2644,13 @@ class _ConstructorSearch:
                 self.stats.proof_checks += 1
                 if checked.accepted and checked.child_state is not None:
                     yield ConstructorSolution(
-                        checked.child_state, ProofPlan(expression)
+                        checked.child_state,
+                        ProofPlan(
+                            expression,
+                            policy_choices=self._evidence_choices(
+                                state, goal, term.expression
+                            ),
+                        ),
                     )
         functions = tuple(
             term
@@ -2648,7 +2703,14 @@ class _ConstructorSearch:
                     self.stats.premise_queries += 1
                     self.stats.premise_refinement_queries += 1
                     yield from self._accepted_introduction(
-                        goal, checked, depth, ancestors, premise_query_stop
+                        goal,
+                        checked,
+                        depth,
+                        ancestors,
+                        premise_query_stop,
+                        evidence_choices=self._evidence_choices(
+                            state, goal, function.expression
+                        ),
                     )
         # Backward refinement supplies endpoint constraints to multi-input
         # evidence laws (including dependent congruence). Do not repeatedly
@@ -2660,7 +2722,7 @@ class _ConstructorSearch:
                 # ...). In this evidence lane, compose it with a ready supplied
                 # witness instead of recursively inventing larger endpoints.
                 # Expected-type checking resolves the witness's hidden indices.
-                for evidence in closed_evidence:
+                for evidence, evidence_input in closed_evidence:
                     if not self._charge():
                         return
                     expression = render_application(head.expression, (evidence,))
@@ -2671,7 +2733,13 @@ class _ConstructorSearch:
                     self.stats.proof_checks += 1
                     if checked.accepted and checked.child_state is not None:
                         yield ConstructorSolution(
-                            checked.child_state, ProofPlan(expression)
+                            checked.child_state,
+                            ProofPlan(
+                                expression,
+                                policy_choices=self._evidence_choices(
+                                    state, goal, head.expression, evidence_input
+                                ),
+                            ),
                         )
                 continue
             if head.arity != 2 or shape == "chain":
@@ -2685,7 +2753,12 @@ class _ConstructorSearch:
             self.stats.premise_queries += 1
             self.stats.premise_refinement_queries += 1
             yield from self._accepted_introduction(
-                goal, checked, depth, ancestors, premise_query_stop
+                goal,
+                checked,
+                depth,
+                ancestors,
+                premise_query_stop,
+                evidence_choices=self._evidence_choices(state, goal, head.expression),
             )
 
     def _solve_with_relation_path(
@@ -3013,6 +3086,7 @@ class _ConstructorSearch:
         *,
         deprioritized_locals: frozenset[str] = frozenset(),
         policy_choice: PolicyChoice | None = None,
+        evidence_choices: tuple[PolicyChoice, ...] = (),
     ) -> Iterator[ConstructorSolution]:
         child_state = checked.child_state
         preview = checked.preview
@@ -3023,7 +3097,10 @@ class _ConstructorSearch:
         if hole_count != len(children):
             return
         self.stats.generated_subgoals += len(children)
-        choices = (policy_choice,) if policy_choice is not None else ()
+        choices = (
+            *evidence_choices,
+            *((policy_choice,) if policy_choice is not None else ()),
+        )
         if not children:
             yield ConstructorSolution(
                 child_state, ProofPlan(preview, policy_choices=choices)
