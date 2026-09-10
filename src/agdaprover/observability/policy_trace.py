@@ -44,6 +44,49 @@ def _stable_hash(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def validated_proof_evidence(
+    *,
+    task_id: str,
+    source_sha256: str,
+    patch: object,
+    validation: dict[str, object] | None,
+    trust_report: dict[str, object] | None,
+) -> dict[str, object] | None:
+    """Bind trace credit to an independently checked result, never a preview."""
+
+    if (
+        not patch
+        or not validation
+        or not trust_report
+        or validation.get("checked") is not True
+        or validation.get("fresh_process") is not True
+        or validation.get("timed_out") is not False
+        or type(validation.get("exit_status")) is not int
+        or validation.get("exit_status") != 0
+        or trust_report.get("fresh_process") is not True
+        or trust_report.get("offline") is not True
+        or type(trust_report.get("checker_exit_status")) is not int
+        or trust_report.get("checker_exit_status") != 0
+    ):
+        return None
+    return {
+        "schema_version": "agdaprover.validated-policy-proof.v1",
+        "task_id": task_id,
+        "source_sha256": source_sha256,
+        "patch_sha256": _stable_hash(patch),
+        "validation_sha256": _stable_hash(validation),
+        "trust_report_sha256": _stable_hash(trust_report),
+    }
+
+
+@dataclass(frozen=True)
+class PolicyChoice:
+    """Exact OR provenance carried by a proposed proof, not proof authority."""
+
+    decision_id: str
+    candidate_id: str
+
+
 @dataclass(frozen=True)
 class PolicyCandidate:
     """One already-generated action offered at a genuine OR boundary."""
@@ -264,6 +307,40 @@ class PolicyTraceRecorder:
     def to_list(self) -> list[dict[str, object]]:
         return [decision.to_dict() for decision in self._decisions]
 
+    def mark_validated_proof(
+        self, choices: tuple[PolicyChoice, ...], *, evidence: dict[str, object]
+    ) -> None:
+        """Label only a selected proof's choices after external fresh validation.
+
+        Validate the complete selection before mutating any record. Merely
+        accepted refinements and choices on abandoned branches stay censored.
+        """
+
+        selected: dict[str, str] = {}
+        for choice in choices:
+            decision = self._by_id.get(choice.decision_id)
+            if decision is None or choice.candidate_id not in decision.explored:
+                raise ValueError("validated choice lacks recorded exploration")
+            if decision.outcomes.get(choice.candidate_id) in {"invalid", "unsafe"}:
+                raise ValueError("validated choice conflicts with kernel rejection")
+            if any(
+                candidate_id != choice.candidate_id and outcome == "on-validated-proof"
+                for candidate_id, outcome in decision.outcomes.items()
+            ):
+                raise ValueError("decision already belongs to a different proof choice")
+            if (
+                selected.setdefault(choice.decision_id, choice.candidate_id)
+                != choice.candidate_id
+            ):
+                raise ValueError("a proof selects conflicting arms of one decision")
+        for decision_id, candidate_id in selected.items():
+            decision = self._by_id[decision_id]
+            decision.outcomes[candidate_id] = "on-validated-proof"
+            decision.provenance = {
+                **decision.provenance,
+                "validated_result": dict(evidence),
+            }
+
 
 __all__ = [
     "CandidateOutcome",
@@ -271,5 +348,7 @@ __all__ = [
     "POLICY_CANDIDATE_SCHEMA_VERSION",
     "POLICY_DECISION_SCHEMA_VERSION",
     "PolicyCandidate",
+    "PolicyChoice",
     "PolicyTraceRecorder",
+    "validated_proof_evidence",
 ]

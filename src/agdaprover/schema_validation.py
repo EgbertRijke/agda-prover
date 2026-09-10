@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .contracts import EXIT_CODES, CostMetrics
+from .project_configuration import ProjectConfiguration
 from .resource_budget import RESOURCE_SCHEMA, ResourceLimits
 from .verifier_budget import VERIFIER_BUDGET_SCHEMA
 
@@ -249,6 +250,93 @@ def _validate_verifier_budget(value: object, status: object) -> None:
         raise ValueError("denied verifier requests require resource-exhausted status")
 
 
+def _validate_library_checking_options(trust: Mapping[str, Any]) -> None:
+    """Validate the existing library witness, without reinterpreting its flags.
+
+    This checks a reported envelope, not Agda acceptance or dataset admission.
+    Library manifests/source hashes retain per-module options; global command
+    options need not impose the historical standalone without-K profile.
+    """
+    environment = _mapping(trust.get("checking_environment"), "checking environment")
+    if environment.get("schema_version") != "agdaprover.checking-environment.v1":
+        raise ValueError("unsupported checking environment schema")
+    if (
+        not isinstance(environment.get("root_module"), str)
+        or not environment["root_module"]
+    ):
+        raise ValueError("checking environment lacks its root module")
+    command_options = environment.get("command_options")
+    if not isinstance(command_options, list):
+        raise ValueError("checking environment options must be an array")
+    ProjectConfiguration(options=tuple(command_options))
+    libraries = environment.get("libraries")
+    if not isinstance(libraries, list) or not libraries:
+        raise ValueError("checking environment lacks pinned libraries")
+    names = set()
+    for raw in libraries:
+        library = _mapping(raw, "library")
+        name, digest, includes = (
+            library.get("name"),
+            library.get("manifest_sha256"),
+            library.get("includes"),
+        )
+        if (
+            not isinstance(name, str)
+            or not name
+            or name in names
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or any(c not in "0123456789abcdef" for c in digest)
+            or not isinstance(includes, list)
+            or not includes
+            or not all(isinstance(item, str) and item for item in includes)
+        ):
+            raise ValueError("malformed pinned library witness")
+        names.add(name)
+    sources = _mapping(environment.get("sources"), "checking sources")
+    for raw in sources.values():
+        source = _mapping(raw, "checking source")
+        digest = source.get("sha256")
+        owner = source.get("library")
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(c not in "0123456789abcdef" for c in digest)
+            or (
+                owner is not None and (not isinstance(owner, str) or owner not in names)
+            )
+        ):
+            raise ValueError("malformed checking source witness")
+    options = trust["options"]
+    command = trust.get("checker_command")
+    if (
+        trust.get("sandbox_profile")
+        != "isolated-overlay-pinned-libraries-process-group-v1"
+        or not isinstance(command, list)
+        or len(command) < 3
+        or not all(isinstance(item, str) and item for item in command)
+        or command[1:-1] != options
+        or (command_options and options[-len(command_options) :] != command_options)
+    ):
+        raise ValueError("checking environment disagrees with the checker command")
+    transport = list(options[: -len(command_options)] if command_options else options)
+    if transport and transport[-1] == "--safe":
+        transport.pop()  # The validation policy may strengthen global options.
+    if (
+        len(transport) < 5
+        or transport[0] != "--no-default-libraries"
+        or not transport[1].startswith("--library-file=")
+        or not transport[1].removeprefix("--library-file=")
+        or transport[2] != "--ignore-interfaces"
+        or len(transport[3:]) % 2
+        or any(
+            transport[i] != "-i" or not transport[i + 1]
+            for i in range(3, len(transport), 2)
+        )
+    ):
+        raise ValueError("unreported options in the library checker command")
+
+
 def _validate_checked_evidence(result: Mapping[str, Any], label: str) -> None:
     validation = _mapping(result["validation"], "validation")
     trust = _mapping(result["trust_report"], "trust_report")
@@ -264,11 +352,17 @@ def _validate_checked_evidence(result: Mapping[str, Any], label: str) -> None:
         or trust.get("offline") is not True
         or not isinstance(options, list)
         or not all(isinstance(option, str) for option in options)
-        or not {"--without-K", "--exact-split"}.issubset(options)
     ):
         raise ValueError(f"{label} result lacks a strict offline trust report")
+    if "checking_environment" in trust:
+        _validate_library_checking_options(trust)
+    elif not {"--without-K", "--exact-split"}.issubset(options):
+        raise ValueError(f"{label} result lacks a strict offline trust report")
     full_module = (
-        validation.get("exit_status") == 0 and trust.get("checker_exit_status") == 0
+        type(validation.get("exit_status")) is int
+        and type(trust.get("checker_exit_status")) is int
+        and validation.get("exit_status") == 0
+        and trust.get("checker_exit_status") == 0
     )
     supplemental = trust.get("supplemental_checker_command")
     scope = validation.get("validation_scope")

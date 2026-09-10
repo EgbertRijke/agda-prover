@@ -6,7 +6,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from agdaprover.observability.policy_trace import PolicyTraceRecorder
+from agdaprover.observability.policy_trace import (
+    PolicyChoice,
+    PolicyTraceRecorder,
+    validated_proof_evidence,
+)
 
 from .bridge.resources import current_process_rss
 from .budget import SearchBudget
@@ -178,6 +182,7 @@ def prove(
         ranker=task.ranker,
     )
     policy_router: ORPolicyRouter | None = None
+    selected_policy_choices: tuple[PolicyChoice, ...] = ()
     call_scope = VerifierCallScope()
     resource_scope = ResourceScope(task.resources, memory_sample=current_process_rss)
     try:
@@ -323,7 +328,7 @@ def prove(
             def attempt_batched_case() -> bool:
                 """Run the bounded case engine once and publish terminal results."""
 
-                nonlocal batched_attempted
+                nonlocal batched_attempted, selected_policy_choices
                 if batched_attempted:
                     return False
                 batched_attempted = True
@@ -382,6 +387,7 @@ def prove(
                     source_bytes_written=batch_stats.source_bytes_written,
                 )
                 if batched.patch is not None and batched.proof_text is not None:
+                    selected_policy_choices = batched.policy_choices
                     _finish_guided_candidate(
                         result,
                         source_file=source_file,
@@ -476,6 +482,7 @@ def prove(
                 budget.account_actions(constructor.stats.actions_considered)
                 if constructor.solutions:
                     solution = constructor.solutions[0]
+                    selected_policy_choices = solution.plan.choices_on_proof()
                     binders, body = solution.plan.clause_parts()
                     patch = reconstruct_checked_clause_completion(
                         source_file.read_text(),
@@ -774,6 +781,25 @@ def prove(
         call_scope.close()
         result.elapsed_ms = (time.monotonic() - started) * 1000.0
         if policy_router is not None:
+            if result.status == "verified" and selected_policy_choices:
+                evidence = validated_proof_evidence(
+                    task_id=result.task_id,
+                    source_sha256=result.source_hash,
+                    patch=result.patch,
+                    validation=result.validation,
+                    trust_report=result.trust_report,
+                )
+                if evidence is not None:
+                    try:
+                        policy_router.recorder.mark_validated_proof(
+                            selected_policy_choices, evidence=evidence
+                        )
+                    except ValueError as error:
+                        # Broken diagnostic lineage must not change Agda's
+                        # proof result or publish partially labelled examples.
+                        result.diagnostics.append(
+                            {"kind": "training-trace", "message": str(error)}
+                        )
             result.policy_trace.extend(policy_router.recorder.to_list())
             if result.search_stats is None:
                 result.search_stats = {}

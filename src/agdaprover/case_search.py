@@ -37,6 +37,7 @@ from .notation import (
     render_application,
     strip_outer_parentheses,
 )
+from .observability.policy_trace import PolicyChoice
 from .or_policy import ORPolicyRouter, PolicyCandidate, policy_candidate
 from .premise_search import (
     ScopePremiseAction,
@@ -216,6 +217,7 @@ class CaseBatchResult:
     proof_text: str | None
     stats: CaseBatchStats
     diagnostic: str = ""
+    policy_choices: tuple[PolicyChoice, ...] = ()
 
 
 def _safe_arrow_count(target: str) -> int:
@@ -735,6 +737,7 @@ def batched_case_prove(
         )
 
     current_source = original_source
+    committed_choices: list[PolicyChoice] = []
     current_end = initial_end
     depth = 0
     case_split_seen = False
@@ -1122,9 +1125,16 @@ def batched_case_prove(
                         original_source, root_goal, replacement
                     )
                     stats.elapsed_ms = (time.monotonic() - started) * 1000.0
-                    return CaseBatchResult("solved", patch, replacement, stats)
+                    return CaseBatchResult(
+                        "solved",
+                        patch,
+                        replacement,
+                        stats,
+                        policy_choices=tuple(committed_choices),
+                    )
 
                 edits: list[dict[str, object]] = []
+                level_choices: list[PolicyChoice] = []
                 for shallow in sorted(target_goals, key=lambda goal: goal.source_range):
                     if not available():
                         raise TimeoutError(
@@ -1246,6 +1256,7 @@ def batched_case_prove(
                     # current Agda interaction; the profile only chooses which
                     # structural schema this joint-search alternative explores.
                     program_edit: dict[str, object] | None = None
+                    program_choices: tuple[PolicyChoice, ...] = ()
                     recursive_program_actions: list[RecursiveCallAction] = []
                     program_specs = (
                         _clause_recursive_specs(
@@ -1589,6 +1600,9 @@ def batched_case_prove(
                                             goal,
                                             structural_program.solutions[0].proof_text,
                                         )
+                                        program_choices = structural_program.solutions[
+                                            0
+                                        ].plan.choices_on_proof()
                                         break
                         elif recursive_program_profile == "binary-recursive":
                             # A nullary result constructor is a base-case
@@ -1655,6 +1669,7 @@ def batched_case_prove(
                                     break
                     if program_edit is not None:
                         edits.append(program_edit)
+                        level_choices.extend(program_choices)
                         continue
 
                     exact_local = next(
@@ -5215,6 +5230,9 @@ def batched_case_prove(
                                     structural.solutions[0].proof_text,
                                 )
                             )
+                            level_choices.extend(
+                                structural.solutions[0].plan.choices_on_proof()
+                            )
                             continue
                         if (
                             structural.status == "resource-exhausted"
@@ -5326,6 +5344,7 @@ def batched_case_prove(
                         case_by_expression[candidate.expression]
                         for candidate in ranked_cases
                     ]
+                    case_choices = active_policy.snapshot_choices("case-variable", goal)
                     accepted_cases: list[
                         tuple[
                             dict[str, object],
@@ -5340,16 +5359,21 @@ def batched_case_prove(
                             )
                         stats.actions_considered += 1
                         stats.case_queries += 1
-                        active_policy.mark("case-variable", case_action.expression)
+                        choice = case_choices.get(case_action.expression)
+                        if choice is not None:
+                            active_policy.recorder.mark(
+                                choice.decision_id, choice.candidate_id
+                            )
                         checked_case = active_session.check_case_split(
                             goal.goal_id, case_action.expression
                         )
                         if not checked_case.accepted:
-                            active_policy.mark(
-                                "case-variable",
-                                case_action.expression,
-                                outcome="invalid",
-                            )
+                            if choice is not None:
+                                active_policy.recorder.mark(
+                                    choice.decision_id,
+                                    choice.candidate_id,
+                                    outcome="invalid",
+                                )
                             continue
                         subgoals = sum(
                             len(_HOLE.findall(clause))
@@ -5562,8 +5586,14 @@ def batched_case_prove(
                         if elimination is not None:
                             record_elimination_action(elimination.to_dict())
                     edits.append(selected_edit)
+                    selected_choice = case_choices.get(selected_action.expression)
+                    if selected_choice is not None:
+                        level_choices.append(selected_choice)
 
                 current_source, delta = _apply_disjoint_edits(current_source, edits)
+                # Only choices whose edits entered this source branch survive.
+                # Lookahead and failed structural alternatives earn no credit.
+                committed_choices.extend(level_choices)
                 current_end += delta
                 depth += 1
                 stats.levels_completed += 1
@@ -5577,7 +5607,13 @@ def batched_case_prove(
                         original_source, root_goal, replacement
                     )
                     stats.elapsed_ms = (time.monotonic() - started) * 1000.0
-                    return CaseBatchResult("solved", patch, replacement, stats)
+                    return CaseBatchResult(
+                        "solved",
+                        patch,
+                        replacement,
+                        stats,
+                        policy_choices=tuple(committed_choices),
+                    )
         except TimeoutError as error:
             stats.elapsed_ms = (time.monotonic() - started) * 1000.0
             return CaseBatchResult("resource-exhausted", None, None, stats, str(error))

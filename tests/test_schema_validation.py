@@ -1,12 +1,79 @@
 from __future__ import annotations
 
 import unittest
+from copy import deepcopy
 
 from agdaprover.contracts import CostMetrics, ProverResult, StepResult
 from agdaprover.schema_validation import validate_prover_result, validate_step_result
 
 
 class P0SchemaValidationTests(unittest.TestCase):
+    def test_library_evidence_preserves_reported_options_instead_of_default_flags(self):
+        validation, trust = self.checked_evidence()
+        options = [
+            "--no-default-libraries",
+            "--library-file=/overlay/libraries",
+            "--ignore-interfaces",
+            "-i",
+            ".",
+        ]
+        environment = {
+            "schema_version": "agdaprover.checking-environment.v1",
+            "root_module": "Example",
+            "command_options": [],
+            "libraries": [
+                {"name": "support", "includes": ["src"], "manifest_sha256": "a" * 64}
+            ],
+            "sources": {"Support": {"library": "support", "sha256": "b" * 64}},
+        }
+        result = ProverResult(
+            task_id="task",
+            status="verified",
+            source_file="Example.agda",
+            source_hash="0" * 64,
+            ranker="symbolic",
+            proof_term="refl",
+            patch={"replacement": "refl"},
+            validation=validation,
+            trust_report={
+                **trust,
+                "options": options,
+                "checker_command": ["agda", *options, "Example.agda"],
+                "checking_environment": environment,
+                "sandbox_profile": "isolated-overlay-pinned-libraries-process-group-v1",
+            },
+        ).to_dict()
+        validate_prover_result(result)
+        for key, invalid in (
+            ("schema_version", "future"),
+            ("root_module", ""),
+            ("libraries", []),
+            ("command_options", ["--without-K"]),
+            ("sources", {"Support": {"library": [], "sha256": "b" * 64}}),
+        ):
+            changed = deepcopy(result)
+            changed["trust_report"]["checking_environment"][key] = invalid
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                validate_prover_result(changed)
+        for key, invalid in (
+            ("checking_environment", None),
+            ("sandbox_profile", "unknown"),
+            ("checker_command", ["agda", "Example.agda"]),
+            ("checker_exit_status", False),
+        ):
+            changed = deepcopy(result)
+            changed["trust_report"][key] = invalid
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                validate_prover_result(changed)
+        changed = deepcopy(result)
+        changed["trust_report"]["options"].append("--allow-unsolved-metas")
+        changed["trust_report"]["checker_command"].insert(-1, "--allow-unsolved-metas")
+        with self.assertRaisesRegex(ValueError, "unreported options"):
+            validate_prover_result(changed)
+        del changed["trust_report"]["checking_environment"]
+        with self.assertRaisesRegex(ValueError, "strict offline trust report"):
+            validate_prover_result(changed)
+
     def test_verifier_quota_reports_are_closed_versioned_and_consistent(self) -> None:
         for result_type, validator in (
             (ProverResult, validate_prover_result),

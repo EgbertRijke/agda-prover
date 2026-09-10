@@ -20,6 +20,7 @@ from agdaprover.observability.policy_trace import (
     CandidateOutcome,
     DecisionFamily,
     PolicyCandidate,
+    PolicyChoice,
     PolicyTraceRecorder,
 )
 
@@ -110,6 +111,7 @@ class ORPolicyRouter:
         self.symbolic_fallbacks = 0
         self.family_counts: dict[str, int] = {}
         self._latest: dict[DecisionFamily, tuple[str | None, dict[str, str]]] = {}
+        self._latest_goals: dict[DecisionFamily, GoalInfo] = {}
 
     @staticmethod
     def _goal_state(
@@ -208,7 +210,23 @@ class ORPolicyRouter:
             decision_id,
             {candidate.expression: candidate.candidate_id for candidate in symbolic},
         )
+        self._latest_goals[family] = goal
         return RankedPolicyBatch(ordered, decision_id)
+
+    def snapshot_choices(
+        self, family: DecisionFamily, goal: GoalInfo
+    ) -> dict[str, PolicyChoice]:
+        """Capture immediately after ranking, before descending into children."""
+
+        if self._latest_goals.get(family) != goal:
+            return {}
+        decision_id, candidates = self._latest.get(family, (None, {}))
+        if decision_id is None:
+            return {}
+        return {
+            expression: PolicyChoice(decision_id, candidate_id)
+            for expression, candidate_id in candidates.items()
+        }
 
     def mark(
         self,

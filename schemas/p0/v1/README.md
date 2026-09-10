@@ -5,10 +5,21 @@ proof and one-step commands. `python -m agdaprover.schema_validation` is the
 dependency-free standalone validator and additionally enforces terminal-status
 invariants such as fresh validation evidence for `verified`.
 
+Optional OR-policy traces can carry
+[validated proof-choice credit](../../proof-choice-credit-v1.md), bound to the
+final result rather than to merely accepted speculative actions.
+
 Tasks and editor requests may supply an explicit
 [project checking configuration](../../project-configuration-v1.md). It carries
 the Agda executable, registered libraries and global checking options through
 search and validation, including relocated candidate projects.
+For registered libraries, `trust_report.checking_environment` binds the
+versioned library manifests, source ownership and explicit global options.
+The standalone validator checks that witness against the actual isolated
+checker command; it does not impose the default `--without-K --exact-split`
+flags on libraries configured differently. Results without a library witness
+retain the historical standalone-profile requirement. Schema acceptance is
+not a replacement for Agda checking, policy enforcement or dataset admission.
 
 ## Optional physical verifier budget
 

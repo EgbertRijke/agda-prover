@@ -24,6 +24,7 @@ from agdaprover.interactive import launch_interactive_run
 from agdaprover.kernel.p0 import AgdaSession
 from agdaprover.project_configuration import ProjectConfiguration
 from agdaprover.resource_budget import ResourceLimits, ResourceScope, charge_io
+from agdaprover.schema_validation import validate_prover_result
 from agdaprover.verification import prepare_project_overlay, validate_reconstruction
 
 
@@ -146,6 +147,7 @@ class PublicLibraryProjectTests(unittest.TestCase):
             result = default_application.prove(task)
             self.assertEqual(result.status, "verified", result.diagnostics)
             self.assertGreater(result.cost.case_split_checks, 0)
+            validate_prover_result(result.to_dict())
             with AgdaSession(
                 project_configuration=configuration, timeout_seconds=10
             ) as session:
@@ -200,6 +202,7 @@ class PublicLibraryProjectTests(unittest.TestCase):
             self.assertEqual(
                 result.trust_report["checking_environment"]["command_options"], []
             )
+            validate_prover_result(result.to_dict())
 
     def test_original_library_change_cannot_be_accepted_after_overlay_search(
         self,

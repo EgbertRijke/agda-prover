@@ -14,6 +14,7 @@ import math
 import os
 import re
 import time
+from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from itertools import chain
@@ -33,6 +34,7 @@ from .kernel.protocol import (
     TransactionalKernelSession,
 )
 from .notation import binary_mixfix_head, render_application, strip_outer_parentheses
+from .observability.policy_trace import PolicyChoice
 from .or_policy import ORPolicyRouter, policy_candidate
 from .premise_search import (
     ScopePremiseAction,
@@ -308,6 +310,18 @@ class ProofPlan:
     template: str
     children: tuple[ProofPlan, ...] = ()
     recursive_call: bool = False
+    policy_choices: tuple[PolicyChoice, ...] = ()
+
+    def choices_on_proof(self) -> tuple[PolicyChoice, ...]:
+        """Return exact choices on this tree only, excluding explored siblings."""
+
+        choices: list[PolicyChoice] = []
+        pending = [self]
+        while pending:
+            plan = pending.pop()
+            choices.extend(plan.policy_choices)
+            pending.extend(reversed(plan.children))
+        return tuple(choices)
 
     @property
     def recursive_call_count(self) -> int:
@@ -2409,8 +2423,19 @@ class _ConstructorSearch:
                     self.policy_router.recorder.mark(
                         proposal.decision_id, proposal.candidate_id, outcome="invalid"
                     )
+            choice = (
+                PolicyChoice(proposal.decision_id, proposal.candidate_id)
+                if proposal.decision_id is not None
+                and proposal.candidate_id is not None
+                else None
+            )
             yield from self._accepted_introduction(
-                goal, checked, depth, ancestors, premise_query_stop
+                goal,
+                checked,
+                depth,
+                ancestors,
+                premise_query_stop,
+                policy_choice=choice,
             )
 
     def _solve_with_observed_elimination(
@@ -2781,6 +2806,14 @@ class _ConstructorSearch:
         )
         self.stats.actions_generated += len(actions)
         self.stats.premise_candidates += len(actions)
+        choices = self.policy_router.snapshot_choices("visible-premise", goal)
+        repeated_expressions = {
+            expression
+            for expression, count in Counter(
+                action.expression for action in actions
+            ).items()
+            if count > 1
+        }
         for action in actions:
             if self._scope_premise_queries >= min(
                 self.stats.premise_query_limit, premise_query_stop
@@ -2788,7 +2821,11 @@ class _ConstructorSearch:
                 return
             if not self._charge():
                 return
-            self.policy_router.mark("visible-premise", action.expression)
+            choice = choices.get(action.expression)
+            if choice is not None:
+                self.policy_router.recorder.mark(
+                    choice.decision_id, choice.candidate_id
+                )
             # A visible declaration whose complete type is the current goal
             # is already a closed inhabitant.  Refining it would eta-expand
             # the declaration and manufacture one subgoal per argument (for
@@ -2810,7 +2847,10 @@ class _ConstructorSearch:
                 if direct_head.accepted and direct_head.child_state is not None:
                     yield ConstructorSolution(
                         direct_head.child_state,
-                        ProofPlan(action.expression),
+                        ProofPlan(
+                            action.expression,
+                            policy_choices=(choice,) if choice else (),
+                        ),
                     )
                     return
                 if self._scope_premise_queries >= min(
@@ -2835,7 +2875,9 @@ class _ConstructorSearch:
                 if direct.accepted and direct.child_state is not None:
                     yield ConstructorSolution(
                         direct.child_state,
-                        ProofPlan(application),
+                        ProofPlan(
+                            application, policy_choices=(choice,) if choice else ()
+                        ),
                     )
                     return
                 if self._scope_premise_queries >= min(
@@ -2882,6 +2924,14 @@ class _ConstructorSearch:
             if not checked.accepted:
                 if observations is not None:
                     observations.attempts[refinement_expression] = (checked, None)
+                if (
+                    choice is not None
+                    and refinement_expression == action.expression
+                    and action.expression not in repeated_expressions
+                ):
+                    self.policy_router.recorder.mark(
+                        choice.decision_id, choice.candidate_id, outcome="invalid"
+                    )
                 continue
             expected = premise_expected_arguments(goal, action)
             # Reversible premises are sometimes essential: a useful chain may
@@ -2908,6 +2958,7 @@ class _ConstructorSearch:
                 depth,
                 ancestors,
                 branch_query_stop,
+                policy_choice=choice,
             )
 
     def _solve_children(
@@ -2961,6 +3012,7 @@ class _ConstructorSearch:
         premise_query_stop: int,
         *,
         deprioritized_locals: frozenset[str] = frozenset(),
+        policy_choice: PolicyChoice | None = None,
     ) -> Iterator[ConstructorSolution]:
         child_state = checked.child_state
         preview = checked.preview
@@ -2971,8 +3023,11 @@ class _ConstructorSearch:
         if hole_count != len(children):
             return
         self.stats.generated_subgoals += len(children)
+        choices = (policy_choice,) if policy_choice is not None else ()
         if not children:
-            yield ConstructorSolution(child_state, ProofPlan(preview))
+            yield ConstructorSolution(
+                child_state, ProofPlan(preview, policy_choices=choices)
+            )
             return
         for final_state, child_plans in self._solve_children(
             child_state,
@@ -2983,7 +3038,9 @@ class _ConstructorSearch:
             premise_query_stop,
             deprioritized_locals=deprioritized_locals,
         ):
-            yield ConstructorSolution(final_state, ProofPlan(preview, child_plans))
+            yield ConstructorSolution(
+                final_state, ProofPlan(preview, child_plans, policy_choices=choices)
+            )
 
     def _solve_with_function_values(
         self, state: StateToken, goal: GoalInfo, premise_query_stop: int
@@ -3013,6 +3070,7 @@ class _ConstructorSearch:
             new_actions = tuple(
                 action for action in actions if action.expression not in attempted
             )
+            choices = self.policy_router.snapshot_choices("visible-premise", goal)
             self.stats.record_retrieval(
                 "widenings",
                 {
@@ -3033,7 +3091,11 @@ class _ConstructorSearch:
                 if self._scope_premise_queries >= stop or not self._charge():
                     return
                 attempted.add(action.expression)
-                self.policy_router.mark("visible-premise", action.expression)
+                choice = choices.get(action.expression)
+                if choice is not None:
+                    self.policy_router.recorder.mark(
+                        choice.decision_id, choice.candidate_id
+                    )
                 checked = self.session.commit_proof_action(
                     state,
                     kind="give",
@@ -3060,11 +3122,15 @@ class _ConstructorSearch:
                     self.stats.premise_attempts_omitted += 1
                 if checked.accepted and checked.child_state is not None:
                     yield ConstructorSolution(
-                        checked.child_state, ProofPlan(action.expression)
+                        checked.child_state,
+                        ProofPlan(
+                            action.expression,
+                            policy_choices=(choice,) if choice else (),
+                        ),
                     )
-                else:
-                    self.policy_router.mark(
-                        "visible-premise", action.expression, outcome="invalid"
+                elif choice is not None:
+                    self.policy_router.recorder.mark(
+                        choice.decision_id, choice.candidate_id, outcome="invalid"
                     )
 
     def _solve_goal(
@@ -3904,6 +3970,7 @@ class _ConstructorSearch:
             name for name, _type in constructor_catalog
         )
         constructors = self._ordered_constructors(goal, names, constructor_types)
+        choices = self.policy_router.snapshot_choices("constructor-choice", goal)
         if len(constructors) == 1:
             self.stats.deterministic_constructor_introductions += 1
         elif len(constructors) > 1:
@@ -3914,7 +3981,11 @@ class _ConstructorSearch:
         for constructor_order, constructor in enumerate(constructors):
             if not self._charge():
                 return
-            self.policy_router.mark("constructor-choice", constructor)
+            choice = choices.get(constructor)
+            if choice is not None:
+                self.policy_router.recorder.mark(
+                    choice.decision_id, choice.candidate_id
+                )
             selected = self.session.commit_proof_action(
                 state,
                 kind="refine",
@@ -3933,9 +4004,9 @@ class _ConstructorSearch:
                         selected,
                     )
                 )
-            else:
-                self.policy_router.mark(
-                    "constructor-choice", constructor, outcome="invalid"
+            elif choice is not None:
+                self.policy_router.recorder.mark(
+                    choice.decision_id, choice.candidate_id, outcome="invalid"
                 )
         for _readiness, _order, _constructor, selected in sorted(
             selected_constructors,
@@ -3948,6 +4019,7 @@ class _ConstructorSearch:
                 descendants,
                 premise_query_stop,
                 deprioritized_locals=deprioritized_locals,
+                policy_choice=choices.get(_constructor),
             )
         if not opaque_type_head:
             eliminator_solved = False
