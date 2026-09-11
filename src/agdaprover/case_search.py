@@ -19,7 +19,11 @@ from typing import Literal
 
 from .actions import RefinementCandidate
 from .bridge.contracts import StateToken
-from .constructor_search import ConstructorStats, constructor_tree_prove
+from .constructor_search import (
+    ConstructorResult,
+    ConstructorStats,
+    constructor_tree_prove,
+)
 from .contracts import GoalInfo
 from .dependency_planner import DependencyPlan, build_dependency_plan
 from .focused import focused_prove
@@ -838,6 +842,57 @@ def batched_case_prove(
             stats.elimination_actions.append(action)
         else:
             stats.elimination_actions_omitted += 1
+
+    def construct_leaf(
+        leaf_session: TransactionalKernelSession,
+        leaf: GoalInfo,
+        *,
+        leaf_depth: int,
+        recursive_spec: RecursiveCallSpec | None,
+        allow_wrapping: bool,
+        preferred_arity: int | None,
+        case_alternatives_remain: bool,
+    ) -> ConstructorResult:
+        """Share one construction boundary before or after case probing."""
+        stats.structural_leaf_attempts += 1
+        structural_budget = action_budget - stats.actions_considered
+        if case_alternatives_remain:
+            # Construction must leave room for another informative split.
+            # If Agda has rejected every split, the leaf instead owns the
+            # remaining allowance; refusing to split is not refusing to prove.
+            recursive_codomain_head = (
+                _safe_result_head(split_top_level_arrows(recursive_spec.root_type)[-1])
+                if recursive_spec is not None
+                else ""
+            )
+            structural_slice = (
+                64
+                if recursive_spec is not None
+                and _safe_result_head(leaf.target) == recursive_codomain_head
+                else 32
+            )
+            structural_budget = min(structural_slice, structural_budget)
+        return constructor_tree_prove(
+            leaf_session,
+            leaf,
+            action_budget=structural_budget,
+            timeout_seconds=max(0.001, deadline - time.monotonic()),
+            max_depth=None if max_depth is None else max_depth - leaf_depth,
+            solution_limit=1,
+            focused_model=focused_model,
+            refinement_model=refinement_model,
+            policy_router=active_policy,
+            excluded_premises=(
+                frozenset((root_name,)) if root_name is not None else frozenset()
+            ),
+            recursive_call=(
+                replace(recursive_spec, allow_constructor_wrapping=allow_wrapping)
+                if recursive_spec is not None
+                else None
+            ),
+            preferred_constructor_arity=preferred_arity,
+            on_statistics=record_structural_stats,
+        )
 
     def case_successor_score(edit: dict[str, object]) -> tuple[int, int, int, int]:
         """Classify one singleton case successor with bounded kernel evidence.
@@ -5149,6 +5204,7 @@ def batched_case_prove(
                             relational_elimination_available
                         ),
                     )
+                    structural_attempted = False
                     if (
                         case_split_seen
                         and scheduling_classification.structural_construction_available
@@ -5161,65 +5217,22 @@ def batched_case_prove(
                         and isinstance(active_session, TransactionalKernelSession)
                         and available()
                     ):
-                        stats.structural_leaf_attempts += 1
-                        active_recursive_spec = (
-                            recursive_specs[0] if recursive_specs else recursive_call
-                        )
-                        structural_budget = action_budget - stats.actions_considered
-                        if case_actions:
-                            # Structural construction is one alternative at
-                            # an elimination leaf, not permission to consume
-                            # the entire joint budget before trying another
-                            # informative case split.  A bounded slice keeps
-                            # nested induction productive while leaves with no
-                            # remaining scrutinee retain the full fallback.
-                            recursive_codomain_head = (
-                                _safe_result_head(
-                                    split_top_level_arrows(
-                                        active_recursive_spec.root_type
-                                    )[-1]
-                                )
-                                if active_recursive_spec is not None
-                                else ""
-                            )
-                            structural_slice = (
-                                64
-                                if active_recursive_spec is not None
-                                and _safe_result_head(goal.target)
-                                == recursive_codomain_head
-                                else 32
-                            )
-                            structural_budget = min(structural_slice, structural_budget)
-                        structural = constructor_tree_prove(
+                        structural_attempted = True
+                        structural = construct_leaf(
                             active_session,
                             goal,
-                            action_budget=structural_budget,
-                            timeout_seconds=max(0.001, deadline - time.monotonic()),
-                            max_depth=(
-                                None if max_depth is None else max_depth - depth
+                            leaf_depth=depth,
+                            recursive_spec=(
+                                recursive_specs[0]
+                                if recursive_specs
+                                else recursive_call
                             ),
-                            solution_limit=1,
-                            focused_model=focused_model,
-                            refinement_model=refinement_model,
-                            policy_router=active_policy,
-                            excluded_premises=(
-                                frozenset((root_name,))
-                                if root_name is not None
-                                else frozenset()
+                            allow_wrapping=(
+                                recursive_split_depth is not None
+                                and depth >= recursive_split_depth + 2
                             ),
-                            recursive_call=(
-                                replace(
-                                    active_recursive_spec,
-                                    allow_constructor_wrapping=(
-                                        recursive_split_depth is not None
-                                        and depth >= recursive_split_depth + 2
-                                    ),
-                                )
-                                if active_recursive_spec is not None
-                                else None
-                            ),
-                            preferred_constructor_arity=preferred_constructor_arity,
-                            on_statistics=record_structural_stats,
+                            preferred_arity=preferred_constructor_arity,
+                            case_alternatives_remain=bool(case_actions),
                         )
                         if structural.solutions:
                             stats.structural_leaf_closures += 1
@@ -5402,6 +5415,46 @@ def batched_case_prove(
                             # second unbounded case-search frontier.
                             break
                     if not accepted_cases:
+                        # Named hypotheses are only split *proposals*. Once
+                        # Agda rejects them all, retain the established case
+                        # tree and try applications/projections/construction
+                        # in this leaf instead of restarting at the root.
+                        if (
+                            case_split_seen
+                            and not structural_attempted
+                            and not unresolved_program_dependencies
+                            and isinstance(active_session, TransactionalKernelSession)
+                            and available()
+                        ):
+                            structural = construct_leaf(
+                                active_session,
+                                goal,
+                                leaf_depth=depth,
+                                recursive_spec=(
+                                    recursive_specs[0] if recursive_specs else None
+                                ),
+                                allow_wrapping=(
+                                    recursive_split_depth is not None
+                                    and depth >= recursive_split_depth + 2
+                                ),
+                                preferred_arity=preferred_constructor_arity,
+                                case_alternatives_remain=False,
+                            )
+                            if structural.solutions:
+                                stats.structural_leaf_closures += 1
+                                edits.append(
+                                    reconstruct_hole_completion(
+                                        current_source,
+                                        goal,
+                                        structural.solutions[0].proof_text,
+                                    )
+                                )
+                                level_choices.extend(
+                                    structural.solutions[0].plan.choices_on_proof()
+                                )
+                                continue
+                            if structural.status == "resource-exhausted":
+                                raise TimeoutError(structural.diagnostic)
                         return no_proof(
                             "no supported case or recursive action closed a leaf",
                         )

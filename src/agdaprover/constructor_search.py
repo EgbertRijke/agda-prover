@@ -3794,19 +3794,22 @@ class _ConstructorSearch:
                     return
 
         local_refinement_solved = False
-        if self.recursive_call is not None or ready_eliminators:
-            for solution in self._solve_with_local_refinements(
-                state,
-                goal,
-                depth,
-                descendants,
-                premise_query_stop,
-                continuation_only=(False if ready_eliminators else None),
-                deprioritized_terms=deprioritized_locals,
-                deprioritized_only=(False if ready_eliminators else None),
-            ):
-                local_refinement_solved = True
-                yield solution
+        # Applying a contextual function is independently useful: its argument
+        # may be constructed even when no global eliminator has a ready source
+        # and no recursive call exists. Global readiness must not hide this
+        # ordinary local action. Agda still determines the argument obligations.
+        for solution in self._solve_with_local_refinements(
+            state,
+            goal,
+            depth,
+            descendants,
+            premise_query_stop,
+            continuation_only=(False if ready_eliminators else None),
+            deprioritized_terms=deprioritized_locals,
+            deprioritized_only=(False if ready_eliminators else None),
+        ):
+            local_refinement_solved = True
+            yield solution
         if local_refinement_solved:
             return
 
