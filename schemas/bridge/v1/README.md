@@ -37,6 +37,21 @@ requests, restoration and replay remain charged; resource exhaustion propagates
 and fresh reconstruction validation is still required for completion. The raw
 Stage 1 protocol and its state/diagnostic schemas are unchanged.
 
+## Process completion and resource sampling
+
+An operating-system resource sample can disappear just before a checker's exit
+status becomes waitable. When polling has not collected that exit, the shared
+supervisor allows one completion wait of at most 10 ms, clipped to the existing
+absolute deadline. It does not retry unmonitored search or extend the task budget.
+Cancellation and parent resource limits are checked again after the wait.
+
+A child that remains unmeasurable and running is still rejected with
+`resource-sampling-unavailable`. A reaped child's final CPU usage is retained and
+charged; successful collection of an exit status does not imply a successful
+Agda check. The validator must still inspect that status and perform the ordinary
+fresh-validation and policy checks. No request, result or diagnostic wire schema
+changes.
+
 ## Pinned library environments
 
 `OpenProjectRequest.library_file` selects an explicit registry; dependency

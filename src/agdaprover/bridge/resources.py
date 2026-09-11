@@ -429,13 +429,7 @@ class ResourceSupervisor:
                 command_id,
             )
 
-    def check(
-        self,
-        process: subprocess.Popen[bytes],
-        *,
-        command_id: CommandId | None,
-        force_sample: bool = False,
-    ) -> ProcessUsage | None:
+    def _check_controls(self, command_id: CommandId | None) -> None:
         self.cancellation.raise_if_cancelled(command_id)
         checkpoint()
         if time.monotonic() >= self.budget.deadline:
@@ -445,6 +439,34 @@ class ResourceSupervisor:
                 "bridge command exceeded its wall-time budget",
                 command_id,
             )
+
+    def _completed_after_missing_sample(
+        self, process: subprocess.Popen[bytes], command_id: CommandId | None
+    ) -> bool:
+        if process.poll() is not None:
+            return True
+        # A task can disappear from the OS resource meter just before its
+        # exit status becomes waitable. Allow only a short completion wait,
+        # not another unmonitored search interval or a sampling retry loop.
+        # Popen retains wait ownership; OwnedProcess also retains final CPU.
+        self._check_controls(command_id)
+        remaining = max(0.0, self.budget.deadline - time.monotonic())
+        try:
+            process.wait(timeout=min(0.01, remaining))
+        except subprocess.TimeoutExpired:
+            self._check_controls(command_id)
+            return False
+        self._check_controls(command_id)
+        return True
+
+    def check(
+        self,
+        process: subprocess.Popen[bytes],
+        *,
+        command_id: CommandId | None,
+        force_sample: bool = False,
+    ) -> ProcessUsage | None:
+        self._check_controls(command_id)
         now = time.monotonic()
         if not force_sample and now - self._last_sample < 0.1:
             return None
@@ -455,7 +477,7 @@ class ResourceSupervisor:
             # before the process-tree sample.  A completed child no longer
             # consumes resources; only a still-running unmeterable child must
             # fail closed.
-            if process.poll() is not None:
+            if self._completed_after_missing_sample(process, command_id):
                 self._account(process, ProcessUsage(0, 0.0, 0))
                 self._check_cpu(command_id)
                 return ProcessUsage(0, 0.0, 0)
@@ -489,7 +511,7 @@ class ResourceSupervisor:
 
         usage = process_tree_usage(process.pid)
         if usage is None:
-            if process.poll() is not None:
+            if self._completed_after_missing_sample(process, None):
                 self._account(process, ProcessUsage(0, 0.0, 0))
                 return ProcessUsage(0, 0.0, 0)
             raise self.error(
