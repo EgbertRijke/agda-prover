@@ -3,7 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.Observation
-  ( GoalSnapshot, observeGoal, encodeGoal ) where
+  ( GoalSnapshot, observeGoal, encodeGoal, openInteractionPoints ) where
 
 import Control.Monad (unless)
 import Control.Monad.Except (runExceptT)
@@ -49,6 +49,11 @@ rewrite P.Instantiated = Interaction.Instantiated
 rewrite P.HeadNormal = Interaction.HeadNormal
 rewrite P.Simplified = Interaction.Simplified
 rewrite P.Normalized = Interaction.Normalised
+
+-- Agda keeps solved interaction points for source bookkeeping. The unfiltered
+-- map's keys are not the outstanding goal set.
+openInteractionPoints :: TCM [InteractionId]
+openInteractionPoints = map fst <$> getInteractionIdsAndMetas
 
 observeGoal :: InteractionId -> P.ObservationMode -> TCM GoalSnapshot
 observeGoal point mode = localTCState $ withInteractionId point $ dontAssignMetas $ do

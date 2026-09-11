@@ -28,11 +28,13 @@ parseMode name = case filter ((== name) . modeName) [minBound .. maxBound] of
 capabilities :: Value
 capabilities = object
   [ "schema_version" .= ("agdaprover.symbolic-capabilities.v1" :: String)
-  , "engine" .= ("haskell-observer" :: String)
+  , "engine" .= ("haskell-symbolic-core" :: String)
   , "package_version" .= ("0.1.0.0" :: String)
   , "agda_version" .= ("2.8.0" :: String)
   , "ghc_version" .= ("9.6.7" :: String)
-  , "operations" .= (["capabilities", "observe-goal"] :: [String])
+  , "operations" .= (["capabilities", "observe-goal", "resident-session"] :: [String])
+  , "session_operations" .=
+      (["pending", "observe", "give", "evict", "replay", "cost", "cancel", "close"] :: [String])
   , "observation_modes" .= map modeName [minBound .. maxBound]
   , "search_available" .= False
   , "proof_authority" .= False

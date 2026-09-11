@@ -13,12 +13,13 @@ common defaults
 library
   import: defaults
   hs-source-dirs: core
-  exposed-modules: AgdaProver.Symbolic.Protocol
+  exposed-modules: AgdaProver.Symbolic.Protocol, AgdaProver.Symbolic.SessionTypes
+  build-depends: containers >=0.6 && <0.7
 
 library agda28
   import: defaults
   hs-source-dirs: adapter
-  exposed-modules: AgdaProver.Agda28.Observation
+  exposed-modules: AgdaProver.Agda28.Observation, AgdaProver.Agda28.Session
   other-modules: Structure, Decode, Atoms, StructureAnnotations
   build-depends:
     agda-prover-symbolic,
@@ -27,12 +28,16 @@ library agda28
     mtl >=2.3 && <2.4,
     transformers >=0.6 && <0.7,
     text >=2.0 && <2.1,
-    vector >=0.13 && <0.14
+    vector >=0.13 && <0.14,
+    bytestring ==0.11.5.4,
+    directory >=1.3 && <1.4,
+    random ==1.3.1
 
 executable agdaprover-symbolic
   import: defaults
   hs-source-dirs: app
   main-is: Main.hs
+  other-modules: SessionProtocol
   ghc-options: -threaded -rtsopts
   build-depends:
     agda-prover-symbolic,
@@ -40,4 +45,5 @@ executable agdaprover-symbolic
     Agda ==2.8.0,
     bytestring ==0.11.5.4,
     directory >=1.3 && <1.4,
-    filepath >=1.4 && <1.5
+    filepath >=1.4 && <1.5,
+    containers >=0.6 && <0.7

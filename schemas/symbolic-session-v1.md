@@ -1,0 +1,112 @@
+# Resident symbolic session v1
+
+H2 implementation scope: single-owner checking, retained branches, explicit
+eviction/replay, source invalidation, and cumulative work. No search policy,
+NNUE changes, patch application, or proof verification is introduced here.
+
+## Invariants
+
+- One owner serializes access to its Agda states. Each key binds to a fresh
+  session nonce, epoch, and issued branch; a context additionally binds to a
+  live interaction in that branch. Wire keys are validated, not trusted.
+- The owner uses Agda's library-level operations directly. It has no separate
+  editor `CommandState`; Agda's interaction/meta store is part of the saved
+  `TCState`. The existing JSON bridge remains unchanged.
+- Each candidate starts from the requested full state. Failure, interruption,
+  observation, and success all leave the parent available and unchanged.
+  Success publishes a different child key. Checked native evidence belongs to
+  that child, not to a parent or sibling with coincidentally equal meta numbers.
+- Pending interactions, hidden metas, and constraints remain obligations.
+  `apparently-closed` is not `verified`; fresh validation remains independent.
+- Dropping a snapshot keeps its structured action ancestry. Replay runs Agda
+  again and issues a new key. An old key/evidence never silently changes meaning.
+- Source witnesses cover the loaded root and imports. Changed/missing inputs
+  invalidate the session, including retained branches. Hashes are not the
+  authority for witness equality.
+- Work is charged outside snapshots. Rejections, replay and cancellation cannot
+  reset the ledger. An operation-start receipt precedes checking so a supervisor
+  can retain dispatched work if the worker is killed; unknown final work is not
+  reported as zero. Process CPU/RSS/I/O supervision remains the caller's duty.
+
+## Requests and events
+
+Start `agdaprover-symbolic session ABSOLUTE-FILE [ABSOLUTE-INCLUDE ...]` in a
+prepared project copy. No ambient library registry is consulted. The initial
+`session-start` event supplies the root state key. All events have
+`schema_version: "agdaprover.symbolic-session-event.v1"`.
+
+A request is one UTF-8 JSON line, with these exact common fields:
+
+```json
+{"schema_version":"agdaprover.symbolic-session-request.v1","request_id":1,"operation":"pending","state":{"session":"nonce","epoch":0,"branch":0}}
+```
+
+Request IDs are nonnegative and strictly increasing per connection. State keys
+have exactly `session`, `epoch`, and `branch`, with nonnegative integer counters.
+Each operation permits only its listed additional fields:
+
+| Operation | Additional fields | Result |
+| --- | --- | --- |
+| `pending` | `state` | Open goal IDs, open metas, constraints |
+| `observe` | `state`, `goal_id`, `mode` | Structured observation v1 |
+| `give` | `state`, `goal_id`, `expression` | Child state, native evidence view, obligations |
+| `evict` | `state` | Drop child snapshot; preserve replay ancestry |
+| `replay` | `state` | Rechecked state key (resident states are returned unchanged) |
+| `cost` | none | Current cumulative native-operation counters |
+| `cancel` | none | Cancel the active request, or report idle |
+| `close` | none | Cancel any active request, then close the session |
+
+Goal IDs must fit Agda's nonnegative machine-sized interaction identifier.
+Modes have the five observation-v1 meanings. `expression` is untrusted Agda
+syntax; Agda parses, scopes and checks it with ordinary non-forced `give`
+semantics. The returned evidence retains the internal term, type, telescope,
+resolved global names and child key; `display` is presentation only.
+
+At most one native request is active. Additional work requests report `busy`;
+control requests remain available. An `operation-start` event acknowledges
+dispatch before checking, followed by `operation-result` with `outcome` and
+`cost`. Control commands emit `control-result`. EOF/close produces `session-end`.
+Malformed requests emit `request-rejected`; unvalidated IDs need not be echoed.
+Fatal startup or transport errors emit `session-error` and exit nonzero.
+
+An operation's rejection distinguishes foreign session, stale epoch/inputs,
+unknown/evicted state, unknown goal, kernel rejection/blocking, cancellation,
+and internal failure. Only successful transitions issue a usable new state.
+Agda warnings about unresolved goals/metas/constraints remain obligations;
+new non-meta warnings, including termination failures, reject the transition.
+
+`accepted-partial` means there are still interaction goals. `accepted-blocked`
+means no interaction goals remain, but hidden metas or constraints do.
+`apparently-closed` requires all three to be empty. None means `verified`.
+
+## Resource and ownership boundaries
+
+The native ledger counts entered owner requests, checking attempts, accepted and
+rejected checks, replayed actions, cancellations, input bytes read, and elapsed
+monotonic nanoseconds/process CPU picoseconds during owner operations. It is
+not an OS-wide resource budget and excludes initial Agda loading and transport
+work; an external supervisor must account for the entire worker process.
+Every work dispatch has its own monotone receipt count, including requests
+rejected before entering the owner. A killed worker cannot provide its final
+counts: retain the last snapshot and receipt and mark final work unknown.
+
+Input frames default to 16 MiB. `AGDAPROVER_SYMBOLIC_FRAME_BYTES` changes this
+transport envelope. Oversized/unterminated frames close the connection; no
+unbounded work queue is created. Native snapshot/trail residency is caller-
+managed through eviction and process budgets for now. This envelope does not
+impose a mathematical proof-size or search-depth limit.
+
+Runtime sessions fix the loaded options/toolchain and pin the exact bytes and
+canonical paths corresponding to Agda's root and imported interface sources.
+Checks compare witnesses before and after an operation. Drift clears the branch
+table and advances the epoch, even if the old bytes are subsequently restored.
+Reloading requires a new session; no unchecked key can resurrect an old branch.
+The source tree's declaration bodies are never rewritten by this interface.
+
+## Targeted acceptance
+
+Use tiny successful, rejected, partial and blocked candidates; parent–child–parent
+and sibling observations; same-process foreign/expired keys; snapshot eviction
+and rechecked replay; root/import edits; cancellation and request-start receipts.
+Run only a small seeded sample now. The 10,000-action sample, soak, whole-search
+qualification and default promotion remain H10/H11 work.
