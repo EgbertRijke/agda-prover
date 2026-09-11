@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..resource_budget import charge_io
@@ -36,6 +36,122 @@ class ProjectOverlay:
 
     def source_for(self, module: ModuleId) -> Path:
         return dict(self.sources)[module]
+
+
+@dataclass(frozen=True)
+class RootOverlayReuse:
+    """Prepared root bytes; all other pinned overlay inputs are unchanged."""
+
+    destination: Path
+    content: bytes
+    overlay: ProjectOverlay
+
+
+def prepare_root_overlay_reuse(
+    previous: ResolvedProject,
+    old: ProjectOverlay,
+    old_root: Path,
+    project: ResolvedProject,
+    new: ProjectOverlay,
+    new_root: Path,
+    budget: BridgeBudget,
+    cancellation: CancellationToken,
+) -> RootOverlayReuse | None:
+    """Witness root-only reuse, never import arbitrary on-disk interfaces.
+
+    The complete new snapshot has already been materialized independently.
+    Absolute registry paths may relocate, but their routing, manifest contents,
+    source ownership, module paths and every dependency byte must agree.
+    A missing or modified old overlay is a miss, not permission to trust it.
+    """
+    if (
+        previous.toolchain != project.toolchain
+        or previous.root_module != project.root_module
+        or previous.command_options != project.command_options
+        or previous.options != project.options
+        or [(s.module, s.library_name) for s in previous.sources]
+        != [(s.module, s.library_name) for s in project.sources]
+        or [(m, p.relative_to(old_root)) for m, p in old.sources]
+        != [(m, p.relative_to(new_root)) for m, p in new.sources]
+        or [p.relative_to(old_root) for p in old.include_roots]
+        != [p.relative_to(new_root) for p in new.include_roots]
+        or bool(old.library_file) != bool(new.library_file)
+    ):
+        return None
+    old_artifacts, new_artifacts = dict(old.artifacts), dict(new.artifacts)
+    if old_artifacts.keys() != new_artifacts.keys():
+        return None
+    root_relative = (
+        old.source_for(previous.root_module).relative_to(old_root).as_posix()
+    )
+    registry_relative = (
+        old.library_file.relative_to(old_root).as_posix() if old.library_file else None
+    )
+    old_content: dict[str, bytes] = {}
+    new_content: dict[str, bytes] = {}
+    for relative, expected in old.artifacts:
+        cancellation.raise_if_cancelled()
+        if time.monotonic() >= budget.deadline:
+            raise _error(
+                "root-overlay-reuse-timeout",
+                "overlay comparison deadline exhausted",
+                BridgeFailure.TIMEOUT,
+            )
+        old_path, new_path = old_root / relative, new_root / relative
+        try:
+            if any(
+                path.is_symlink()
+                for path in (old_path, *old_path.parents)
+                if path == old_root or old_root in path.parents
+            ):
+                return None
+            before = old_path.read_bytes()
+        except OSError:
+            return None
+        # Staging belongs to this transaction. Losing it is an error, not a
+        # cache miss that may fall back to adopting an incomplete snapshot.
+        after = new_path.read_bytes()
+        charge_io(len(before) + len(after))
+        if hashlib.sha256(before).hexdigest() != expected:
+            return None
+        if hashlib.sha256(after).hexdigest() != new_artifacts[relative]:
+            raise _error(
+                "root-overlay-staging-changed",
+                "staged overlay changed during comparison",
+                BridgeFailure.STALE_TOKEN,
+            )
+        if relative == registry_relative:
+            try:
+                before_routes = [
+                    Path(line).relative_to(old_root.resolve())
+                    for line in before.decode().splitlines()
+                ]
+                after_routes = [
+                    Path(line).relative_to(new_root.resolve())
+                    for line in after.decode().splitlines()
+                ]
+            except (ValueError, UnicodeError):
+                return None
+            if before_routes != after_routes:
+                return None
+        elif relative != root_relative and before != after:
+            return None
+        if relative == root_relative:
+            old_content[relative], new_content[relative] = before, after
+    content = new_content[root_relative]
+    artifacts = dict(old.artifacts)
+    artifacts[root_relative] = new_artifacts[root_relative]
+    return RootOverlayReuse(
+        old_root / root_relative,
+        content,
+        replace(
+            old,
+            artifacts=tuple(sorted(artifacts.items())),
+            total_bytes=old.total_bytes
+            - len(old_content[root_relative])
+            + len(content),
+        ),
+    )
 
 
 def _error(code: str, message: str, failure: BridgeFailure) -> BridgeError:

@@ -86,6 +86,21 @@ closed. Rebuild the optional adapter to use the explicit-library profile.
 Relocated project resets restart the worker when its registry path changes;
 this cost is counted, not hidden as incremental reuse.
 
+The opt-in `AGDAPROVER_REUSE_ROOT_OVERLAY=1` experiment may retain the existing
+physical overlay for a root-only revision. It first materializes the complete
+replacement independently and checks compiler/options, source ownership,
+module/include topology, registry routing, manifests and dependency bytes.
+The previous overlay's pinned artifacts must still match their hashes. A miss
+uses ordinary replacement; detected staging damage is an error, not a reuse miss.
+After staging cleanup and resource/cancellation checks, a single atomic rename
+publishes the new root. Failed publication preserves the previous epoch.
+Successful reset clears every old state token regardless of reuse. The next
+Agda load rechecks the root and owns import-cache validity; no user-provided
+`.agdai` files or provisional metas become reusable proof evidence. Fresh validation
+still materializes an independent environment. `root_overlay_reuses` on the
+session counts successful reuse publications; existing process/load/I/O costs
+remain charged. This is not a declaration-checkpoint API or a new v1 operation.
+
 Fresh validation never treats `--allow-unsolved-metas` or
 `--allow-incomplete-matches` as proof acceptance. Other checking waivers are
 rejected unless explicitly allowed by the policy. This applies to command,

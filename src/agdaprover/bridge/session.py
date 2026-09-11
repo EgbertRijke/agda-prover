@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
@@ -53,7 +54,12 @@ from .operations import (
     TryActionResult,
     ValidatePatchResult,
 )
-from .overlay import materialize_project
+from .overlay import (
+    ProjectOverlay,
+    RootOverlayReuse,
+    materialize_project,
+    prepare_root_overlay_reuse,
+)
 from .project import ResolvedProject, resolve_project
 from .proof_state import (
     Binder,
@@ -199,6 +205,11 @@ class ConformingKernelSession:
         self._scope_type_family_enabled = False
         self._scope_adapter_hash: str | None = None
         self._record_introduction_enabled = False
+        self._reuse_root_overlay = (
+            os.environ.get("AGDAPROVER_REUSE_ROOT_OVERLAY") == "1"
+        )
+        self._overlay_description: ProjectOverlay | None = None
+        self.root_overlay_reuses = 0
 
     def __enter__(self) -> ConformingKernelSession:
         return self
@@ -256,6 +267,34 @@ class ConformingKernelSession:
         try:
             overlay = materialize_project(project, root, budget, self._cancellation)
             storage.sample(force=True)
+            if (
+                self._reuse_root_overlay
+                and self._project is not None
+                and self._overlay is not None
+                and self._overlay_description is not None
+            ):
+                reuse = prepare_root_overlay_reuse(
+                    self._project,
+                    self._overlay_description,
+                    Path(self._overlay.name),
+                    project,
+                    overlay,
+                    root,
+                    budget,
+                    self._cancellation,
+                )
+                if reuse is not None:
+                    # Finish fallible staging cleanup before publishing. The
+                    # sole changed source is then replaced atomically; all
+                    # budget/cancellation checks precede that rename.
+                    storage.close()
+                    temporary.cleanup()
+                    self._overlays_removed += 1
+                    self._publish_root_reuse(reuse, budget)
+                    self._overlay_description = reuse.overlay
+                    self._overlay_bytes = reuse.overlay.total_bytes
+                    self.root_overlay_reuses += 1
+                    return
         except OSError as error:
             try:
                 storage.close()
@@ -275,6 +314,7 @@ class ConformingKernelSession:
         old_overlay = self._overlay
         old_storage = self._overlay_storage
         self._overlay = temporary
+        self._overlay_description = overlay
         self._overlay_storage = storage
         self._runtime_sources = dict(overlay.sources)
         self._overlay_bytes = overlay.total_bytes
@@ -287,10 +327,36 @@ class ConformingKernelSession:
                 old_overlay.cleanup()
                 self._overlays_removed += 1
 
+    def _publish_root_reuse(
+        self, reuse: RootOverlayReuse, budget: BridgeBudget
+    ) -> None:
+        descriptor, name = tempfile.mkstemp(
+            prefix=".agdaprover-root-", dir=reuse.destination.parent
+        )
+        pending = Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                written = output.write(reuse.content)
+            charge_io(written)
+            if self._overlay_storage is not None:
+                self._overlay_storage.sample(force=True)
+            self._cancellation.raise_if_cancelled()
+            if time.monotonic() >= budget.deadline:
+                raise self._error(
+                    BridgeFailure.TIMEOUT,
+                    "root-overlay-reuse-timeout",
+                    "overlay publication deadline exhausted",
+                )
+            os.replace(pending, reuse.destination)
+        except BaseException:
+            pending.unlink(missing_ok=True)
+            raise
+
     def _cleanup_overlay(self) -> None:
         overlay = self._overlay
         storage = self._overlay_storage
         self._overlay = None
+        self._overlay_description = None
         self._overlay_storage = None
         self._runtime_sources.clear()
         self._library_file = None

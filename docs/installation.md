@@ -29,6 +29,14 @@ GHC. Set `AGDAPROVER_AGDA_BRIDGE` to its executable to opt in. The stock Agda
 interaction process remains the default. Fresh proof validation remains
 independent of either speculative backend.
 
+`AGDAPROVER_REUSE_ROOT_OVERLAY=1` enables experimental reuse of the checking
+process across root-file revisions. It can avoid reloading unchanged library
+imports. Reuse requires matching compiler options, dependency bytes and library
+routing; other changes rebuild the environment. Every revision still invalidates
+old proof-state tokens, and completed proofs still receive fresh validation.
+It is off by default; unset the variable to return to ordinary overlay loading.
+This does not cache individual declarations or omit checking the revised file.
+
 With the optional adapter, `AGDAPROVER_SCOPED_RETRIEVAL=1` enables live library
 premise retrieval. `AGDAPROVER_LOCAL_ELIMINATOR_READINESS=1` additionally tries
 generic eliminators early only when their source is recognized in the current
