@@ -145,12 +145,19 @@ class BundledModelTests(unittest.TestCase):
         self.assertIsNone(models.primary_id)
         self.assertEqual(models.refinement_id, OR_MODEL.sha256)
 
-    def test_library_policy_does_not_claim_untrained_families(self) -> None:
+    def test_library_policy_covers_four_trained_families_only(self) -> None:
         model = OR_MODEL.load(deadline=None)
         self.assertEqual(
-            model.policy_families, ("constructor-choice", "visible-premise")
+            model.policy_families,
+            (
+                "case-variable",
+                "constructor-choice",
+                "evidence-application-v1",
+                "visible-premise",
+            ),
         )
-        self.assertFalse(model.supports_policy_family("evidence-application-v1"))
+        self.assertTrue(model.supports_policy_family("evidence-application-v1"))
+        self.assertTrue(model.supports_policy_family("case-variable"))
         self.assertFalse(model.supports_policy_family("recursive-call"))
 
 
