@@ -232,12 +232,19 @@ def reconstruct_hole_completion(
 
 
 def reconstruct_intro(source: str, goal: GoalInfo, preview: str) -> dict[str, Any]:
-    """Introduce a kernel-provided lambda without hoisting an embedded hole."""
-    try:
-        return reconstruct_intro_as_clause(source, goal, preview)
-    except ValueError:
-        if not re.match(r"^\s*λ(?=\s|\{)", preview):
-            raise ValueError("introduction preview is not a lambda") from None
+    """Render Agda's checked introduction, preserving implicit abstractions.
+
+    Even a function goal can have a constructor preview: Agda may insert its
+    hidden lambdas during elaboration. Only explicit lambda binders can move to
+    the clause head; all other previews remain expressions at the selected hole.
+    """
+    if not preview.strip():
+        raise ValueError("introduction preview is empty")
+    if re.match(r"^\s*λ(?=\s|\{)", preview):
+        try:
+            return reconstruct_intro_as_clause(source, goal, preview)
+        except ValueError:
+            pass
     start, end = _goal_offsets(source, goal)
     if not _is_hole(source[start:end]):
         raise ValueError("introduction does not select a proof hole")

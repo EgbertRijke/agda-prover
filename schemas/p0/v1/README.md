@@ -17,6 +17,15 @@ The optional `on_statistics` callbacks are aggregation-only: they cannot perform
 budgeted work or grant proof credit. Counter fields retain their existing units
 and schema; historical reports with missing child work are not rewritten.
 
+Introduction reconstruction follows the checked kernel preview, not a guess
+from the goal's printed arrows. Agda can introduce an implicitly quantified
+function with a constructor expression, inserting the hidden abstraction during
+elaboration. Only explicit lambda binders are eligible for clause hoisting;
+other previews stay parenthesized at the selected hole, preserving siblings and
+remaining obligations. Joint, guided and one-step reconstruction share this
+behavior. Such a preview is not an invalid task. Partial reload success is not
+proof acceptance; completed source still requires fresh strict validation.
+
 Joint search treats fast implicational inhabitants as proposals, not as proof
 authority. It retains a bounded, source-local structural continuation and resumes
 it only after the ordinary frontier is exhausted. Rejected elaborations, failed
