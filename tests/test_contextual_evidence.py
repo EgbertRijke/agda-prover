@@ -33,6 +33,7 @@ from agdaprover.reasoning.evidence import (
     EvidenceTerm,
     evidence_applications,
     family_names,
+    implicit_value_type,
     ready_evidence_declarations,
     structured_combinator_applications,
     telescope_introduction,
@@ -45,6 +46,56 @@ from agdaprover.validation import validate_candidate
 
 
 class EvidenceProposalTests(unittest.TestCase):
+    def test_hidden_only_values_remain_inputs_to_structured_consumers(self):
+        for hidden in ("{x y : A}", "{x = u : A} {y = v : A}"):
+            with self.subTest(hidden=hidden):
+                value = EvidenceTerm("observe w", f"{hidden} → Bundle A x y", 1)
+                declarations = (("consume", "Bundle A x y → Output A"),)
+                proposals = tuple(
+                    evidence_applications(
+                        (value,),
+                        declarations,
+                        endpoint_terms=frozenset(),
+                        relation_heads=frozenset(),
+                    )
+                )
+                self.assertEqual(
+                    [p.expression for p in proposals], ["consume (observe w)"]
+                )
+                self.assertEqual(proposals[0].arguments, (value,))
+                self.assertEqual(proposals[0].type_text, "")
+                self.assertEqual(
+                    tuple(
+                        ready_evidence_declarations(
+                            "Output A",
+                            (value,),
+                            declarations,
+                        )
+                    ),
+                    declarations,
+                )
+
+    def test_implicit_value_view_does_not_specialize_explicit_or_instance_functions(
+        self,
+    ):
+        self.assertEqual(
+            implicit_value_type("{x y : A} → Bundle A x y"), "Bundle A x y"
+        )
+        self.assertEqual(implicit_value_type("Bundle A x y"), "Bundle A x y")
+        for ty in ("A → Bundle A", "{x : A} → A → Bundle A", "⦃x : A⦄ → Bundle A", "("):
+            with self.subTest(ty=ty):
+                self.assertIsNone(implicit_value_type(ty))
+        for ty in ("A → Bundle A", "{x : A} → A → Bundle A", "⦃x : A⦄ → Bundle A"):
+            proposals = tuple(
+                evidence_applications(
+                    (EvidenceTerm("w", ty),),
+                    (("consume", "Bundle A → Output A"),),
+                    endpoint_terms=frozenset(),
+                    relation_heads=frozenset(),
+                )
+            )
+            self.assertEqual(proposals, ())
+
     def test_type_former_retrieval_preserves_exclusions_and_limits(self):
         goal = GoalInfo(0, "Set k", (), (0, 4))
         declarations = (
@@ -361,6 +412,63 @@ connect C {x} {y} = follow (turn (reach C x)) (reach C y)
 
 @unittest.skipUnless(shutil.which("agda"), "Agda is required")
 class EvidenceKernelTests(unittest.TestCase):
+    def test_hidden_only_record_observations_are_composed_and_checked(self):
+        for record_kind in ("", "  coinductive\n"):
+            for supplied in (False, True):
+                with self.subTest(record_kind=record_kind, supplied=supplied):
+                    source = (
+                        """{-# OPTIONS --without-K --guardedness #-}
+module HiddenObservation where
+record Box (A : Set) : Set where
+  field
+    payload : A
+open Box public
+record Source (A : Set) (P : A → Set) : Set where
+"""
+                        + record_kind
+                        + """  field
+    observe : {x : A} → Box (P x)
+open Source public
+module _ {A : Set} {P : A → Set} (w : Source A P) (x : A) where
+  goal : Box (P x)
+  goal = {!!}
+"""
+                    )
+                    if supplied:
+                        source = (
+                            source[: source.index("module _")]
+                            + """module _
+  {A : Set} {P Q : A → Set}
+  (consume : {x : A} → Box (P x) → Q x)
+  (w : {x : A} → Box (P x)) (x : A) where
+  goal : Q x
+  goal = {!!}
+"""
+                        )
+                    with tempfile.TemporaryDirectory() as directory:
+                        path = Path(directory) / "HiddenObservation.agda"
+                        path.write_text(source)
+                        result = prove_joint_prefix(
+                            TaskSpec(
+                                path,
+                                max_candidates=200,
+                                timeout_seconds=15,
+                            )
+                        )
+                        self.assertEqual(result.status, "verified", result.diagnostics)
+                        self.assertIn(
+                            "consume w" if supplied else "observe w",
+                            result.patch["replacement"],
+                        )
+                        self.assertGreater(
+                            result.search_stats["evidence_inference_queries"], 0
+                        )
+                        self.assertTrue(result.validation["fresh_process"])
+                        self.assertEqual(
+                            result.trust_report["admitted_axioms_and_primitives"], []
+                        )
+                        self.assertEqual(path.read_text(), source)
+
     def test_same_head_does_not_authorize_incompatible_indices(self):
         source = """{-# OPTIONS --safe --without-K #-}
 module IndexedNearMiss where

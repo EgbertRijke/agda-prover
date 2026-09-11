@@ -346,6 +346,26 @@ def explicit_domains(type_text: str) -> tuple[str, ...]:
         return ()
 
 
+def implicit_value_type(type_text: str) -> str | None:
+    """View a value after only ordinary implicit arguments, for proposals.
+
+    Keep its original type on the evidence term: this view neither substitutes
+    indices nor claims an instantiation exists. Agda must infer the complete
+    consuming application, or check the value against the requested goal.
+    Explicit and instance arguments require other search lanes.
+    """
+    try:
+        parts = split_top_level_arrows(type_text)
+        for part in parts[:-1]:
+            for group in split_adjacent_binders(part) or (part,):
+                binder = parse_named_binder(group)
+                if binder is None or binder.visibility != "implicit":
+                    return None
+        return parts[-1]
+    except ValueError:
+        return None
+
+
 def family_names(declarations: tuple[tuple[str, str], ...]) -> dict[str, int]:
     """Recognize type-valued families from signatures, never their spelling."""
     result: dict[str, int] = {}
@@ -411,7 +431,7 @@ def evidence_applications(
     values = tuple(
         term
         for term in terms
-        if not top_level_arrow_count(term.type_text)
+        if implicit_value_type(term.type_text) is not None
         and not result_head(term.type_text).startswith("Set")
         and result_head(term.type_text) not in relation_heads
     )
@@ -428,7 +448,9 @@ def evidence_applications(
         ):
             checkpoint()
             exact = (
-                normalize_type_text(strip_outer_parentheses(value.type_text))
+                normalize_type_text(
+                    strip_outer_parentheses(implicit_value_type(value.type_text) or "")
+                )
                 == normalized_domain
             )
             # An observed function may still quantify hidden indices that
@@ -488,12 +510,13 @@ def _evidence_application_head(type_text: str) -> str | None:
     Unknown/malformed observations have no recognized application head.
     """
     try:
-        if top_level_arrow_count(type_text):
+        value_type = implicit_value_type(type_text)
+        if value_type is None:
             return None
-        relation = parse_relation(type_text)
+        relation = parse_relation(value_type)
         if relation is not None:
             return binary_mixfix_head(relation.operator)
-        parts = split_top_level_application(type_text)
+        parts = split_top_level_application(value_type)
         return strip_outer_parentheses(parts[0]) if len(parts) > 1 else None
     except ValueError:
         return None

@@ -71,6 +71,7 @@ from .reasoning.evidence import (
     evidence_consequences,
     explicit_domains,
     family_names,
+    implicit_value_type,
     indexed_evidence_inputs,
     is_family_transport,
     ready_evidence_declarations,
@@ -2159,7 +2160,23 @@ class _ConstructorSearch:
             proposal = selection.application
             attempted.add(proposal.expression)
             ty = infer(proposal.expression, selection.choice)
-            if ty is None or _INTERNAL_META.search(ty):
+            if ty is None:
+                continue
+            contextual_value = (
+                not top_level_arrow_count(goal.target)
+                and implicit_value_type(ty) is not None
+                and result_head(ty) == result_head(goal.target)
+            )
+            if _INTERNAL_META.search(ty):
+                # Inference alone lacks the expected type. A whole candidate
+                # may still check against this goal, but its provisional type
+                # must never be retained as an intermediate observation.
+                if contextual_value:
+                    evidence_policy.retain(selection)
+                    if solved := finish(proposal.expression, (proposal.expression,)):
+                        solutions.extend(solved)
+                        if len(solutions) >= self.solution_limit:
+                            return tuple(solutions)
                 continue
             evidence_policy.retain(selection)
             self.stats.evidence_terms += 1
@@ -2173,6 +2190,10 @@ class _ConstructorSearch:
             solution = (
                 proposal.expression
                 if normalize_type_text(ty) == normalize_type_text(goal.target)
+                # A hidden-only telescope is a candidate value, not an exact
+                # type match. The checked give below must infer its indices
+                # from this goal; no guessed specialization enters evidence.
+                or (top_level_arrow_count(ty) and contextual_value)
                 else None
             )
             if edge is not None:

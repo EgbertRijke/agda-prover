@@ -31,9 +31,28 @@ application inherits only those dependencies, plus its own recorded choice.
 Consumers attach that lineage to the proof they construct; relation composition
 reports its actual seed and operator dependencies, not a text search of its output.
 Unused observations and abandoned proofs remain censored. An inference rejection
-is invalid; unresolved inferred metas or a resource interruption remain censored.
+is invalid; unresolved inferred metas or a resource interruption alone supply no
+proof credit.
 Fresh validation and the existing source/task/patch-bound proof-credit contract
 are still required before any selected dependency becomes positive.
+
+## Implicit value observations
+
+A term whose remaining parameters are all ordinary implicit binders can be
+proposed as an argument to a structured consumer. The generator compares its
+result shape but retains the original quantified type and expression. It does
+not substitute endpoint names, guess indices, unfold coinductive records or
+claim two displayed types are definitionally equal. Explicit and instance
+arguments remain outside this value view.
+
+Agda infers each complete consuming application. A matching result head can
+also propose checking a whole value against the goal, allowing the expected
+type to infer hidden parameters. An unresolved inferred type is never retained
+as intermediate evidence; only a successful checked completion followed by
+fresh reconstruction validation can receive proof credit. Rejected proposals
+and resource exhaustion preserve the original parent and resource allowance.
+These proposals use the existing contextual-evidence feature switch, shared
+NNUE candidate/feature contract and branch-local dependency ledger.
 
 The joint queue preserves this lineage when a selected constructor proof plan
 uses contextual evidence, as specified by the
