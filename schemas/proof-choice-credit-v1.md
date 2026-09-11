@@ -40,6 +40,13 @@ proof-building paths remain unlabeled; their successful result is not permission
 to mark all explored decisions positive. Singleton/omitted trace batches do not
 acquire fabricated records.
 
+The [retention contract](policy-trace-retention-v1.md) budgets complete batches
+by captured bytes rather than a fixed candidate count. It also reserves all
+fresh-validation annotation growth before publishing a proof's credit. If
+that growth exceeds the allowance, the existing records remain uncredited and
+the omission is reported; the checked proof result is unaffected. This is
+resource-limited diagnostic coverage, not a lineage error or a negative label.
+
 Unvisited, unfinished and accepted-but-unused alternatives remain
 `budget-censored`. An `invalid` label describes the particular attempted Agda
 action in its recorded context, not the falsity of a theorem or a declaration.

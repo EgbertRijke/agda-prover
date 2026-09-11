@@ -129,6 +129,7 @@ class EvidencePolicyTests(unittest.TestCase):
         )
         self.assertEqual(self.router.recorder.omitted, 1)
         large = EvidencePolicy(ORPolicyRouter(), self.goal)
+        large.router.recorder.max_bytes = 1
         selected = large.select(application(f"f{i:03}") for i in range(300))
         self.assertEqual(selected.application.expression, "f000 x")
         self.assertIsNone(selected.choice)

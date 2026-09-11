@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Literal, cast
+from typing import Literal, cast, get_args
 
 POLICY_DECISION_SCHEMA_VERSION = "agdaprover.policy-decision.v1"
 POLICY_CANDIDATE_SCHEMA_VERSION = "agdaprover.policy-candidate.v1"
@@ -27,9 +28,24 @@ CandidateOutcome = Literal[
     "on-validated-proof",
 ]
 
-_MAX_TRACE_DECISIONS = 4096
-_MAX_CANDIDATES_PER_DECISION = 256
+_DEFAULT_TRACE_BYTES = 16 << 20
 _MAX_TEXT_BYTES = 1 << 20
+_OUTCOME_RESERVE = max(len(outcome) for outcome in get_args(CandidateOutcome)) - len(
+    "budget-censored"
+)
+
+
+def _json_size(value: object, *, limit: int | None = None) -> int:
+    """Count compact UTF-8 bytes without allocating a complete encoded copy."""
+    size = 0
+    encoder = json.JSONEncoder(
+        ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    for chunk in encoder.iterencode(value):
+        size += len(chunk.encode("utf-8"))
+        if limit is not None and size > limit:
+            return limit + 1
+    return size
 
 
 def _bounded_text(value: str, label: str) -> str:
@@ -210,7 +226,7 @@ class _RecordedDecision:
             "schema_version": POLICY_DECISION_SCHEMA_VERSION,
             "decision_id": self.decision_id,
             "family": self.family,
-            "state": self.state,
+            "state": deepcopy(self.state),
             "candidate_set": [
                 {
                     **candidate.to_dict(),
@@ -225,8 +241,8 @@ class _RecordedDecision:
             "symbolic_order": list(self.symbolic_order),
             "model_order": list(self.model_order),
             "model_id": self.model_id,
-            "budget_envelope": self.budget_envelope,
-            "provenance": self.provenance,
+            "budget_envelope": dict(self.budget_envelope),
+            "provenance": deepcopy(self.provenance),
             "label_policy": "unvisited-and-unfinished-branches-are-budget-censored",
             "kernel_authority": "agda",
         }
@@ -236,14 +252,36 @@ class _RecordedDecision:
 class PolicyTraceRecorder:
     """Bounded in-memory trace for later provenance-safe dataset extraction."""
 
-    max_decisions: int = _MAX_TRACE_DECISIONS
+    max_decisions: int | None = None
+    max_bytes: int = field(default=_DEFAULT_TRACE_BYTES, kw_only=True)
     _decisions: list[_RecordedDecision] = field(default_factory=list, init=False)
     _by_id: dict[str, _RecordedDecision] = field(default_factory=dict, init=False)
+    _charged_bytes: int = field(default=0, init=False)
+    _proof_credits_omitted: int = field(default=0, init=False)
     omitted: int = 0
 
     def __post_init__(self) -> None:
-        if not 1 <= self.max_decisions <= _MAX_TRACE_DECISIONS:
-            raise ValueError("policy trace capacity is outside its safety bound")
+        if type(self.max_bytes) is not int or self.max_bytes <= 0:
+            raise ValueError("policy trace byte allowance must be a positive integer")
+        if self.max_decisions is not None and (
+            type(self.max_decisions) is not int or self.max_decisions <= 0
+        ):
+            raise ValueError(
+                "policy trace decision allowance must be a positive integer"
+            )
+
+    @property
+    def recorded_decisions(self) -> int:
+        return len(self._decisions)
+
+    def metrics(self) -> dict[str, object]:
+        return {
+            "schema_version": "agdaprover.policy-trace-retention.v1",
+            "max_bytes": self.max_bytes,
+            "max_decisions": self.max_decisions,
+            "charged_bytes": self._charged_bytes,
+            "proof_credits_omitted": self._proof_credits_omitted,
+        }
 
     def record(
         self,
@@ -260,10 +298,11 @@ class PolicyTraceRecorder:
     ) -> str | None:
         if len(candidates) <= 1:
             return None
-        if len(candidates) > _MAX_CANDIDATES_PER_DECISION:
-            self.omitted += 1
-            return None
-        if len(self._decisions) >= self.max_decisions:
+        remaining = self.max_bytes - self._charged_bytes
+        if remaining <= 0 or (
+            self.max_decisions is not None
+            and len(self._decisions) >= self.max_decisions
+        ):
             self.omitted += 1
             return None
         payload = {
@@ -276,15 +315,23 @@ class PolicyTraceRecorder:
         decision = _RecordedDecision(
             decision_id=decision_id,
             family=family,
-            state=state,
+            state=deepcopy(state),
             candidates=candidates,
             symbolic_order=symbolic_order,
             model_order=model_order,
-            model_scores=model_scores,
+            model_scores=dict(model_scores),
             model_id=model_id,
             budget_envelope=dict(budget_envelope),
-            provenance=dict(provenance),
+            provenance=deepcopy(provenance),
         )
+        # Reserve the longest supported outcome for every candidate. Exploration
+        # only shortens JSON's `false` to `true`; marking cannot exceed this charge.
+        reserve = len(candidates) * _OUTCOME_RESERVE
+        charge = _json_size(decision.to_dict(), limit=remaining - reserve) + reserve
+        if charge > remaining:
+            self.omitted += 1
+            return None
+        self._charged_bytes += charge
         self._decisions.append(decision)
         self._by_id[decision_id] = decision
         return decision_id
@@ -298,6 +345,8 @@ class PolicyTraceRecorder:
     ) -> None:
         if decision_id is None or (decision := self._by_id.get(decision_id)) is None:
             return
+        if outcome is not None and outcome not in get_args(CandidateOutcome):
+            raise ValueError("unsupported policy candidate outcome")
         if candidate_id not in {
             candidate.candidate_id for candidate in decision.candidates
         }:
@@ -335,13 +384,29 @@ class PolicyTraceRecorder:
                 != choice.candidate_id
             ):
                 raise ValueError("a proof selects conflicting arms of one decision")
+        # Validation annotations have their own real byte cost. Reserve all of
+        # this proof's growth before assigning any credit; retention exhaustion
+        # is observational and must not turn a checked proof into a failure.
+        updates: dict[str, dict[str, object]] = {}
+        growth = 0
+        remaining = self.max_bytes - self._charged_bytes
+        for decision_id in selected:
+            old = self._by_id[decision_id].provenance
+            updated = {**old, "validated_result": evidence}
+            old_size = _json_size(old)
+            growth += max(
+                0,
+                _json_size(updated, limit=old_size + remaining - growth) - old_size,
+            )
+            if growth > remaining:
+                self._proof_credits_omitted += len(selected)
+                return
+            updates[decision_id] = deepcopy(updated)
+        self._charged_bytes += growth
         for decision_id, candidate_id in selected.items():
             decision = self._by_id[decision_id]
             decision.outcomes[candidate_id] = "on-validated-proof"
-            decision.provenance = {
-                **decision.provenance,
-                "validated_result": dict(evidence),
-            }
+            decision.provenance = updates[decision_id]
 
 
 __all__ = [

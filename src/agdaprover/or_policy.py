@@ -356,8 +356,9 @@ class ORPolicyRouter:
             "symbolic_fallbacks": self.symbolic_fallbacks,
             "unsupported_family_fallbacks": self.unsupported_family_fallbacks,
             "decision_families": dict(sorted(self.family_counts.items())),
-            "trace_decisions": len(self.recorder.to_list()),
+            "trace_decisions": self.recorder.recorded_decisions,
             "trace_decisions_omitted": self.recorder.omitted,
+            "trace_retention": self.recorder.metrics(),
         }
         if self.focused_policy is not None:
             result["focused_accumulator"] = self.focused_policy.metrics()
