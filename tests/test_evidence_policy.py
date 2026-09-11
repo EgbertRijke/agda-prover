@@ -235,11 +235,18 @@ class EvidencePolicyTests(unittest.TestCase):
                 )
                 if isinstance(outcome, Exception):
                     with self.assertRaises(TimeoutError):
-                        engine._solve_with_contextual_evidence(state, goal)
+                        engine._solve_with_contextual_evidence(
+                            state, goal, action_slice=512
+                        )
                 else:
                     self.assertEqual(
-                        engine._solve_with_contextual_evidence(state, goal), ()
+                        engine._solve_with_contextual_evidence(
+                            state, goal, action_slice=512
+                        ),
+                        (),
                     )
+                # A larger local allocation cannot expand the parent's budget.
+                self.assertEqual(session.infer_type.call_count, 1)
                 record = router.recorder.to_list()[0]
                 first, second = record["candidate_set"]
                 self.assertTrue(first["explored"])

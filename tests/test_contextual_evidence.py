@@ -15,18 +15,25 @@ from agdaprover.bridge.contracts import (
     BridgeError,
     BridgeFailure,
 )
-from agdaprover.constructor_search import ProofPlan, constructor_tree_prove
-from agdaprover.contracts import TaskSpec
+from agdaprover.constructor_search import (
+    ConstructorSolution,
+    ProofPlan,
+    _ConstructorSearch,
+    constructor_tree_prove,
+)
+from agdaprover.contracts import GoalInfo, TaskSpec
 from agdaprover.joint import (
     _can_amortize_budget_widening,
     _DeferredBudgetWidening,
     _search_state_digest,
     prove_joint_prefix,
 )
+from agdaprover.premise_search import rank_scope_premises
 from agdaprover.reasoning.evidence import (
     EvidenceTerm,
     evidence_applications,
     family_names,
+    ready_evidence_declarations,
     structured_combinator_applications,
     telescope_introduction,
 )
@@ -38,6 +45,35 @@ from agdaprover.validation import validate_candidate
 
 
 class EvidenceProposalTests(unittest.TestCase):
+    def test_type_former_retrieval_preserves_exclusions_and_limits(self):
+        goal = GoalInfo(0, "Set k", (), (0, 4))
+        declarations = (
+            ("observe", "Container k A → A → Set k"),
+            ("next", "Container k A → A → Set k"),
+            ("Private.forbidden", "Container k A → Set k"),
+            ("observe", "Container k A → A → Set k"),
+        )
+        self.assertEqual(rank_scope_premises(goal, declarations), ())
+        actions = rank_scope_premises(
+            goal,
+            declarations,
+            shallow_only=False,
+            excluded_names=frozenset({"forbidden"}),
+        )
+        self.assertEqual({a.name for a in actions}, {"observe", "next"})
+        self.assertEqual(len(actions), 2)
+        for limit in (0, 1):
+            self.assertEqual(
+                rank_scope_premises(
+                    goal,
+                    declarations,
+                    shallow_only=False,
+                    excluded_names=frozenset({"forbidden"}),
+                    max_candidates=limit,
+                ),
+                actions[:limit],
+            )
+
     def test_builder_constant_functions_are_proposals_with_open_fallback(self):
         terms = (EvidenceTerm("seed", "Tag A"), EvidenceTerm("value", "P A"))
         declarations = (("assemble", "(a : Tag A) → (Tag A → P A) → Bundle a"),)
@@ -186,6 +222,70 @@ class EvidenceProposalTests(unittest.TestCase):
         self.assertEqual([p.expression for p in proposals], ["(field w) x"])
         self.assertEqual(proposals[0].type_text, "")
 
+    def test_type_valued_observation_is_applied_like_other_functions(self):
+        for codomain in ("Set k", "Universe k"):
+            with self.subTest(codomain=codomain):
+                terms = (
+                    EvidenceTerm("observe g", f"(x : A) → {codomain}", 1),
+                    EvidenceTerm("x", "A"),
+                    EvidenceTerm("unrelated", "B"),
+                )
+                proposals = tuple(
+                    evidence_applications(
+                        terms,
+                        (),
+                        endpoint_terms=frozenset(),
+                        relation_heads=frozenset(),
+                    )
+                )
+                self.assertEqual([p.expression for p in proposals], ["(observe g) x"])
+                self.assertEqual(proposals[0].type_text, "")
+
+    def test_ready_result_does_not_require_a_relation_or_abstract_goal(self):
+        for codomain in ("Set k", "Universe k", "Output k"):
+            with self.subTest(codomain=codomain):
+                terms = (EvidenceTerm("g", "Container k A"),)
+                declarations = (
+                    ("observe", f"{{A : Set}} → Container k A → A → {codomain}"),
+                    ("missing", f"Other k A → {codomain}"),
+                )
+                self.assertEqual(
+                    tuple(ready_evidence_declarations(codomain, terms, declarations)),
+                    declarations[:1],
+                )
+
+    def test_same_family_observations_remain_available_as_intermediates(self):
+        terms = (EvidenceTerm("w", "Observer k A"),)
+        declarations = (
+            ("next", "Observer k A → A → Observer k A"),
+            ("survey", "Observer k A → A → Set k"),
+            ("unrelated", "Observer k A → Other k A"),
+            ("missing", "Other k A → Set k"),
+        )
+        self.assertEqual(
+            tuple(ready_evidence_declarations("Set k", terms, declarations)),
+            declarations[:2],
+        )
+        self.assertEqual(
+            tuple(ready_evidence_declarations("Set k", (), declarations)), ()
+        )
+
+    def test_hidden_indices_are_proposed_but_not_textually_instantiated(self):
+        function = EvidenceTerm("survey w", "{i j : A} → Edge i j → Set k", 1)
+        argument = EvidenceTerm("p", "Edge x y")
+        proposals = tuple(
+            evidence_applications(
+                (function, argument, EvidenceTerm("wrong", "Other x y")),
+                (),
+                endpoint_terms=frozenset(),
+                relation_heads=frozenset(),
+            )
+        )
+        self.assertEqual([p.expression for p in proposals], ["(survey w) p"])
+        self.assertEqual(proposals[0].function, function)
+        self.assertEqual(proposals[0].arguments, (argument,))
+        self.assertEqual(proposals[0].type_text, "")
+
 
 class EvidenceFailureTests(unittest.TestCase):
     def test_inference_does_not_hide_resource_or_protocol_failures(self):
@@ -261,6 +361,152 @@ connect C {x} {y} = follow (turn (reach C x)) (reach C y)
 
 @unittest.skipUnless(shutil.which("agda"), "Agda is required")
 class EvidenceKernelTests(unittest.TestCase):
+    def test_same_head_does_not_authorize_incompatible_indices(self):
+        source = """{-# OPTIONS --safe --without-K #-}
+module IndexedNearMiss where
+data Tag : Set where
+  left right : Tag
+data Edge (x : Tag) : Tag → Set where
+  same : Edge x x
+module _ (survey : Edge left left → Set) (p : Edge right right) where
+  goal : Set
+  goal = {!!}
+"""
+        proposals = tuple(
+            evidence_applications(
+                (
+                    EvidenceTerm("survey", "Edge left left → Set"),
+                    EvidenceTerm("p", "Edge right right"),
+                ),
+                (),
+                endpoint_terms=frozenset(),
+                relation_heads=frozenset(),
+            )
+        )
+        self.assertEqual([p.expression for p in proposals], ["survey p"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "IndexedNearMiss.agda"
+            path.write_text(source)
+            with AgdaSession(timeout_seconds=15) as session:
+                (goal,) = session.load_module(path)
+                state = session.current_state()
+                self.assertIsNone(
+                    session.infer_type(
+                        state, goal_id=goal.goal_id, expression=proposals[0].expression
+                    )
+                )
+                self.assertEqual(session.current_state(), state)
+                self.assertEqual(
+                    session.infer_type(state, goal_id=goal.goal_id, expression="p"),
+                    "Edge right right",
+                )
+            self.assertEqual(path.read_text(), source)
+
+    def test_type_valued_observation_infers_hidden_dependent_indices(self):
+        source = """{-# OPTIONS --without-K --guardedness #-}
+module IndexedObservation where
+open import Agda.Primitive using (Level; _⊔_; lsuc)
+data Edge {l : Level} {A : Set l} (x : A) : A → Set l where
+  same : Edge x x
+record Observer {l k : Level} (A : Set l) : Set (l ⊔ lsuc k) where
+  coinductive
+  field
+    survey : {x y : A} → Edge x y → Set k
+open Observer public
+module _ {l k : Level} {A : Set l} (w : Observer {l} {k} A)
+  {x y : A} (p : Edge x y) where
+  goal : Set k
+  goal = {!!}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "IndexedObservation.agda"
+            path.write_text(source)
+            result = prove_joint_prefix(
+                TaskSpec(path, max_candidates=200, timeout_seconds=15)
+            )
+            self.assertEqual(result.status, "verified", result.diagnostics)
+            self.assertGreater(result.search_stats["evidence_inference_queries"], 0)
+            self.assertIn("survey w p", result.patch["replacement"])
+            self.assertTrue(result.validation["fresh_process"])
+            self.assertEqual(result.trust_report["admitted_axioms_and_primitives"], [])
+            self.assertEqual(path.read_text(), source)
+
+    def test_type_valued_record_observations_preserve_universe_parameters(self):
+        for record_kind in ("", "  coinductive\n"):
+            for universe in ("Set", "Universe"):
+                with self.subTest(record_kind=record_kind, universe=universe):
+                    source = f"""{{-# OPTIONS --without-K --guardedness #-}}
+module Observe where
+open import Agda.Primitive using (Level; _⊔_; lsuc)
+Universe = λ l → Set l
+record Observer {{l k : Level}} (A : Set l) : Set (l ⊔ lsuc k) where
+{record_kind}  field
+    survey : A → A → {universe} k
+open Observer public
+module _ {{l k : Level}} {{A : Set l}} (w : Observer {{l}} {{k}} A) (x y : A) where
+  goal : {universe} k
+  goal = {{!!}}
+"""
+                    with tempfile.TemporaryDirectory() as directory:
+                        path = Path(directory) / "Observe.agda"
+                        path.write_text(source)
+                        result = prove_joint_prefix(
+                            TaskSpec(path, max_candidates=200, timeout_seconds=15)
+                        )
+                        self.assertEqual(result.status, "verified", result.diagnostics)
+                        self.assertGreater(
+                            result.search_stats["evidence_inference_queries"], 0
+                        )
+                        self.assertIn("survey", str(result.patch))
+                        self.assertTrue(result.validation["fresh_process"])
+                        self.assertEqual(
+                            result.trust_report["admitted_axioms_and_primitives"], []
+                        )
+                        self.assertEqual(path.read_text(), source)
+
+    def test_rejected_provisional_builder_does_not_cut_off_evidence(self):
+        source = (
+            HEADER
+            + "\ngoal : {A : Set} → Bundle A Link → (x y : A) → Link x y\ngoal = {!!}\n"
+        )
+
+        def provisional_builder(engine, state, goal, *_arguments):
+            # Visible-hole closure alone is not success. Simulate a builder
+            # whose complete reconstruction still leaves hidden parameters.
+            checked = engine.session.commit_proof_action(
+                state, kind="give", goal_id=goal.goal_id, expression="_"
+            )
+            if checked.accepted and checked.child_state is not None:
+                yield ConstructorSolution(checked.child_state, ProofPlan("_"))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "Evidence.agda"
+            path.write_text(source)
+            with (
+                AgdaSession(timeout_seconds=20) as session,
+                patch.object(
+                    _ConstructorSearch,
+                    "_solve_with_structured_builders",
+                    provisional_builder,
+                ),
+            ):
+                (goal,) = session.load_module(path)
+                result = constructor_tree_prove(
+                    session,
+                    goal,
+                    action_budget=180,
+                    timeout_seconds=15,
+                    max_depth=None,
+                    excluded_premises=frozenset({"goal"}),
+                )
+            self.assertEqual(result.status, "solved", result.stats.to_dict())
+            self.assertGreater(result.stats.incomplete_solutions_pruned, 0)
+            self.assertGreater(result.stats.evidence_inference_queries, 0)
+            validation, _ = validate_candidate(
+                path, goal, result.solutions[0].proof_text, timeout_seconds=10
+            )
+            self.assertTrue(validation["checked"], validation)
+
     def check(self, signature, *, expected=True):
         source = HEADER + "\ngoal : " + signature + "\ngoal = {!!}\n"
         with tempfile.TemporaryDirectory() as directory:

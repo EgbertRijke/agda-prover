@@ -2127,12 +2127,18 @@ def rank_scope_premises(
     *,
     excluded_names: frozenset[str] = frozenset(),
     max_candidates: int = DEFAULT_SCOPE_PREMISE_LIMIT,
+    shallow_only: bool = True,
 ) -> tuple[ScopePremiseAction, ...]:
     """Return a deterministic bounded declaration-head batch.
 
     Ranking uses only generic lexical overlap and telescope/result complexity.
     It cannot mark a declaration applicable; the caller must submit every
     retained head to Agda's refinement command.
+
+    Observational composition can set ``shallow_only=False`` to retain type
+    formers and other heads excluded from shallow refinement. It must apply
+    its own support filter and kernel checks. Scope, exclusions, and the
+    candidate limit are unchanged.
     """
 
     if max_candidates <= 0:
@@ -2148,7 +2154,7 @@ def rank_scope_premises(
             or name in seen
             or name in excluded_names
             or short_name in excluded_names
-            or not premise_has_shallow_support(type_text)
+            or (shallow_only and not premise_has_shallow_support(type_text))
         ):
             continue
         seen.add(name)

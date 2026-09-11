@@ -415,24 +415,30 @@ def evidence_applications(
         and not result_head(term.type_text).startswith("Set")
         and result_head(term.type_text) not in relation_heads
     )
-    functions = tuple(
-        term
-        for term in terms
-        if explicit_domains(term.type_text)
-        and not result_head(term.type_text).startswith("Set")
-    )
+    functions = tuple(term for term in terms if explicit_domains(term.type_text))
     for function in functions:
         domain = explicit_domains(function.type_text)[0]
         if _flexible_domain(function.type_text, domain):
             continue
+        normalized_domain = normalize_type_text(strip_outer_parentheses(domain))
+        domain_head = _evidence_application_head(domain)
         for value in sorted(
             values,
             key=lambda t: (t.expression not in endpoint_terms, t.depth, t.expression),
         ):
             checkpoint()
-            if normalize_type_text(
-                strip_outer_parentheses(value.type_text)
-            ) != normalize_type_text(strip_outer_parentheses(domain)):
+            exact = (
+                normalize_type_text(strip_outer_parentheses(value.type_text))
+                == normalized_domain
+            )
+            # An observed function may still quantify hidden indices that
+            # its next explicit argument determines. Textual equality cannot
+            # instantiate those binders. A common structured head proposes
+            # the application; Agda must check the actual dependent indices.
+            if not exact and not (
+                domain_head is not None
+                and domain_head == _evidence_application_head(value.type_text)
+            ):
                 continue
             yield EvidenceApplication(function, (value,))
     for name, ty in declarations:
@@ -526,6 +532,7 @@ def ready_evidence_declarations(
         head = _evidence_application_head(term.type_text)
         if head is not None:
             value_heads.add(head)
+    relevant_heads = {goal_head, *value_heads}
     for name, ty in declarations:
         checkpoint()
         domains = explicit_domains(ty)
@@ -538,7 +545,7 @@ def ready_evidence_declarations(
             ):
                 yield name, ty
         elif (
-            result_head(ty) == goal_head
+            result_head(ty) in relevant_heads
             and _evidence_application_head(domains[0]) in value_heads
         ):
             yield name, ty

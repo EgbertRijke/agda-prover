@@ -1453,7 +1453,12 @@ class _ConstructorSearch:
         )
 
     def _premise_actions(
-        self, state: StateToken, goal: GoalInfo, *, retrieval_limit: int = 64
+        self,
+        state: StateToken,
+        goal: GoalInfo,
+        *,
+        retrieval_limit: int = 64,
+        shallow_only: bool = True,
     ) -> tuple[ScopePremiseAction, ...]:
         key = (state, goal.goal_id)
         if key in self._scoped_actions:
@@ -1473,6 +1478,7 @@ class _ConstructorSearch:
             goal,
             self._scope_catalog,
             excluded_names=self.excluded_premises,
+            shallow_only=shallow_only,
         )
 
     def _read_scoped_premises(
@@ -1706,10 +1712,13 @@ class _ConstructorSearch:
         *,
         retrieval_limit: int = 64,
         function_values: bool = False,
+        shallow_only: bool = True,
     ) -> tuple[ScopePremiseAction, ...]:
         """Return the bounded symbolic tier order, optionally NNUE-tiebroken."""
 
-        actions = self._premise_actions(state, goal, retrieval_limit=retrieval_limit)
+        actions = self._premise_actions(
+            state, goal, retrieval_limit=retrieval_limit, shallow_only=shallow_only
+        )
         if function_values:
             actions = tuple(
                 action
@@ -1905,7 +1914,7 @@ class _ConstructorSearch:
                 )
 
     def _solve_with_contextual_evidence(
-        self, state: StateToken, goal: GoalInfo
+        self, state: StateToken, goal: GoalInfo, *, action_slice: int = 48
     ) -> tuple[ConstructorSolution, ...]:
         """Share kernel-inferred fields/applications with relation composition.
 
@@ -1913,6 +1922,8 @@ class _ConstructorSearch:
         and interaction. No result is published across siblings or sessions.
         The micro-budget spends the caller's actions; a miss preserves every
         existing fallback and never asserts that a premise is irrelevant.
+        Callers enumerating additional alternatives may allocate a larger
+        slice, still bounded by this search's remaining actions and deadline.
         """
         if not self.contextual_evidence_enabled or not isinstance(
             self.session, TermInferenceSession
@@ -1926,9 +1937,7 @@ class _ConstructorSearch:
         )
         families = family_names((*locals_, *(self._scope_catalog or ())))
         target = parse_relation(goal.target, prefix_heads=families)
-        if _INTERNAL_META.search(goal.target) or (
-            target is None and not self._has_opaque_type_head(goal)
-        ):
+        if _INTERNAL_META.search(goal.target):
             return ()
         # Existing direct-edge/higher-path search keeps its own scheduling.
         # This lane is for information hidden behind functions or structures.
@@ -1944,7 +1953,26 @@ class _ConstructorSearch:
         )
         if not values:
             return ()
-        actions = self._ordered_premise_actions(state, goal)
+        actions = self._ordered_premise_actions(
+            state, goal, shallow_only=target is not None
+        )
+        ready_results = (
+            tuple(
+                ready_evidence_declarations(
+                    goal.target,
+                    values,
+                    tuple((a.expression, a.type_text) for a in actions),
+                )
+            )
+            if target is None
+            else ()
+        )
+        if (
+            target is None
+            and not self._has_opaque_type_head(goal)
+            and not ready_results
+        ):
+            return ()
         declarations = (*locals_, *((a.expression, a.type_text) for a in actions))
         evidence_declarations = tuple(
             (a.expression, a.type_text)
@@ -1968,6 +1996,14 @@ class _ConstructorSearch:
                 )
             )
         )
+        if target is None:
+            # A ready structured input can expose a result of any type,
+            # including a universe. Eligibility comes from the supplied
+            # signatures, not a list of goal/type/record names. Each partial
+            # application still needs a contextual Agda inference below.
+            evidence_declarations = tuple(
+                dict.fromkeys((*evidence_declarations, *ready_results))
+            )
         expand_scoped_evidence = (
             target is None
             and (state, goal.goal_id) in self._scoped_actions
@@ -1982,24 +2018,6 @@ class _ConstructorSearch:
             )
             if limit > 64
         )
-        if expand_scoped_evidence:
-            # An abstract family has no constructors, but supplied maps may
-            # connect ready contextual evidence to it. Use only this exact
-            # live scope's ranked declarations and the existing checked,
-            # budgeted evidence closure; do not open unrestricted refinement
-            # on a bare abstract carrier or an unconstrained metavariable.
-            evidence_declarations = tuple(
-                dict.fromkeys(
-                    (
-                        *evidence_declarations,
-                        *ready_evidence_declarations(
-                            goal.target,
-                            values,
-                            tuple((a.expression, a.type_text) for a in actions),
-                        ),
-                    )
-                )
-            )
         endpoints = frozenset((target.left, target.right)) if target else frozenset()
         edge_heads = frozenset((target.operator.split()[0],)) if target else frozenset()
         proposals = evidence_applications(
@@ -2010,7 +2028,7 @@ class _ConstructorSearch:
         )
         if next(proposals, None) is None and not expand_scoped_evidence:
             return ()
-        stop = min(self.action_budget - 1, self.stats.actions_considered + 48)
+        stop = min(self.action_budget - 1, self.stats.actions_considered + action_slice)
         terms = list(values)
         attempted = {term.expression for term in terms}
         seeds: list[tuple[str, str]] = [
@@ -3485,14 +3503,13 @@ class _ConstructorSearch:
         if indexed_solved:
             return
 
-        builder_solved = False
-        for solution in self._solve_with_structured_builders(
+        yield from self._solve_with_structured_builders(
             state, goal, depth, descendants, premise_query_stop
-        ):
-            builder_solved = True
-            yield solution
-        if builder_solved:
-            return
+        )
+        # A builder may close the visible holes but leave hidden parameters
+        # blocked. The outer completion check can reject that provisional
+        # result. On generator resume, retain the other search lanes instead
+        # of treating the yielded builder as an irrevocable solution.
 
         # Concrete one-constructor data/record goals have an invertible
         # introduction just like function goals.  Query it before unrestricted
