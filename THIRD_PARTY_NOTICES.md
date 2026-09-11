@@ -41,4 +41,15 @@ under MIT. Its unmodified copyright and permission notice is preserved in
 The three bundled models are distributed by AgdaProver's authors under
 GPL-3.0-or-later. Their roles, data identities and limitations are documented in
 [the model card](docs/bundled-models.md). No training corpus or training
-infrastructure is included in this product.
+infrastructure is included in AgdaProver.
+
+## Agda-unimath training sources
+
+Continued OR-policy training uses a reviewed selection from
+[agda-unimath](https://github.com/UniMath/agda-unimath), revision
+`48a91b44e97f6c8a94b7ae3ff0fa7aaa631e9b29`, licensed under MIT.
+Its unmodified copyright and permission notice is preserved in
+[licenses/agda-unimath-MIT.txt](licenses/agda-unimath-MIT.txt).
+The earlier standard-library attribution remains applicable to the inherited
+model. Training sources and supporting infrastructure are not included in
+AgdaProver; only the inference weights are bundled.
