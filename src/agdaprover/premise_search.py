@@ -1278,18 +1278,16 @@ def premise_expected_arguments(
             stripped = group.strip()
             if stripped.startswith(("{", "⦃")):
                 continue
-            body = stripped
-            if stripped.startswith("(") and ":" in stripped:
-                body = stripped.split(":", 1)[1].rsplit(")", 1)[0]
-            if any(
-                token in binders and token not in bindings
-                for token in _expression_tokens(body)
-            ):
-                return ()
-            rendered = substitute_surface(body, bindings)
-            if not rendered:
-                return ()
-            expected.append(rendered)
+            for body in binder_domains(group):
+                if any(
+                    token in binders and token not in bindings
+                    for token in _expression_tokens(body)
+                ):
+                    return ()
+                rendered = substitute_surface(body, bindings)
+                if not rendered:
+                    return ()
+                expected.append(rendered)
     return tuple(expected)
 
 

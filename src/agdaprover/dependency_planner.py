@@ -72,10 +72,24 @@ class DependencyPlan:
     proof_relevant_nodes: int
     parallel_inhabitants: int
 
-    def priority(self, name: str) -> tuple[int, int, int, int, int, int]:
+    def priority(
+        self, name: str, *, include_hidden: bool = False
+    ) -> tuple[int, int, int, int, int, int]:
         """Return a deterministic, low-is-good priority for a case variable."""
 
         node = self.tower.visible_node(name)
+        if node is None and include_hidden:
+            # Binding preparation may refer to a kernel context name that is
+            # not yet writable in source. Do not confuse it with a future
+            # binder in the goal telescope or grant elimination authority.
+            node = next(
+                (
+                    candidate
+                    for candidate in reversed(self.tower.nodes)
+                    if candidate.origin == "context" and candidate.name == name
+                ),
+                None,
+            )
         if node is None:
             return (2, 2, 2, 0, 0, len(self.tower.nodes))
         try:

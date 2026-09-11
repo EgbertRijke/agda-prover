@@ -157,6 +157,32 @@ class NamedBinder:
     domain: str
     visibility: Literal["explicit", "implicit", "instance"]
 
+    @property
+    def bindings(self) -> tuple[tuple[str, str], ...] | None:
+        """External argument labels and local names in Agda's rendered binder.
+
+        Grouped names and ``label = local`` aliases describe the same binding
+        interface. Keep both spellings: types refer to locals, whereas named
+        applications must use external labels. Unsupported groups are not
+        silently treated as additional arguments.
+        """
+        result: list[tuple[str, str]] = []
+        index = 0
+        while index < len(self.names):
+            label = self.names[index]
+            if label == "=":
+                return None
+            index += 1
+            local = label
+            if index < len(self.names) and self.names[index] == "=":
+                index += 1
+                if index == len(self.names) or self.names[index] == "=":
+                    return None
+                local = self.names[index]
+                index += 1
+            result.append((label, local))
+        return tuple(result)
+
 
 def telescope_introduction(
     type_text: str,
@@ -309,6 +335,20 @@ def binder_domains(text: str) -> tuple[str, ...]:
     if binder is None:
         return (strip_outer_delimiters(stripped),)
     return (binder.domain,) * len(binder.names)
+
+
+def explicit_domains(type_text: str) -> tuple[str, ...]:
+    """Scan explicit telescope inputs, preserving grouped-binder multiplicity."""
+    try:
+        return tuple(
+            domain
+            for part in split_top_level_arrows(type_text)[:-1]
+            for group in split_adjacent_binders(part) or (part,)
+            if not group.lstrip().startswith(("{", "⦃"))
+            for domain in binder_domains(group)
+        )
+    except ValueError:
+        return ()
 
 
 def parse_named_binder(text: str) -> NamedBinder | None:

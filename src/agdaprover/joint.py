@@ -7,7 +7,7 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -130,6 +130,7 @@ class JointStats(ScopedRetrievalStats):
     case_queries: int = 0
     result_split_queries: int = 0
     copattern_clauses_generated: int = 0
+    context_bindings: int = 0
     copattern_search_enabled: bool = False
     zero_constructor_candidates: int = 0
     zero_constructor_closures: int = 0
@@ -140,6 +141,9 @@ class JointStats(ScopedRetrievalStats):
     focused_batch_goals: int = 0
     focused_fallbacks_deferred: int = 0
     focused_fallbacks_resumed: int = 0
+    observation_fallbacks_deferred: int = 0
+    observation_fallbacks_resumed: int = 0
+    observations_enabled: bool = True
     generated_subgoals: int = 0
     proof_checks: int = 0
     induction_proposals: int = 0
@@ -231,6 +235,14 @@ class _State:
     # A continuation of this exact source state, not a property of later goals.
     # Approximate focused terms may be rejected by Agda or their descendants.
     skip_focused: bool = field(default=False, compare=False)
+    skip_observed: bool = field(default=False, compare=False)
+
+
+@dataclass(frozen=True)
+class _DeferredFallback:
+    state: _State
+    remaining_goals: int
+    kind: Literal["focused", "observation"]
 
 
 @dataclass(frozen=True)
@@ -256,11 +268,18 @@ def _search_state_digest(
     widened_declarations: frozenset[str],
     budget_widened: bool = False,
     skip_focused: bool = False,
+    skip_observed: bool = False,
 ) -> str:
     # Keep the budget tier distinct from source/declaration text, including
     # declarations whose valid names happen to resemble an internal marker.
     payload = json.dumps(
-        (replacement, sorted(widened_declarations), budget_widened, skip_focused),
+        (
+            replacement,
+            sorted(widened_declarations),
+            budget_widened,
+            skip_focused,
+            skip_observed,
+        ),
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -348,6 +367,7 @@ def _accumulate_case_stats(target: JointStats, source: CaseBatchStats) -> int:
     target.case_batches += 1
     target.result_split_queries += source.result_split_queries
     target.copattern_clauses_generated += source.copattern_clauses_generated
+    target.context_bindings += source.context_bindings
     target.copattern_search_enabled |= source.copattern_search_enabled
     target.case_levels += source.levels_completed
     target.induction_proposals += source.induction_proposals
@@ -811,6 +831,13 @@ def _observed_function_equations(
             # clauses merely because one operand happens to be rigid.
             break
         if left_head:
+            if any(
+                name != declaration and _mentions_declaration(left, name)
+                for name in remaining_names
+            ):
+                # An unfinished function is not a constructor pattern. These
+                # are algebraic constraints, not a defining clause block.
+                return ()
             if not has_rigid_mixfix_operand(left, signature):
                 if equations:
                     break
@@ -824,6 +851,11 @@ def _observed_function_equations(
                 continue
             equations.append(f"{left} = {right}")
         elif right_head:
+            if any(
+                name != declaration and _mentions_declaration(right, name)
+                for name in remaining_names
+            ):
+                return ()
             if not has_rigid_mixfix_operand(right, signature):
                 if equations:
                     break
@@ -1073,6 +1105,8 @@ def prove_joint_prefix(
         policy_profile="p0-joint-prefix-search-v1",
     )
     stats = JointStats(
+        observations_enabled=os.environ.get("AGDAPROVER_JOINT_OBSERVATIONS", "1")
+        != "0",
         depth_limit=task.max_depth,
         budget_widening_enabled=os.environ.get("AGDAPROVER_JOINT_BUDGET_WIDENING", "1")
         != "0",
@@ -1219,7 +1253,7 @@ def prove_joint_prefix(
                 # Resume these only once the ordinary frontier is empty. A
                 # successful fast path keeps its original scheduling and incurs
                 # no speculative checker calls to qualify a proposed term.
-                focused_fallbacks: list[tuple[_State, int]] = []
+                deferred_fallbacks: list[_DeferredFallback] = []
                 initial_state = _State(
                     (len(target_goals), 0, 0, sequence),
                     sequence,
@@ -1256,7 +1290,7 @@ def prove_joint_prefix(
                                 depth=state.depth,
                                 steps=state.steps,
                                 states_expanded=stats.states_expanded,
-                                frontier_size=len(queue) + len(focused_fallbacks),
+                                frontier_size=len(queue) + len(deferred_fallbacks),
                                 original_source=original_source,
                             )
                         )
@@ -1279,11 +1313,16 @@ def prove_joint_prefix(
                     widened_declarations: frozenset[str] = frozenset(),
                     budget_widened: bool = False,
                     skip_focused: bool = False,
+                    skip_observed: bool = False,
                 ) -> None:
                     nonlocal saw_exhaustion, sequence
                     replacement = state_source[region_start:state_region_end]
                     digest = _search_state_digest(
-                        replacement, widened_declarations, budget_widened, skip_focused
+                        replacement,
+                        widened_declarations,
+                        budget_widened,
+                        skip_focused,
+                        skip_observed,
                     )
                     if digest in seen or digest in queued:
                         stats.transposition_hits += 1
@@ -1292,11 +1331,11 @@ def prove_joint_prefix(
                         stats.frontier_pruned += 1
                         saw_exhaustion = True
                         return
-                    if len(queue) + len(focused_fallbacks) >= task.max_candidates:
+                    if len(queue) + len(deferred_fallbacks) >= task.max_candidates:
                         # Deferred work must not displace an ordinary candidate
                         # at a tight frontier limit. Retain the resource refusal
                         # if the surviving candidates subsequently fail.
-                        focused_fallbacks.pop()
+                        deferred_fallbacks.pop()
                         stats.frontier_pruned += 1
                         saw_exhaustion = True
                     sequence += 1
@@ -1312,11 +1351,38 @@ def prove_joint_prefix(
                         budget_widened,
                         policy_choices,
                         skip_focused,
+                        skip_observed,
                     )
                     queue.push(next_state.priority, next_state.sequence, next_state)
                     stats.states_enqueued += 1
                     stats.frontier_peak = max(
-                        stats.frontier_peak, len(queue) + len(focused_fallbacks)
+                        stats.frontier_peak, len(queue) + len(deferred_fallbacks)
+                    )
+
+                def defer_fallback(
+                    state: _State,
+                    remaining: int,
+                    kind: Literal["focused", "observation"],
+                ) -> None:
+                    nonlocal saw_exhaustion
+                    if len(queue) + len(deferred_fallbacks) >= task.max_candidates:
+                        stats.frontier_pruned += 1
+                        saw_exhaustion = True
+                        return
+                    continuation = replace(
+                        state,
+                        skip_focused=state.skip_focused or kind == "focused",
+                        skip_observed=state.skip_observed or kind == "observation",
+                    )
+                    deferred_fallbacks.append(
+                        _DeferredFallback(continuation, remaining, kind)
+                    )
+                    if kind == "focused":
+                        stats.focused_fallbacks_deferred += 1
+                    else:
+                        stats.observation_fallbacks_deferred += 1
+                    stats.frontier_peak = max(
+                        stats.frontier_peak, len(queue) + len(deferred_fallbacks)
                     )
 
                 # Independent focused goals form one speculative source batch.
@@ -1404,7 +1470,7 @@ def prove_joint_prefix(
                     stats.focused_batch_goals += len(batch_edits)
 
                 pending_widening: _DeferredBudgetWidening | None = None
-                while queue or pending_widening is not None or focused_fallbacks:
+                while queue or pending_widening is not None or deferred_fallbacks:
                     if pending_widening is not None:
                         previous = pending_widening
                         pending_widening = None
@@ -1423,25 +1489,31 @@ def prove_joint_prefix(
                                 widened_declarations=previous.state.widened_declarations,
                                 budget_widened=True,
                                 skip_focused=previous.state.skip_focused,
+                                skip_observed=previous.state.skip_observed,
                             )
                             stats.budget_widening_fallbacks += 1
-                    if not queue and focused_fallbacks:
-                        fallback, open_count = focused_fallbacks.pop()
+                    if not queue and deferred_fallbacks:
+                        deferred = deferred_fallbacks.pop()
+                        fallback = deferred.state
                         enqueue(
                             original_source[:region_start]
                             + fallback.replacement
                             + original_source[initial_end:],
                             region_start + len(fallback.replacement),
                             fallback.depth,
-                            open_count,
+                            deferred.remaining_goals,
                             fallback.steps,
                             policy_choices=fallback.policy_choices,
                             priority_bias=8,
                             widened_declarations=fallback.widened_declarations,
                             budget_widened=fallback.budget_widened,
-                            skip_focused=True,
+                            skip_focused=fallback.skip_focused,
+                            skip_observed=fallback.skip_observed,
                         )
-                        stats.focused_fallbacks_resumed += 1
+                        if deferred.kind == "focused":
+                            stats.focused_fallbacks_resumed += 1
+                        else:
+                            stats.observation_fallbacks_resumed += 1
                     if not queue:
                         continue
                     # Already-enqueued states may be terminal solutions, so an
@@ -1456,6 +1528,7 @@ def prove_joint_prefix(
                         state.widened_declarations,
                         state.budget_widened,
                         state.skip_focused,
+                        state.skip_observed,
                     )
                     queued.discard(digest)
                     if digest in seen:
@@ -1627,6 +1700,7 @@ def prove_joint_prefix(
                                 state.widened_declarations | {owning_declaration}
                             ),
                             skip_focused=state.skip_focused,
+                            skip_observed=state.skip_observed,
                         )
                         stats.constraint_widening_fallbacks += 1
                     goal_action_start = stats.actions_considered
@@ -1680,6 +1754,8 @@ def prove_joint_prefix(
                         continue
                     if (
                         not fully_widened
+                        and not state.skip_observed
+                        and stats.observations_enabled
                         and owning_declaration is not None
                         and top_level_arrow_count(goal.target) == 0
                         and isinstance(session, TransactionalKernelSession)
@@ -1727,6 +1803,7 @@ def prove_joint_prefix(
                             observed_accepted = True
                             break
                         if observed_accepted:
+                            defer_fallback(state, len(remaining_goals), "observation")
                             # Let the exact theory endpoint reach its
                             # observation without eagerly enumerating an
                             # unrelated constructor forest.  Ambiguous
@@ -1734,6 +1811,8 @@ def prove_joint_prefix(
                             continue
                     elif (
                         not fully_widened
+                        and not state.skip_observed
+                        and stats.observations_enabled
                         and owning_declaration is not None
                         and top_level_arrow_count(goal.target) > 0
                     ):
@@ -1776,6 +1855,9 @@ def prove_joint_prefix(
                                 # Follow the complete, conservatively selected
                                 # constructor-observation block before broader
                                 # structural enumeration.
+                                defer_fallback(
+                                    state, len(remaining_goals), "observation"
+                                )
                                 continue
                     solution_limit = remaining_actions if retain_alternatives else 1
                     focused = (
@@ -1833,16 +1915,7 @@ def prove_joint_prefix(
                         # approximation is not a cut in dependent search. Keep
                         # the original source/lineage for structural fallback,
                         # including after a later or fresh-check rejection.
-                        if len(queue) + len(focused_fallbacks) >= task.max_candidates:
-                            stats.frontier_pruned += 1
-                            saw_exhaustion = True
-                        else:
-                            focused_fallbacks.append((state, current_open))
-                            stats.focused_fallbacks_deferred += 1
-                            stats.frontier_peak = max(
-                                stats.frontier_peak,
-                                len(queue) + len(focused_fallbacks),
-                            )
+                        defer_fallback(state, current_open, "focused")
                     for term in () if fully_widened else terms:
                         try:
                             edit = reconstruct_term_as_clause(
@@ -2547,6 +2620,7 @@ def prove_joint_prefix(
                                 state.widened_declarations | {owning_declaration}
                             ),
                             skip_focused=state.skip_focused,
+                            skip_observed=state.skip_observed,
                         )
                         stats.progressive_widening_fallbacks += 1
 

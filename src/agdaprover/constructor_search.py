@@ -17,15 +17,17 @@ import time
 from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
-from itertools import chain
+from itertools import chain, islice
 from typing import Literal
 
 from .bridge.contracts import StateToken
+from .bridge.interaction import RewriteMode
 from .contracts import ContextEntry, GoalInfo
 from .dependency_planner import goal_has_concrete_nullary_scrutinee
 from .focused import FocusedCandidatesResult, focused_candidates, parse_type
 from .kernel.protocol import (
     CommittedProofAction,
+    GoalViewSession,
     InternalObligationSession,
     PreciseSearchGoalSession,
     ScopeDeclarationSession,
@@ -68,12 +70,14 @@ from .premise_search import (
 )
 from .ranking.evidence_policy import EvidencePolicy
 from .ranking.protocol import SparsePolicyRanker
+from .reasoning.backward import supported_applications
 from .reasoning.classifications import (
     classify_structural_scheduling,
     has_relational_context_evidence,
     is_reflexive_relation_target,
 )
 from .reasoning.evidence import (
+    EvidenceApplication,
     EvidenceTerm,
     evidence_applications,
     evidence_consequences,
@@ -582,6 +586,9 @@ class _ConstructorSearch:
         self._expected_applications_enabled = (
             os.environ.get("AGDAPROVER_EXPECTED_APPLICATIONS", "1") != "0"
         )
+        self._backward_support_enabled = (
+            os.environ.get("AGDAPROVER_BACKWARD_SUPPORT", "1") != "0"
+        )
         self._incremental_relation_evidence = (
             os.environ.get("AGDAPROVER_INCREMENTAL_RELATION_EVIDENCE", "1") != "0"
         )
@@ -840,9 +847,20 @@ class _ConstructorSearch:
             return
         if not isinstance(self.session, TermInferenceSession) or not self._charge():
             return
-        inferred = self.session.infer_type(
-            state, goal_id=goal.goal_id, expression=spec.root_name
-        )
+        if (
+            isinstance(self.session, GoalViewSession)
+            and os.environ.get("AGDAPROVER_REDUCTION_VIEWS", "1") != "0"
+        ):
+            inferred = self.session.infer_type(
+                state,
+                goal_id=goal.goal_id,
+                expression=spec.root_name,
+                mode=RewriteMode.HEAD_NORMAL,
+            )
+        else:
+            inferred = self.session.infer_type(
+                state, goal_id=goal.goal_id, expression=spec.root_name
+            )
         self.stats.recursive_inference_queries += 1
         if inferred is None:
             return
@@ -1357,9 +1375,25 @@ class _ConstructorSearch:
 
     def _goal(self, state: StateToken, goal_id: int) -> GoalInfo | None:
         self.stats.goal_inspections += 1
-        if isinstance(self.session, PreciseSearchGoalSession):
+        goal = None
+        if (
+            isinstance(self.session, GoalViewSession)
+            and os.environ.get("AGDAPROVER_REDUCTION_VIEWS", "1") != "0"
+        ):
+            shallow = next(
+                (g for g in self.session.inspect_state(state) if g.goal_id == goal_id),
+                None,
+            )
+            if shallow is not None and top_level_arrow_count(shallow.target):
+                # Introduction needs the telescope, not normal forms of every
+                # argument/result. Canonical relation comparisons still use
+                # full reduction on the resulting leaves.
+                goal = self.session.inspect_goal_view(
+                    state, goal_id=goal_id, mode=RewriteMode.HEAD_NORMAL
+                )
+        if goal is None and isinstance(self.session, PreciseSearchGoalSession):
             goal = self.session.inspect_search_goal(state, goal_id=goal_id)
-        else:
+        elif goal is None:
             goal = next(
                 (
                     goal
@@ -2171,6 +2205,11 @@ class _ConstructorSearch:
         )
         if not values:
             return ()
+        # Backward composition also consumes this ledger. Ready local
+        # functions remain evidence even when no existing argument permits a
+        # forward application: the expected goal can constrain a newly built
+        # argument. Do not make their visibility depend on forward progress.
+        self._evidence_observations[(state, goal.goal_id)] = values
         actions = self._ordered_premise_actions(
             state, goal, shallow_only=target is not None
         )
@@ -2304,7 +2343,14 @@ class _ConstructorSearch:
                         checked.child_state,
                         ProofPlan(
                             solution,
-                            policy_choices=evidence_policy.dependencies(inputs),
+                            policy_choices=tuple(
+                                dict.fromkeys(
+                                    (
+                                        *evidence_policy.dependencies(inputs),
+                                        *self._helper_choices(goal, inputs),
+                                    )
+                                )
+                            ),
                         ),
                     ),
                 )
@@ -2470,7 +2516,7 @@ class _ConstructorSearch:
                 observed.append(RelationHead(name, canonical, len(observed)))
         self._evidence_heads[(state, goal.goal_id)] = tuple(observed)
         remaining = stop - self.stats.actions_considered
-        while remaining > 0 and observed and len(solutions) < self.solution_limit:
+        while remaining > 0 and len(solutions) < self.solution_limit:
             path = solve_relation_path(
                 self.session,
                 state,
@@ -2482,6 +2528,7 @@ class _ConstructorSearch:
                 prefix_heads=families,
                 excluded_expressions=frozenset(s.proof_text for s in solutions),
                 incremental=self._incremental_relation_evidence,
+                helper_rank=self._helper_ranker(goal),
             )
             self.stats.evidence_path_queries += path.stats.inference_queries
             self.stats.actions_considered += path.stats.inference_queries
@@ -2492,6 +2539,56 @@ class _ConstructorSearch:
                 break
             remaining = stop - self.stats.actions_considered
         return tuple(solutions)
+
+    def _helper_choices(
+        self, goal: GoalInfo, inputs: tuple[str, ...]
+    ) -> tuple[PolicyChoice, ...]:
+        choices = self.policy_router.snapshot_choices("constructor-choice", goal)
+        return tuple(
+            choices[expression] for expression in inputs if expression in choices
+        )
+
+    def _helper_ranker(
+        self, goal: GoalInfo
+    ) -> Callable[[str, tuple[str, ...]], Iterator[str]] | None:
+        if os.environ.get("AGDAPROVER_HELPER_SYNTHESIS", "1") == "0":
+            return None
+
+        def rank(type_text: str, expressions: tuple[str, ...]) -> Iterator[str]:
+            candidates = tuple(
+                policy_candidate(
+                    family="constructor-choice",
+                    tag="construct-local-helper",
+                    expression=expression,
+                    type_text=type_text,
+                    symbolic_key=(index,),
+                    metadata=(("helper-arity", str(explicit_arity(type_text))),),
+                )
+                for index, expression in enumerate(expressions)
+            )
+            before = (
+                self.policy_router.model_items_scored,
+                self.policy_router.model_batches,
+                self.policy_router.model_elapsed_ms,
+                self.policy_router.symbolic_fallbacks,
+            )
+            ranked = self.policy_router.rank(goal, candidates)
+            self.stats.model_calls += self.policy_router.model_items_scored - before[0]
+            self.stats.model_batches += self.policy_router.model_batches - before[1]
+            self.stats.model_elapsed_ms += (
+                self.policy_router.model_elapsed_ms - before[2]
+            )
+            self.stats.symbolic_fallbacks += (
+                self.policy_router.symbolic_fallbacks - before[3]
+            )
+            for candidate in ranked.candidates:
+                if ranked.decision_id is not None:
+                    self.policy_router.recorder.mark(
+                        ranked.decision_id, candidate.candidate_id
+                    )
+                yield candidate.expression
+
+        return rank
 
     def _evidence_choices(
         self, state: StateToken, goal: GoalInfo, *inputs: str
@@ -3108,6 +3205,7 @@ class _ConstructorSearch:
             seed_terms=recursive_seeds,
             prefix_heads=families,
             incremental=self._incremental_relation_evidence,
+            helper_rank=self._helper_ranker(goal),
         )
         self.stats.relation_path = result.stats.to_dict()
         self.stats.evidence_path_queries += result.stats.inference_queries
@@ -3128,7 +3226,10 @@ class _ConstructorSearch:
             return (
                 ConstructorSolution(
                     checked.child_state,
-                    ProofPlan(result.expression),
+                    ProofPlan(
+                        result.expression,
+                        policy_choices=self._helper_choices(goal, tuple(result.inputs)),
+                    ),
                 ),
             )
         return ()
@@ -3736,6 +3837,79 @@ class _ConstructorSearch:
             and len(explicit_domains(proposal.function.type_text))
             == len(proposal.arguments)
         )
+        yield from self._check_evidence_applications(
+            state, goal, proposals, premise_query_stop
+        )
+
+    def _solve_with_backward_support(
+        self, state: StateToken, goal: GoalInfo, premise_query_stop: int
+    ) -> Iterator[ConstructorSolution]:
+        if (
+            not self.contextual_evidence_enabled
+            or not self._backward_support_enabled
+            or self.defer_concrete_premises
+            or _INTERNAL_META.search(goal.target)
+            or top_level_arrow_count(goal.target)
+            or not self._available()
+        ):
+            return
+        # The live feed's membership remains authoritative; the stock bridge
+        # supplies an already-visible catalogue. Neither path uses a lexical
+        # shortlist to decide whether a supported composition exists.
+        self._premise_actions(state, goal)
+        pool = self._scoped_actions.get((state, goal.goal_id))
+        actions = (
+            tuple(action for _rank, action in pool.entries)
+            if pool is not None
+            else rank_scope_premises(
+                goal,
+                tuple(self._scope_catalog or ()),
+                excluded_names=self.excluded_premises,
+                max_candidates=len(self._scope_catalog or ()),
+                shallow_only=False,
+            )
+        )
+        locals_ = tuple(
+            ScopePremiseAction(e.name, e.type, render_declaration_head(e.name))
+            for e in goal.context
+            if e.in_scope and e.name
+        )
+        remaining = min(
+            self.action_budget - self.stats.actions_considered,
+            premise_query_stop - self._scope_premise_queries,
+            self.stats.premise_query_limit - self._scope_premise_queries,
+        )
+        if remaining <= 0:
+            return
+
+        def poll() -> None:
+            checkpoint()
+            if time.monotonic() >= self.deadline:
+                raise TimeoutError("wall-time budget exhausted during premise support")
+
+        proposals = tuple(
+            islice(
+                supported_applications(
+                    goal,
+                    (*locals_, *actions),
+                    excluded_names=self.excluded_premises,
+                    poll=poll,
+                ),
+                remaining,
+            )
+        )
+        yield from self._check_evidence_applications(
+            state, goal, proposals, premise_query_stop
+        )
+
+    def _check_evidence_applications(
+        self,
+        state: StateToken,
+        goal: GoalInfo,
+        proposals: tuple[EvidenceApplication, ...],
+        premise_query_stop: int,
+    ) -> Iterator[ConstructorSolution]:
+        """Shared expected-type checking and NNUE credit for composed evidence."""
         policy = EvidencePolicy(self.policy_router, goal)
         attempted: set[str] = set()
         while self._available() and self._scope_premise_queries < min(
@@ -3938,6 +4112,8 @@ class _ConstructorSearch:
         yield from self._solve_with_expected_applications(
             state, goal, premise_query_stop
         )
+
+        yield from self._solve_with_backward_support(state, goal, premise_query_stop)
 
         families = family_names(
             tuple(self._scope_catalog or ()), universe_names=goal.sort_names

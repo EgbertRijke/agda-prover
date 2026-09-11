@@ -170,7 +170,15 @@ cell-map = {{!!}}
         )
         self.assertTrue(result.validation["fresh_process"])
         self.assertGreaterEqual(len(calls), 2)
-        self.assertEqual(calls[0]["copattern_call"], calls[1]["copattern_call"])
+        # Agda may expose the hidden carrier before the larger construction
+        # slice. That changes the clause spelling, not its corecursive owner
+        # or the projection that authorizes it.
+        self.assertEqual(
+            calls[0]["copattern_call"].root_name, calls[1]["copattern_call"].root_name
+        )
+        self.assertTrue(
+            all(c["copattern_call"].clause_prefix.endswith(".next") for c in calls)
+        )
         self.assertTrue(
             any(c["action_budget"] > calls[0]["action_budget"] for c in calls[1:])
         )

@@ -388,6 +388,10 @@ def _parse_expression(
                     _parse_expression(items[3:separator], budget, depth + 1),
                     _parse_expression(items[separator + 1 :], budget, depth + 1),
                 )
+    if items[0] == "let":
+        # Typed/multiple declarations have layout semantics beyond a simple
+        # value binding. Never reinterpret their colon as an infix operator.
+        raise _FormatError("unsupported let declaration block")
 
     operators = tuple(
         index

@@ -12,6 +12,8 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 
+from .type_syntax import parse_named_binder
+
 _LEXEME = re.compile(
     r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])\'|'
     r'[^\s()\[\]{}:;,→λ∀⦃⦄"]+|[()\[\]{}:;,→λ∀⦃⦄]'
@@ -210,3 +212,111 @@ def substitute_surface(text: str, bindings: dict[str, SurfaceTerm]) -> str | Non
         position = end
     pieces.append(text[position:])
     return "".join(pieces)
+
+
+def scoped_shape_matches(
+    pattern: str, target: str, variables: frozenset[str] = frozenset()
+) -> bool:
+    """A scheduling hint that respects lambda/Pi scope and repeated parameters.
+
+    Only named telescopes and variable lambdas are understood. Unsupported
+    patterns lose the hint, not ordinary kernel search. Canonical names never
+    become substitutions, proof text, type equality, or cache identities.
+    """
+    views = (SurfaceView.parse(pattern), SurfaceView.parse(target))
+    if any(view is None or len(view.lexemes) > 256 for view in views):
+        return False
+    prefix = "agdaprover-shape-bound-"
+    while prefix in pattern or prefix in target or any(prefix in v for v in variables):
+        prefix += "b"
+
+    def canonical(view: SurfaceView) -> str:
+        serial = 0
+
+        def bind(name: str, scope: dict[str, str]) -> str:
+            nonlocal serial
+            value = f"{prefix}{serial}"
+            serial += 1
+            if name != "_":
+                scope[name] = value
+            return value
+
+        def visit(nodes: tuple[_Node, ...], scope: dict[str, str]) -> str:
+            nodes = _ungroup(nodes)
+            arrow = next(
+                (
+                    i
+                    for i, n in enumerate(nodes)
+                    if n.children is None and n.token == "→"
+                ),
+                None,
+            )
+            if arrow is not None:
+                before, after = nodes[:arrow], nodes[arrow + 1 :]
+                local = dict(scope)
+                is_lambda = bool(before and before[0].token == "λ")
+                inputs = before[1:] if is_lambda else before
+                rendered: list[str] = []
+                for node in inputs:
+                    binder = (
+                        parse_named_binder(view.source[node.start : node.end])
+                        if node.children is not None
+                        else None
+                    )
+                    if binder is not None:
+                        bindings = binder.bindings
+                        if bindings is None:
+                            raise ValueError("unsupported binder")
+                        # These nodes need offsets in the original view.
+                        colon = next(
+                            i
+                            for i, n in enumerate(node.children or ())
+                            if n.token == ":"
+                        )
+                        domain = visit((node.children or ())[colon + 1 :], local)
+                        names = " ".join(bind(name, local) for _, name in bindings)
+                        rendered.append(
+                            f"{node.token}{names} : {domain}{_PAIRS[node.token]}"
+                        )
+                    elif is_lambda:
+                        if node.children is not None or node.token in {
+                            "λ",
+                            "∀",
+                            ":",
+                            "=",
+                            ";",
+                            ",",
+                        }:
+                            raise ValueError("unsupported lambda pattern")
+                        rendered.append(bind(node.token, local))
+                    else:
+                        # An ordinary arrow domain does not bind names.
+                        rendered.append(visit((node,), scope))
+                return " ".join(
+                    (
+                        *(("λ",) if is_lambda else ()),
+                        *rendered,
+                        "→",
+                        visit(after, local),
+                    )
+                )
+            rendered = []
+            for node in nodes:
+                if node.children is not None:
+                    rendered.append(
+                        f"{node.token}{visit(node.children, scope)}{_PAIRS[node.token]}"
+                    )
+                elif node.token in {"λ", "∀", ":", "="}:
+                    raise ValueError("unsupported scoped syntax")
+                else:
+                    rendered.append(scope.get(node.token, node.token))
+            return " ".join(rendered)
+
+        return visit(_nodes(view), {})
+
+    try:
+        left, right = views
+        assert left is not None and right is not None
+        return match_surface(canonical(left), canonical(right), variables) is not None
+    except (ValueError, StopIteration, RecursionError):
+        return False

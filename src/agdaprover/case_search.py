@@ -21,6 +21,7 @@ from typing import Literal
 
 from .actions import RefinementCandidate
 from .bridge.contracts import StateToken
+from .bridge.interaction import ClauseAction
 from .constructor_search import (
     ConstructorResult,
     ConstructorStats,
@@ -32,6 +33,8 @@ from .focused import focused_prove
 from .kernel.auxiliary import AuxiliarySessions, load_kernel_project
 from .kernel.p0 import AgdaLoadError, AgdaSession, open_kernel_session
 from .kernel.protocol import (
+    ClauseInteractionSession,
+    CompletionCheckSession,
     KernelSession,
     KernelSessionFactory,
     ResultSplittingSession,
@@ -138,6 +141,7 @@ class CaseBatchStats(ScopedRetrievalStats):
     result_split_queries: int = 0
     copattern_clauses_generated: int = 0
     copattern_search_enabled: bool = False
+    context_bindings: int = 0
     case_lookahead_queries: int = 0
     case_lookahead_loads: int = 0
     case_lookahead_elapsed_ms: float = 0.0
@@ -827,8 +831,13 @@ def _batched_case_prove(
     current_end = initial_end
     depth = 0
     case_split_seen = False
+    context_binding_seen = False
     copattern_prefixes: set[str] = set()
     copattern_search_enabled = os.environ.get("AGDAPROVER_COPATTERN_SEARCH", "1") != "0"
+    context_binding_enabled = os.environ.get("AGDAPROVER_CONTEXT_BINDING", "1") != "0"
+    clause_operations_enabled = (
+        os.environ.get("AGDAPROVER_CLAUSE_OPERATIONS", "1") != "0"
+    )
     stats.copattern_search_enabled = copattern_search_enabled
     recursive_call: RecursiveCallSpec | None = None
     recursive_split_depth: int | None = None
@@ -1260,6 +1269,11 @@ def _batched_case_prove(
                             time.monotonic() - load_started
                         ) * 1000.0
                 stats.states_expanded += 1
+                check_candidate = (
+                    active_session.check_complete_candidate
+                    if isinstance(active_session, CompletionCheckSession)
+                    else active_session.check_candidate
+                )
                 target_goals = tuple(
                     goal
                     for goal in loaded
@@ -1305,6 +1319,31 @@ def _batched_case_prove(
                         if root_name is not None
                         else None
                     )
+                    if (
+                        clause_operations_enabled
+                        and scheduling_lhs is not None
+                        and scheduling_lhs.lstrip().startswith(("...", "…"))
+                        and isinstance(active_session, ClauseInteractionSession)
+                        and isinstance(active_session, TransactionalKernelSession)
+                    ):
+                        stats.actions_considered += 1
+                        stats.case_queries += 1
+                        expanded = active_session.check_clause_action(
+                            active_session.current_state(),
+                            goal_id=goal.goal_id,
+                            action=ClauseAction("ellipsis"),
+                        )
+                        if expanded.accepted:
+                            try:
+                                edit = reconstruct_case_split(
+                                    current_source, goal, expanded.clauses
+                                )
+                            except ValueError:
+                                pass
+                            else:
+                                edits.append(edit)
+                                context_binding_seen = True
+                                continue
                     scheduling_arguments = (
                         _clause_arguments(scheduling_lhs, root_name)
                         if scheduling_lhs is not None and root_name is not None
@@ -1464,7 +1503,7 @@ def _batched_case_prove(
                                 stats.actions_considered += 1
                                 stats.actions_generated += 1
                                 stats.proof_checks += 1
-                                checked_parameter = active_session.check_candidate(
+                                checked_parameter = check_candidate(
                                     goal.goal_id, candidate
                                 )
                                 if checked_parameter.accepted:
@@ -1678,7 +1717,7 @@ def _batched_case_prove(
                                 stats.actions_considered += 1
                                 stats.actions_generated += 1
                                 stats.proof_checks += 1
-                                checked_program = active_session.check_candidate(
+                                checked_program = check_candidate(
                                     goal.goal_id, expression
                                 )
                                 if checked_program.accepted:
@@ -1815,7 +1854,7 @@ def _batched_case_prove(
                                 stats.actions_considered += 1
                                 stats.actions_generated += 1
                                 stats.proof_checks += 1
-                                checked_program = active_session.check_candidate(
+                                checked_program = check_candidate(
                                     goal.goal_id, constructor
                                 )
                                 if checked_program.accepted:
@@ -1943,8 +1982,8 @@ def _batched_case_prove(
                         split = active_session.check_result_split(
                             active_session.current_state(), goal_id=goal.goal_id
                         )
-                        # Restrict this lane to new result projections, not the
-                        # implicit-argument naming that make_case also offers.
+                        # Result projections have their own structural lane.
+                        # Context binding uses the ordinary ranked case actions.
                         prefixes = tuple(
                             clause.rsplit(" =", 1)[0].strip()
                             for clause in split.clauses
@@ -1981,7 +2020,7 @@ def _batched_case_prove(
                     # arbitrary result) are discovered from the live scope;
                     # neither the source datatype nor the declaration name is
                     # built into this rule.
-                    if case_split_seen and available():
+                    if (case_split_seen or context_binding_seen) and available():
                         if scope_catalog is None:
                             scope_catalog = (
                                 scope_declarations(goal, active_session.current_state())
@@ -2042,9 +2081,7 @@ def _batched_case_prove(
                             stats.actions_considered += 1
                             stats.actions_generated += 1
                             stats.proof_checks += 1
-                            checked_leaf = active_session.check_candidate(
-                                goal.goal_id, expression
-                            )
+                            checked_leaf = check_candidate(goal.goal_id, expression)
                             if checked_leaf.accepted:
                                 stats.local_closures += 1
                                 edits.append(
@@ -2108,7 +2145,7 @@ def _batched_case_prove(
                             continue
                         stats.actions_considered += 1
                         stats.proof_checks += 1
-                        checked_zero = active_session.check_candidate(
+                        checked_zero = check_candidate(
                             goal.goal_id, zero_action.expression
                         )
                         if not checked_zero.accepted:
@@ -2885,11 +2922,9 @@ def _batched_case_prove(
                                                     stats.actions_generated += 1
                                                     stats.actions_considered += 1
                                                     stats.recursive_function_lift_queries += 1
-                                                    checked_lift = (
-                                                        active_session.check_candidate(
-                                                            goal.goal_id,
-                                                            expression,
-                                                        )
+                                                    checked_lift = check_candidate(
+                                                        goal.goal_id,
+                                                        expression,
                                                     )
                                                     if checked_lift.accepted:
                                                         lifted_edit = (
@@ -2937,10 +2972,8 @@ def _batched_case_prove(
                                         stats.actions_generated += 1
                                         stats.actions_considered += 1
                                         stats.recursive_function_lift_queries += 1
-                                        checked_candidate = (
-                                            active_session.check_candidate(
-                                                goal.goal_id, expression
-                                            )
+                                        checked_candidate = check_candidate(
+                                            goal.goal_id, expression
                                         )
                                         if not checked_candidate.accepted:
                                             continue
@@ -3433,10 +3466,8 @@ def _batched_case_prove(
                                             stats.actions_generated += 1
                                             stats.actions_considered += 1
                                             stats.recursive_function_lift_queries += 1
-                                            checked_tower = (
-                                                active_session.check_candidate(
-                                                    goal.goal_id, proof
-                                                )
+                                            checked_tower = check_candidate(
+                                                goal.goal_id, proof
                                             )
                                             if checked_tower.accepted:
                                                 lifted_edit = reconstruct_case_split(
@@ -5238,10 +5269,8 @@ def _batched_case_prove(
                                         stats.actions_considered += 1
                                         stats.actions_generated += 1
                                         stats.proof_checks += 1
-                                        checked_transformation = (
-                                            active_session.check_candidate(
-                                                goal.goal_id, expression
-                                            )
+                                        checked_transformation = check_candidate(
+                                            goal.goal_id, expression
                                         )
                                         if not checked_transformation.accepted:
                                             continue
@@ -5274,7 +5303,7 @@ def _batched_case_prove(
                             stats.premise_queries += 1
                             stats.result_determined_premise_queries += 1
                             stats.proof_checks += 1
-                            checked_direct = active_session.check_candidate(
+                            checked_direct = check_candidate(
                                 goal.goal_id, direct_expression
                             )
                             if not checked_direct.accepted:
@@ -5291,8 +5320,31 @@ def _batched_case_prove(
                     case_actions = [
                         RefinementCandidate.case_split(entry.name, entry.type)
                         for entry in goal.context
-                        if entry.in_scope and entry.name
+                        # Interaction targets include source-hidden binders.
+                        # Only term construction requires source visibility;
+                        # Agda can bind these inputs before splitting them.
+                        if entry.name and (entry.in_scope or context_binding_enabled)
                     ]
+                    hidden = tuple(
+                        entry
+                        for entry in goal.context
+                        if entry.name and not entry.in_scope
+                    )
+                    if (
+                        clause_operations_enabled
+                        and context_binding_enabled
+                        and len(hidden) > 1
+                        and isinstance(active_session, ClauseInteractionSession)
+                    ):
+                        # A batch is a single Agda operation, not a product of
+                        # independently generated edits. Singles remain as
+                        # alternatives if one subject is a module/let parameter.
+                        case_actions.append(
+                            RefinementCandidate.case_split(
+                                " ".join(entry.name for entry in hidden),
+                                " → ".join(entry.type for entry in hidden),
+                            )
+                        )
                     dependency_plan: DependencyPlan | None = None
                     try:
                         dependency_plan = build_dependency_plan(goal)
@@ -5410,6 +5462,7 @@ def _batched_case_prove(
                         ),
                     )
                     structural_attempted = False
+                    structural_slice_exhausted = False
                     if (
                         case_split_seen
                         and scheduling_classification.structural_construction_available
@@ -5440,6 +5493,9 @@ def _batched_case_prove(
                             case_alternatives_remain=bool(case_actions),
                             copattern_spec=copattern_call,
                         )
+                        structural_slice_exhausted = (
+                            structural.status == "resource-exhausted"
+                        )
                         if structural.solutions:
                             stats.structural_leaf_closures += 1
                             edits.append(
@@ -5465,7 +5521,7 @@ def _batched_case_prove(
                         current_goal: GoalInfo = goal,
                     ) -> tuple[object, ...]:
                         priority = (
-                            plan.priority(action.expression)
+                            plan.priority(action.expression, include_hidden=True)
                             if plan is not None
                             else (2, 2, 2, 0, 0, 0)
                         )
@@ -5533,16 +5589,21 @@ def _batched_case_prove(
                         action.expression: action for action in case_actions
                     }
                     context_types = {
-                        entry.name: entry.type
-                        for entry in goal.context
-                        if entry.in_scope and entry.name
+                        entry.name: entry.type for entry in goal.context if entry.name
+                    }
+                    source_visible = {
+                        entry.name for entry in goal.context if entry.in_scope
                     }
                     ranked_cases = rank_policy(
                         goal,
                         tuple(
                             policy_candidate(
                                 family="case-variable",
-                                tag="eliminate-local",
+                                tag=(
+                                    "eliminate-local"
+                                    if action.expression in source_visible
+                                    else "bind-context-local"
+                                ),
                                 expression=action.expression,
                                 type_text=context_types.get(
                                     action.expression, action.local_type or "unknown"
@@ -5564,6 +5625,14 @@ def _batched_case_prove(
                         for candidate in ranked_cases
                     ]
                     case_choices = active_policy.snapshot_choices("case-variable", goal)
+                    # Exposing a binder does not eliminate any cases. Compare
+                    # actual eliminations first, keeping the learned ordering
+                    # within each group; only prepare a new binding if none is
+                    # available. This also avoids kernel lookahead on edits
+                    # whose sole effect is to name an existing argument.
+                    case_actions.sort(
+                        key=lambda action: action.expression not in source_visible
+                    )
                     accepted_cases: list[
                         tuple[
                             dict[str, object],
@@ -5571,7 +5640,13 @@ def _batched_case_prove(
                             int,
                         ]
                     ] = []
+                    case_prefixes: dict[str, tuple[str, ...]] = {}
                     for case_action in case_actions:
+                        if (
+                            accepted_cases
+                            and case_action.expression not in source_visible
+                        ):
+                            break
                         if not available():
                             raise TimeoutError(
                                 "batched case search exhausted its action budget"
@@ -5583,9 +5658,19 @@ def _batched_case_prove(
                             active_policy.recorder.mark(
                                 choice.decision_id, choice.candidate_id
                             )
-                        checked_case = active_session.check_case_split(
-                            goal.goal_id, case_action.expression
-                        )
+                        subjects = tuple(case_action.expression.split())
+                        if isinstance(
+                            active_session, ClauseInteractionSession
+                        ) and isinstance(active_session, TransactionalKernelSession):
+                            checked_case = active_session.check_clause_action(
+                                active_session.current_state(),
+                                goal_id=goal.goal_id,
+                                action=ClauseAction("variables", subjects),
+                            )
+                        else:
+                            checked_case = active_session.check_case_split(
+                                goal.goal_id, case_action.expression
+                            )
                         if not checked_case.accepted:
                             if choice is not None:
                                 active_policy.recorder.mark(
@@ -5604,7 +5689,24 @@ def _batched_case_prove(
                             )
                         except ValueError:
                             continue
+                        prefixes = tuple(
+                            clause.rsplit(" =", 1)[0].strip()
+                            for clause in checked_case.clauses
+                        )
+                        if (
+                            case_action.expression not in source_visible
+                            and current_clause_lhs is not None
+                            and all(
+                                " ".join(prefix.split())
+                                == " ".join(current_clause_lhs.split())
+                                for prefix in prefixes
+                            )
+                        ):
+                            continue
+                        case_prefixes[case_action.expression] = prefixes
                         accepted_cases.append((proposed_edit, case_action, subgoals))
+                        if case_action.expression not in source_visible:
+                            break
                         if subgoals == 0:
                             stats.zero_constructor_closures += 1
                             break
@@ -5626,12 +5728,19 @@ def _batched_case_prove(
                         # tree and try applications/projections/construction
                         # in this leaf instead of restarting at the root.
                         if (
-                            (case_split_seen or copattern_prefix is not None)
+                            (
+                                case_split_seen
+                                or context_binding_seen
+                                or copattern_prefix is not None
+                            )
                             and (
                                 not structural_attempted
-                                # Copattern construction received only a
-                                # slice while these now-rejected alternatives
-                                # remained. Retry with the shared remainder.
+                                # A preliminary construction slice reserves
+                                # work for case alternatives. If Agda rejects
+                                # all of them, that reservation is obsolete:
+                                # retry exhausted construction with the shared
+                                # remainder, for any leaf, not only copatterns.
+                                or (structural_slice_exhausted and bool(case_actions))
                                 or (copattern_call is not None and bool(case_actions))
                             )
                             and not unresolved_program_dependencies
@@ -5679,7 +5788,7 @@ def _batched_case_prove(
                         local_types = {
                             entry.name: entry.type
                             for entry in goal.context
-                            if entry.in_scope and entry.name
+                            if entry.name
                         }
 
                         preferred_cases = tuple(
@@ -5784,6 +5893,23 @@ def _batched_case_prove(
                                     item[3][3],
                                 ),
                             )
+                    if copattern_prefix is not None:
+                        # Preserve kernel-established projection ownership when
+                        # an argument binding or split changes its clause head.
+                        copattern_prefixes.update(
+                            case_prefixes[selected_action.expression]
+                        )
+                    if selected_action.expression not in source_visible:
+                        # Binding is preparation, not recursive descent. The
+                        # next checked context decides which eliminations exist.
+                        stats.context_bindings += 1
+                        context_binding_seen = True
+                        stats.generated_subgoals += selected_subgoals
+                        edits.append(selected_edit)
+                        selected_choice = case_choices.get(selected_action.expression)
+                        if selected_choice is not None:
+                            level_choices.append(selected_choice)
+                        continue
                     case_split_seen = True
                     if root_name is not None and selected_action.local_type is not None:
                         root_arity = explicit_arity(root_goal.target)

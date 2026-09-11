@@ -26,15 +26,44 @@ remaining obligations. Joint, guided and one-step reconstruction share this
 behavior. Such a preview is not an invalid task. Partial reload success is not
 proof acceptance; completed source still requires fresh strict validation.
 
-Joint search treats fast implicational inhabitants as proposals, not as proof
-authority. It retains a bounded, source-local structural continuation and resumes
+Source visibility and interaction accessibility are distinct. Named kernel
+context entries that are not yet writable in source are eligible for Agda's
+`make_case` binding operation, not for immediate term construction. Agda chooses
+the concrete binding syntax and rejects illegal targets (including module or
+local lambda parameters); search does not manufacture a telescope. Hidden and
+instance arguments use the same path, including inside dependent copatterns.
+New clause heads inherit an existing kernel-established projection owner.
+Binding preparation is not counted as recursive descent.
+
+The `case-variable` policy family distinguishes `bind-context-local` from
+`eliminate-local`. Existing eliminations are compared before binding preparation;
+learned ordering is retained within each group. Only when none is available is
+the first kernel-accepted binding exposed, without elimination lookahead on
+that preparatory edit. The dependency planner can rank hidden context nodes
+without marking them visible or granting elimination authority. `context_bindings`
+counts committed binding edits; `case_queries` and normal work budgets include
+the attempted kernel calls. `AGDAPROVER_CONTEXT_BINDING=0` disables this lane.
+
+Joint search treats fast implicational inhabitants and definitions inferred from
+source observations as proposals, not as proof authority. It retains a bounded,
+source-local structural continuation and resumes
 it only after the ordinary frontier is exhausted. Rejected elaborations, failed
 descendants and fresh-validation rejection cannot silently remove that fallback.
 The continuation skips the same approximate search once; changed goals start
 normally. Its exact search identity includes that distinction. Pending work shares
 the frontier/resource bounds and appears in principal-variation frontier counts.
-`focused_fallbacks_deferred` and `focused_fallbacks_resumed` count the continuations;
-no extra checker calls or resumed work occur on a successful fast path.
+`focused_fallbacks_deferred` and `focused_fallbacks_resumed` count implicational
+continuations. `observation_fallbacks_deferred` and
+`observation_fallbacks_resumed` count observed-definition continuations (including
+nullary values). No extra checker calls or resumed work occur on a successful
+fast path. `AGDAPROVER_JOINT_OBSERVATIONS=0` disables observation shortcuts;
+`observations_enabled` records the setting. These continuations cannot increase
+the original action, depth, frontier, resource or time allowance.
+
+Other unfinished functions cannot occur as constructor patterns in inferred
+clauses. This syntactic screen does not establish that the remaining patterns
+are valid: Agda still checks every proposal. Rejected patterns resume ordinary
+search rather than turn a valid input goal into a dead end.
 
 With exact live-scope retrieval enabled, constructor search tries supplied values
 before structural builders and evidence composition. A candidate may have ordinary
@@ -135,6 +164,34 @@ Scope filtering, symbolic fallback, exact-parent rejection and policy-choice
 lineage remain shared. Checks spend the current action/premise budget and count
 as `proof_checks` and `premise_queries`, not inference queries. Provisional success
 does not cut off alternatives on generator resume or bypass fresh validation.
+
+## Goal-directed supported composition
+
+Before broad premise refinement, shared constructor search also joins supplied
+functions to evidence for their result-determined inputs. A consumer's result
+is matched against the goal; its instantiated input types select available
+argument expressions. Grouped explicit binders retain their multiplicity.
+Arguments can be whole function values, values with hidden parameters, or
+applications whose explicit operands are fixed by the requested input type.
+No relation, constructor, library name or minimum number of local paths selects
+this operation.
+
+The controller uses the already authorized live premise membership, or the
+stock bridge's already visible catalogue, plus in-scope locals. This join is
+not restricted by the ordinary lexical shortlist. It does not expand scope or
+bypass excluded declarations. Proposals enter the same `evidence-application-v1`
+NNUE decision family and expected-type checker as other evidence applications.
+They spend existing action/premise/verifier budgets; generation polls resource,
+cancellation and deadline checks. `AGDAPROVER_BACKWARD_SUPPORT=0` disables this
+additional pass for controlled comparisons.
+
+Matching preserves expression grouping and supplies hints, not type equality.
+Unapplied source values retain their quantified signatures; generated leaf
+applications carry no invented inferred type. Agda checks the whole composition
+and resolves implicit arguments. Unsupported syntax or unresolved dependencies
+decline the hint; rejected proposals leave ordinary search available. This is
+a shallow, budgeted join, not exhaustive recursive backward search. Fresh
+validation remains mandatory.
 
 ## Scope-derived universes and relation composition
 

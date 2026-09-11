@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 from ..bridge.contracts import StateToken
+from ..bridge.interaction import ClauseAction, RewriteMode
 from ..contracts import CandidateCheck, CaseSplitCheck, GoalInfo, RefinementCheck
 from ..project_configuration import ProjectConfiguration
 from ..retrieval import ScopedPremises
@@ -64,6 +65,56 @@ class ResultSplittingSession(Protocol):
     def check_result_split(
         self, state: StateToken, *, goal_id: int
     ) -> CaseSplitCheck: ...
+
+
+@runtime_checkable
+class ClauseInteractionSession(Protocol):
+    """Full, non-mutating Agda clause construction, including subject batches."""
+
+    def check_clause_action(
+        self, state: StateToken, *, goal_id: int, action: ClauseAction
+    ) -> CaseSplitCheck: ...
+
+
+@runtime_checkable
+class HelperTypeSession(Protocol):
+    """Dependent helper signatures inferred by Agda in the selected scope."""
+
+    def helper_signature(
+        self,
+        state: StateToken,
+        *,
+        goal_id: int,
+        application: str,
+        mode: RewriteMode = RewriteMode.NORMAL,
+    ) -> str | None: ...
+
+
+@runtime_checkable
+class CompletionCheckSession(Protocol):
+    """Reject apparently closed terms that introduce hidden obligations."""
+
+    def check_complete_candidate(
+        self, goal_id: int, expression: str
+    ) -> CandidateCheck: ...
+
+
+@runtime_checkable
+class GoalViewSession(Protocol):
+    """Choose reification without changing proof-state identity or scope."""
+
+    def inspect_goal_view(
+        self, state: StateToken, *, goal_id: int, mode: RewriteMode
+    ) -> GoalInfo | None: ...
+
+    def infer_type(
+        self,
+        state: StateToken,
+        *,
+        goal_id: int,
+        expression: str,
+        mode: RewriteMode = RewriteMode.NORMAL,
+    ) -> str | None: ...
 
 
 @runtime_checkable
@@ -199,13 +250,18 @@ class KernelSessionFactory(Protocol):
 
 
 __all__ = [
+    "ClauseInteractionSession",
+    "CompletionCheckSession",
     "CommittedProofAction",
+    "GoalViewSession",
+    "HelperTypeSession",
     "InstantiatedGoalSession",
     "InternalObligationSession",
     "KernelSession",
     "KernelSessionFactory",
     "PreciseSearchGoalSession",
     "ProjectRevisionSession",
+    "ResultSplittingSession",
     "ScopeDeclarationSession",
     "ScopedRetrievalSession",
     "TermInferenceSession",

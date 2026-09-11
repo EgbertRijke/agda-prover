@@ -38,6 +38,7 @@ from agdaprover.reasoning.evidence import (
     ready_evidence_declarations,
     structured_combinator_applications,
     telescope_introduction,
+    transport_index_labels,
 )
 from agdaprover.reconstruction import apply_source_edit
 from agdaprover.relation_path import parse_relation, relation_operation_shape
@@ -47,6 +48,46 @@ from agdaprover.validation import validate_candidate
 
 
 class EvidenceProposalTests(unittest.TestCase):
+    def test_builder_readiness_preserves_scoped_names_and_result_parameters(self):
+        declarations = (
+            (
+                "assemble",
+                "{A = A₁ : Set} → Pack A₁ (λ a₁ → (x₃ : A₁) → Link a₁ x₃) → (A₁ → A₁) → Output A₁",
+            ),
+        )
+        source = "Pack A (λ a → (x : A) → Link a x)"
+        self.assertTrue(
+            has_structured_builder(f"{source} → Output A", (), declarations)
+        )
+        self.assertFalse(
+            has_structured_builder(f"{source} → Output B", (), declarations)
+        )
+        self.assertFalse(
+            has_structured_builder(
+                "Pack A (λ a → (x : A) → Link x a) → Output A", (), declarations
+            )
+        )
+
+    def test_transfer_uses_external_labels_not_shadowed_endpoint_names(self):
+        for binders, left, right in (
+            ("{x y : A}", "x", "y"),
+            ("{x = x₁ : A} {y = y₁ : A}", "x₁", "y₁"),
+            ("{x = from y = to : A}", "from", "to"),
+        ):
+            with self.subTest(binders=binders):
+                signature = (
+                    f"(F : A → Set) {binders} → R {left} {right} → F {left} → F {right}"
+                )
+                self.assertEqual(
+                    transport_index_labels(signature, {"R": 2}), ("x", "y")
+                )
+        self.assertIsNone(
+            transport_index_labels(
+                "(F : A → Set) {x = u : A} {y = u : A} → R u u → F u → F u",
+                {"R": 2},
+            )
+        )
+
     def test_builder_readiness_requires_more_than_a_shared_domain_head(self):
         for family, builder in (("Bundle", "assemble"), ("Container", "make")):
             with self.subTest(family=family):
@@ -487,7 +528,13 @@ module _ {A : Set} {P : A → Set} (w : Source A P) (x : A) where
                     # without an inference query.
                     with (
                         tempfile.TemporaryDirectory() as directory,
-                        patch.dict("os.environ", {"AGDAPROVER_EXPECTED_EVIDENCE": "0"}),
+                        patch.dict(
+                            "os.environ",
+                            {
+                                "AGDAPROVER_EXPECTED_EVIDENCE": "0",
+                                "AGDAPROVER_BACKWARD_SUPPORT": "0",
+                            },
+                        ),
                     ):
                         path = Path(directory) / "HiddenObservation.agda"
                         path.write_text(source)
@@ -719,6 +766,17 @@ module _ {{l k : Level}} {{A : Set l}} (w : Observer {{l}} {{k}} A) (x y : A) wh
     def test_projection_map_constrains_a_structured_function_argument(self):
         self.check("{A B : Set} → Bundle (Tuple A B) Link → Bundle A Link")
 
+    def test_backward_composition_retains_functions_without_ready_arguments(self):
+        # There is no Tuple in the local context to feed to the function.
+        # Forward saturation therefore has no application to infer, but
+        # backward mapping can constrain and construct the needed Tuple.
+        expression, _ = self.check(
+            "{A B : Set} (a : A) (b : B) → "
+            "((z : Tuple A B) → Link (tuple a b) z) → "
+            "(x : A) → Link a x"
+        )
+        self.assertIn("lift", expression)
+
     def test_binary_evidence_refinement_uses_instantiated_fields(self):
         self.check(
             "{A B : Set} → Bundle A Link → Bundle B Link → Bundle (Tuple A B) Link"
@@ -726,6 +784,12 @@ module _ {{l k : Level}} {{A : Set l}} (w : Observer {{l}} {{k}} A) (x y : A) wh
 
     def test_dependent_evidence_is_transferred_using_a_supplied_operation(self):
         self.check("{A : Set} {P : A → Set} (a b : A) → Link a b → P a → P b")
+
+    def test_dependent_transfer_preserves_shadowed_argument_labels(self):
+        expression, _ = self.check(
+            "{A : Set} {P : A → Set} (x y : A) → Link x y → P x → P y"
+        )
+        self.assertIn("move", expression)
 
     def test_structured_builder_preserves_evidence_for_dependent_transfer(self):
         expression, _ = self.check(

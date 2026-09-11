@@ -31,6 +31,9 @@
     "normalize",
     "try-action",
     "case-split",
+    "make-clause",
+    "helper-signature",
+    "goal-view",
     "check-definition",
     "validate-patch",
     "close"

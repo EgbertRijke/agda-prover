@@ -15,9 +15,9 @@ from itertools import product
 from ..notation import binary_mixfix_head, render_application, strip_outer_parentheses
 from ..relation_path import parse_relation
 from ..resource_budget import checkpoint
+from ..surface_matching import scoped_shape_matches
 from ..type_syntax import (
     DEFAULT_UNIVERSE_NAMES,
-    binder_domains,
     has_universe_codomain,
     normalize_type_text,
     parse_named_binder,
@@ -26,6 +26,9 @@ from ..type_syntax import (
     split_top_level_application,
     split_top_level_arrows,
     top_level_arrow_count,
+)
+from ..type_syntax import (
+    explicit_domains as explicit_domains,
 )
 from ..type_syntax import (
     telescope_introduction as telescope_introduction,
@@ -79,19 +82,22 @@ def transport_index_labels(
     relation = parse_relation(domains[1], prefix_heads=families)
     if relation is None:
         return None
-    labels: set[str] = set()
+    labels: dict[str, str] = {}
     try:
         for part in split_top_level_arrows(type_text)[:-1]:
             for group in split_adjacent_binders(part) or (part,):
                 binder = parse_named_binder(group)
                 if binder and binder.visibility == "implicit":
-                    if "=" in binder.names:
-                        continue
-                    labels.update(binder.names)
+                    if binder.bindings is None:
+                        return None
+                    for external, local in binder.bindings:
+                        if local in labels and labels[local] != external:
+                            return None
+                        labels[local] = external
     except ValueError:
         return None
     if relation.left in labels and relation.right in labels:
-        return relation.left, relation.right
+        return labels[relation.left], labels[relation.right]
     return None
 
 
@@ -203,10 +209,19 @@ def structured_combinator_applications(
             if not top_level_arrow_count(term.type_text) and result_head(
                 term.type_text
             ) == result_head(domains[0]):
-                if exact_first_domain and normalize_type_text(
-                    strip_outer_parentheses(term.type_text)
-                ) != normalize_type_text(strip_outer_parentheses(domains[0])):
-                    continue
+                if exact_first_domain:
+                    parameters: set[str] = set()
+                    for part in split_top_level_arrows(ty)[:-1]:
+                        for group in split_adjacent_binders(part) or (part,):
+                            binder = parse_named_binder(group)
+                            if binder is not None and binder.bindings is not None:
+                                parameters.update(local for _, local in binder.bindings)
+                    if not scoped_shape_matches(
+                        f"({domains[0]}) ({split_top_level_arrows(ty)[-1]})",
+                        f"({term.type_text}) ({goal_type})",
+                        frozenset(parameters),
+                    ):
+                        continue
                 if shallow_functions:
                     for index, domain in enumerate(domains[1:], 1):
                         groups = tuple(
@@ -285,13 +300,11 @@ def evidence_consequences(
                     continue
                 # Agda renders shadowed labels as {label = local : T}.
                 # Named applications use the external label, not the alias.
-                if "=" in binder.names:
-                    if len(binder.names) == 3 and binder.names[1] == "=":
-                        if binder.names[2] in referenced:
-                            labels.append(binder.names[0])
-                else:
+                if binder.bindings is not None:
                     labels.extend(
-                        label for label in binder.names if label in referenced
+                        external
+                        for external, local in binder.bindings
+                        if local in referenced
                     )
         for witness_name, witness_type in declarations:
             witness_domains = explicit_domains(witness_type)
@@ -337,7 +350,8 @@ def has_structured_builder(
     A shared result head admits speculative applications, but cannot justify
     delaying dependency-guided elimination: differently indexed records and
     universe-valued arguments often share a head. Require the complete observed
-    domain here. An alias or unresolved instantiation may lose this scheduling
+    domain and result here, with scoped binder renaming and consistent telescope
+    parameters. An alias or unresolved instantiation may lose this scheduling
     preference, never the ordinary kernel-checked builder candidates.
     """
     available = (*context_types, *explicit_domains(goal_type))
@@ -356,19 +370,6 @@ def has_structured_builder(
         )
         is not None
     )
-
-
-def explicit_domains(type_text: str) -> tuple[str, ...]:
-    try:
-        return tuple(
-            domain
-            for part in split_top_level_arrows(type_text)[:-1]
-            for group in split_adjacent_binders(part) or (part,)
-            if not group.lstrip().startswith(("{", "⦃"))
-            for domain in binder_domains(group)
-        )
-    except ValueError:
-        return ()
 
 
 def implicit_value_type(type_text: str) -> str | None:

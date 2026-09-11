@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from .bridge.contracts import StateToken
 from .contracts import GoalInfo
-from .kernel.protocol import ScopeDeclarationSession, TransactionalKernelSession
+from .kernel.protocol import (
+    ScopeDeclarationSession,
+    TermInferenceSession,
+    TransactionalKernelSession,
+)
+from .type_syntax import result_head
 
 
 def visible_scope_declarations(
@@ -43,6 +48,28 @@ def visible_scope_declarations(
                 )
             )
             queries += 1
+    if isinstance(session, TermInferenceSession):
+        # Empty module-contents also omits outer lexical declarations inside
+        # parameterized sections. Resolve heads actually observed in the goal
+        # and telescope through Agda, under their local spelling. This neither
+        # invents a global name nor bypasses hiding/renaming restrictions.
+        known = (
+            {name for name, _ in declarations}
+            | {e.name for e in goal.context}
+            | set(goal.sort_names)
+        )
+        heads = tuple(
+            dict.fromkeys(
+                result_head(ty) for ty in (goal.target, *(e.type for e in goal.context))
+            )
+        )
+        for head in heads:
+            if not head or head in known:
+                continue
+            inferred = session.infer_type(state, goal_id=goal.goal_id, expression=head)
+            queries += 1
+            if inferred is not None:
+                declarations.append((head, inferred))
     return tuple(dict.fromkeys(declarations)), queries
 
 

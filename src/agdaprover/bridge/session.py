@@ -32,6 +32,7 @@ from .contracts import (
     stable_hash,
 )
 from .diagnostics import diagnostics_from_response, first_error
+from .interaction import ClauseAction, RewriteMode
 from .live_scope import decode_resource_limit, decode_scope, exclusions_payload
 from .operations import (
     ActionInput,
@@ -112,6 +113,10 @@ class KernelSessionV1(Protocol):
         self, state: StateToken, budget: BridgeBudget
     ) -> InspectGoalsResult: ...
 
+    def residual_obligation_counts(
+        self, state: StateToken, budget: BridgeBudget
+    ) -> tuple[int, int]: ...
+
     def infer(
         self,
         state: StateToken,
@@ -119,6 +124,7 @@ class KernelSessionV1(Protocol):
         budget: BridgeBudget,
         *,
         interaction_id: InteractionId | None = None,
+        mode: RewriteMode = RewriteMode.NORMAL,
     ) -> InferResult: ...
 
     def normalize(
@@ -144,6 +150,33 @@ class KernelSessionV1(Protocol):
         *,
         commit: bool = False,
     ) -> CaseSplitResult: ...
+
+    def make_clause(
+        self,
+        state: StateToken,
+        interaction_id: InteractionId,
+        action: ClauseAction,
+        budget: BridgeBudget,
+    ) -> CaseSplitResult: ...
+
+    def helper_signature(
+        self,
+        state: StateToken,
+        interaction_id: InteractionId,
+        application: TermInput,
+        budget: BridgeBudget,
+        *,
+        mode: RewriteMode = RewriteMode.NORMAL,
+    ) -> str | None: ...
+
+    def inspect_selected_goals(
+        self,
+        state: StateToken,
+        interaction_ids: tuple[InteractionId, ...],
+        budget: BridgeBudget,
+        *,
+        mode: RewriteMode = RewriteMode.NORMAL,
+    ) -> tuple[Goal, ...]: ...
 
     def check_definition(
         self,
@@ -752,6 +785,36 @@ class ConformingKernelSession:
         )
         return InspectGoalsResult(transition, complete_state)
 
+    def residual_obligation_counts(
+        self, state: StateToken, budget: BridgeBudget
+    ) -> tuple[int, int]:
+        """Observe closure obligations without normalizing every open goal."""
+        self._activate(state, budget)
+        adapter = adapter_for_version(self.project.toolchain.version)
+        self._active_state = None
+        responses = []
+        for command in (adapter.constraints(), adapter.metas()):
+            _, response = self.transport.command(
+                self._source_for(state.module_id), command
+            )
+            if adapter.error_payload(response) is not None:
+                raise self._error(
+                    BridgeFailure.PROTOCOL_FAILURE,
+                    "obligation-observation-rejected",
+                    "Agda rejected the residual-obligation observation",
+                )
+            responses.append(response)
+        try:
+            counts = adapter.residual_obligation_counts(*responses)
+        except ValueError as error:
+            raise self._error(
+                BridgeFailure.PROTOCOL_FAILURE,
+                "invalid-obligation-response",
+                str(error),
+            ) from error
+        self._active_state = state
+        return counts
+
     def infer(
         self,
         state: StateToken,
@@ -759,21 +822,32 @@ class ConformingKernelSession:
         budget: BridgeBudget,
         *,
         interaction_id: InteractionId | None = None,
+        mode: RewriteMode = RewriteMode.NORMAL,
     ) -> InferResult:
         self._activate(state, budget)
         before = self.transport.cost.copy()
         adapter = adapter_for_version(self.project.toolchain.version)
+        self._active_state = None
         command_id, response = self.transport.command(
             self._source_for(state.module_id),
             adapter.infer(
                 interaction_id.value if interaction_id is not None else None,
                 term.rendered,
+                mode,
             ),
         )
         diagnostics = diagnostics_from_response(
             response, project_root=self.project.project_root
         )
-        observation = adapter.inferred(response)
+        try:
+            observation = adapter.inferred(
+                response, interaction_id.value if interaction_id is not None else None
+            )
+        except ValueError as error:
+            self._active_state = None
+            raise self._error(
+                BridgeFailure.PROTOCOL_FAILURE, "invalid-inference-response", str(error)
+            ) from error
         # Cmd_infer is observational: it does not modify Agda's proof state.
         self._active_state = state
         return InferResult(
@@ -800,16 +874,21 @@ class ConformingKernelSession:
         *,
         interaction_id: InteractionId | None = None,
     ) -> NormalizeResult:
+        if policy in (ReductionPolicy.AS_IS, ReductionPolicy.SIMPLIFIED):
+            raise self._error(
+                BridgeFailure.UNSUPPORTED_CAPABILITY,
+                "unsupported-compute-policy",
+                "Agda compute supports weak-head or full evaluation; use RewriteMode for unreduced or simplified type/goal views",
+            )
         self._activate(state, budget)
         before = self.transport.cost.copy()
         adapter = adapter_for_version(self.project.toolchain.version)
         modes = {
-            ReductionPolicy.AS_IS: "HeadCompute",
-            ReductionPolicy.SIMPLIFIED: "HeadCompute",
             ReductionPolicy.NORMAL: "DefaultCompute",
             ReductionPolicy.HEAD_NORMAL: "HeadCompute",
             ReductionPolicy.IGNORE_ABSTRACT: "IgnoreAbstract",
         }
+        self._active_state = None
         command_id, response = self.transport.command(
             self._source_for(state.module_id),
             adapter.normalize(
@@ -821,7 +900,17 @@ class ConformingKernelSession:
         diagnostics = diagnostics_from_response(
             response, project_root=self.project.project_root
         )
-        observation = adapter.normalized(response)
+        try:
+            observation = adapter.normalized(
+                response, interaction_id.value if interaction_id is not None else None
+            )
+        except ValueError as error:
+            self._active_state = None
+            raise self._error(
+                BridgeFailure.PROTOCOL_FAILURE,
+                "invalid-normalization-response",
+                str(error),
+            ) from error
         # Cmd_compute is observational: it does not modify Agda's proof state.
         self._active_state = state
         return NormalizeResult(
@@ -1081,6 +1170,8 @@ class ConformingKernelSession:
         state: StateToken,
         interaction_ids: tuple[InteractionId, ...],
         budget: BridgeBudget,
+        *,
+        mode: RewriteMode = RewriteMode.NORMAL,
     ) -> tuple[Goal, ...]:
         """Inspect only selected interactions for the internal search loop."""
 
@@ -1093,8 +1184,9 @@ class ConformingKernelSession:
             shallow = available.get(interaction_id.value)
             if shallow is None:
                 continue
+            self._active_state = None
             _command_id, response = self.transport.command(
-                source, adapter.inspect_goal(interaction_id.value)
+                source, adapter.inspect_goal(interaction_id.value, mode)
             )
             diagnostics = diagnostics_from_response(
                 response,
@@ -1103,11 +1195,56 @@ class ConformingKernelSession:
             )
             if first_error(diagnostics) is not None:
                 continue
-            observation = adapter.goal(response)
+            try:
+                observation = adapter.goal(
+                    response, interaction_id=interaction_id.value
+                )
+            except ValueError as error:
+                raise self._error(
+                    BridgeFailure.PROTOCOL_FAILURE,
+                    "invalid-goal-view-response",
+                    str(error),
+                ) from error
             if observation is not None:
                 result.extend(self._goals_from_observations((observation,)))
         self._active_state = state
         return tuple(result)
+
+    def helper_signature(
+        self,
+        state: StateToken,
+        interaction_id: InteractionId,
+        application: TermInput,
+        budget: BridgeBudget,
+        *,
+        mode: RewriteMode = RewriteMode.NORMAL,
+    ) -> str | None:
+        """Ask Agda to abstract a helper's arguments in the actual goal scope.
+
+        No helper declaration or proof is installed by this observation. Agda
+        owns argument order, dependencies, hiding and section parameters.
+        """
+        record = self._activate(state, budget)
+        if all(g.interaction_id != interaction_id for g in record.state.goals):
+            raise self._error(
+                BridgeFailure.INVALID_REQUEST,
+                "helper-goal-not-open",
+                "Helper type inference requires an open interaction",
+            )
+        adapter = adapter_for_version(self.project.toolchain.version)
+        self._active_state = None
+        _, response = self.transport.command(
+            self._source_for(state.module_id),
+            adapter.helper_type(interaction_id.value, application.rendered, mode),
+        )
+        try:
+            signature = adapter.helper_signature(response, interaction_id.value)
+        except ValueError as error:
+            raise self._error(
+                BridgeFailure.PROTOCOL_FAILURE, "invalid-helper-response", str(error)
+            ) from error
+        self._active_state = state
+        return signature
 
     def instantiated_goal(
         self,
@@ -1426,47 +1563,18 @@ class ConformingKernelSession:
                 "case-split-commit-unsupported",
                 "Agda's JSON case response is a source patch and cannot be committed in-place",
             )
-        record = self._activate(state, budget)
-        if not subject or any(character.isspace() for character in subject):
+        if (
+            not subject
+            or subject == "."
+            or any(character.isspace() for character in subject)
+        ):
             raise self._error(
                 BridgeFailure.INVALID_REQUEST,
                 "invalid-case-subject",
                 "case split subject must be one local name",
             )
-        before = self.transport.cost.copy()
-        adapter = adapter_for_version(self.project.toolchain.version)
-        command_id, response = self.transport.command(
-            self._source_for(state.module_id),
-            adapter.case_split(interaction_id.value, subject),
-        )
-        diagnostics = diagnostics_from_response(
-            response,
-            primary_range=self._goal_range(record.state, interaction_id),
-            project_root=self.project.project_root,
-        )
-        observation = adapter.case(response)
-        # Cmd_make_case computes source clauses but does not apply them to the
-        # current interaction state.  Keep the parent active so a search can
-        # query several independent leaves without reloading and replaying the
-        # module after every clause proposal.
-        self._active_state = state
-        rejection = None
-        if not observation.accepted:
-            diagnostic = first_error(diagnostics)
-            rejection = diagnostic.code if diagnostic else "agda-no-case-response"
-        return CaseSplitResult(
-            transition=self._transition(
-                command_id,
-                parent=state,
-                child=None,
-                diagnostics=diagnostics,
-                cost=self.transport.cost.delta(before),
-            ),
-            accepted=observation.accepted,
-            clauses=observation.clauses,
-            variant=observation.variant,
-            generated_goals=(),
-            rejection_code=rejection,
+        return self.make_clause(
+            state, interaction_id, ClauseAction("variables", (subject,)), budget
         )
 
     def split_result(
@@ -1475,12 +1583,21 @@ class ConformingKernelSession:
         interaction_id: InteractionId,
         budget: BridgeBudget,
     ) -> CaseSplitResult:
-        """Observe Agda-owned telescope/copattern clauses without committing.
+        """Observe Agda-owned telescope/copattern clauses without committing."""
+        return self.make_clause(state, interaction_id, ClauseAction("result"), budget)
 
-        This internal capability does not widen the serialized v1 CaseSplit
-        request: its subject must still be a local name. A result split has no
-        subject and no in-place commit. It uses the existing clause response
-        and requires source reconstruction/reloading before any field is solved.
+    def make_clause(
+        self,
+        state: StateToken,
+        interaction_id: InteractionId,
+        action: ClauseAction,
+        budget: BridgeBudget,
+    ) -> CaseSplitResult:
+        """The complete make-case syntax API, with kernel-owned scope checks.
+
+        Multiple subjects are processed in Agda's order, not as independently
+        concatenated edits. Ellipsis expansion and result splitting share the
+        same non-mutating, identity-checked reconstruction boundary.
         """
         record = self._activate(state, budget)
         if all(g.interaction_id != interaction_id for g in record.state.goals):
@@ -1496,7 +1613,7 @@ class ConformingKernelSession:
         self._active_state = None
         command_id, response = self.transport.command(
             self._source_for(state.module_id),
-            adapter.split_result(interaction_id.value),
+            adapter.make_clause(interaction_id.value, action),
         )
         diagnostics = diagnostics_from_response(
             response,

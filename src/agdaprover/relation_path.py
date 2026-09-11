@@ -9,16 +9,19 @@ composition name has a distinguished meaning here.
 
 from __future__ import annotations
 
+import os
 import re
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING, Protocol
 
 from .bridge.contracts import StateToken
+from .bridge.interaction import RewriteMode
 from .contracts import GoalInfo
 from .notation import (
+    binary_mixfix_head,
     binary_mixfix_notation,
     render_application,
     strip_outer_parentheses,
@@ -26,8 +29,10 @@ from .notation import (
 from .resource_budget import checkpoint
 from .type_syntax import (
     binder_domains,
+    explicit_domains,
     normalize_type_text,
     parse_named_binder,
+    result_head,
     split_adjacent_binders,
     split_top_level_application,
     split_top_level_arrows,
@@ -98,6 +103,8 @@ class RelationPathStats:
     seed_terms: int = 0
     worklist_expansions: int = 0
     worklist_peak: int = 0
+    helper_queries: int = 0
+    helper_candidates: int = 0
     elapsed_ms: float = 0.0
 
     def to_dict(self) -> dict[str, object]:
@@ -393,6 +400,7 @@ def solve_relation_path(
     prefix_heads: Mapping[str, int] | None = None,
     excluded_expressions: frozenset[str] = frozenset(),
     incremental: bool = True,
+    helper_rank: Callable[[str, tuple[str, ...]], Iterable[str]] | None = None,
 ) -> RelationPathResult:
     """Search a small kernel-typed relation graph for the goal edge."""
 
@@ -488,7 +496,7 @@ def solve_relation_path(
     if not initial:
         stats.elapsed_ms = (time.monotonic() - started) * 1000.0
         return RelationPathResult(None, stats)
-    if not usable_heads:
+    if not usable_heads and helper_rank is None:
         stats.elapsed_ms = (time.monotonic() - started) * 1000.0
         return RelationPathResult(None, stats)
 
@@ -542,6 +550,141 @@ def solve_relation_path(
         for head in usable_heads
     }
 
+    helper_attempts: set[tuple[str, str]] = set()
+
+    def close_with_helper(left: RelationTerm, right: RelationTerm) -> str | None:
+        from .kernel.protocol import HelperTypeSession, TransactionalKernelSession
+        from .reasoning.helpers import helper_bodies
+
+        if (
+            helper_rank is None
+            or not isinstance(session, HelperTypeSession)
+            or not isinstance(session, TransactionalKernelSession)
+            or (left.expression, right.expression) in helper_attempts
+        ):
+            return None
+        helper_attempts.add((left.expression, right.expression))
+
+        def charge() -> bool:
+            checkpoint()
+            if stats.inference_queries >= query_budget or time.monotonic() >= deadline:
+                return False
+            stats.inference_queries += 1
+            return True
+
+        # Generalize the common intermediate as an explicit helper argument.
+        # Agda's with-abstraction machinery determines the dependent telescope;
+        # no textual substitution invents its type or universe parameters.
+        occupied = " ".join(
+            (
+                goal.target,
+                left.expression,
+                right.expression,
+                *(e.name for e in goal.context),
+            )
+        )
+        index = 0
+        while (name := f"proverHelper{index}") in occupied:
+            index += 1
+        application = render_application(
+            name, (left.edge.right, left.expression, right.expression)
+        )
+        if not charge():
+            return None
+        stats.helper_queries += 1
+        signature = session.helper_signature(
+            state,
+            goal_id=goal.goal_id,
+            application=application,
+            mode=RewriteMode.AS_IS
+            if os.environ.get("AGDAPROVER_REDUCTION_VIEWS", "1") != "0"
+            else RewriteMode.NORMAL,
+        )
+        if signature is None or not signature.startswith(name + " :"):
+            return None
+        type_text = signature.partition(" :")[2].strip()
+        catalogs: dict[str, tuple[tuple[str, str], ...]] = {}
+        constructors: dict[int, tuple[str, str]] = {}
+        for position, domain in enumerate(explicit_domains(type_text)):
+            relation = parse_relation(domain, prefix_heads=prefix_heads)
+            head = (
+                binary_mixfix_head(relation.operator)
+                if relation is not None and not relation.canonical_endpoints
+                else result_head(domain)
+            )
+            if head not in catalogs:
+                if not charge():
+                    return None
+                catalogs[head] = session.constructor_candidates(
+                    state, goal_id=goal.goal_id, type_head=head
+                )
+            if len(catalogs[head]) == 1:
+                constructors[position] = catalogs[head][0]
+        if (
+            not constructors
+            and os.environ.get("AGDAPROVER_REDUCTION_VIEWS", "1") != "0"
+        ):
+            # An alias can hide the eliminable family. Ask Agda for the fully
+            # reduced telescope only when the unreduced view gives no pattern.
+            if not charge():
+                return None
+            stats.helper_queries += 1
+            signature = session.helper_signature(
+                state,
+                goal_id=goal.goal_id,
+                application=application,
+                mode=RewriteMode.NORMAL,
+            )
+            if signature is None or not signature.startswith(name + " :"):
+                return None
+            type_text = signature.partition(" :")[2].strip()
+            for position, domain in enumerate(explicit_domains(type_text)):
+                relation = parse_relation(domain, prefix_heads=prefix_heads)
+                head = (
+                    binary_mixfix_head(relation.operator)
+                    if relation is not None and not relation.canonical_endpoints
+                    else result_head(domain)
+                )
+                if head not in catalogs:
+                    if not charge():
+                        return None
+                    catalogs[head] = session.constructor_candidates(
+                        state, goal_id=goal.goal_id, type_head=head
+                    )
+                if len(catalogs[head]) == 1:
+                    constructors[position] = catalogs[head][0]
+        proposals = tuple(
+            render_application(f"λ ({name} : {type_text}) → {application}", (body,))
+            for body in helper_bodies(type_text, constructors)
+        )
+        stats.helper_candidates += len(proposals)
+        stats.applications_generated += len(proposals)
+        for expression in helper_rank(type_text, proposals):
+            if not charge():
+                break
+            inferred = session.infer_type(
+                state, goal_id=goal.goal_id, expression=expression
+            )
+            if inferred is None:
+                continue
+            edge = parse_relation(
+                inferred, expected_operator=target.operator, prefix_heads=prefix_heads
+            )
+            if edge is not None:
+                solved = retain(
+                    RelationTerm(
+                        expression,
+                        inferred,
+                        edge,
+                        left.generators | right.generators,
+                        left.node_count + right.node_count + 1,
+                        left.inputs | right.inputs | frozenset({expression}),
+                    )
+                )
+                if solved is not None:
+                    return solved
+        return None
+
     def close_boundary() -> str | None:
         if stats.inference_queries >= query_budget or time.monotonic() >= deadline:
             return None
@@ -555,6 +698,8 @@ def solve_relation_path(
                     if shapes.get(head) == "chain":
                         if (solved := infer(head, (left, right))) is not None:
                             return solved
+                if (solved := close_with_helper(left, right)) is not None:
+                    return solved
         return None
 
     boundary_generation = -1
@@ -646,7 +791,7 @@ def solve_relation_path(
     # lane before general congruence exploration. It never assigns algebraic
     # laws to the relation: only supplied declarations with matching wiring
     # are proposed, and inference decides what they actually produce.
-    if prefix_heads:
+    if prefix_heads or helper_rank is not None:
         if (solved := close_reoriented_boundary()) is not None:
             stats.elapsed_ms = (time.monotonic() - started) * 1000.0
             return RelationPathResult(solved, stats, completed_inputs)
@@ -704,14 +849,16 @@ def solve_relation_path(
                 stats.elapsed_ms = (time.monotonic() - started) * 1000.0
                 return RelationPathResult(solved, stats, completed_inputs)
         unary_terms.extend(terms[before:])
-        if prefix_heads and (solved := close_boundary()) is not None:
+        if (prefix_heads or helper_rank is not None) and (
+            solved := close_boundary()
+        ) is not None:
             stats.elapsed_ms = (time.monotonic() - started) * 1000.0
             return RelationPathResult(solved, stats, completed_inputs)
     for head in binary_heads:
         for left in initial:
             for right in initial:
                 solved = infer(head, (left, right))
-                if solved is None and prefix_heads:
+                if solved is None and (prefix_heads or helper_rank is not None):
                     solved = close_boundary()
                 if solved is not None:
                     stats.elapsed_ms = (time.monotonic() - started) * 1000.0

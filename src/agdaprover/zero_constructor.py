@@ -14,6 +14,7 @@ from typing import Any
 from .contracts import GoalInfo
 from .focused import TypeExpr, parse_type
 from .terms import Term, render_term
+from .type_syntax import is_universe_head, result_head
 
 ZERO_CONSTRUCTOR_ACTION_SCHEMA = "agdaprover.zero-constructor-action.v1"
 
@@ -95,7 +96,7 @@ def generate_zero_constructor_actions(
     max_term_size: int = 32,
     max_terms: int = 256,
 ) -> tuple[ZeroConstructorEliminationAction, ...]:
-    """Forward-chain bounded local applications, without inspecting type heads."""
+    """Forward-chain local applications, excluding kernel-identified sort results."""
 
     if max_actions <= 0 or max_rounds <= 0 or max_term_size <= 0 or max_terms <= 0:
         return ()
@@ -135,6 +136,11 @@ def generate_zero_constructor_actions(
     def retain_action(typed: _TypedTerm) -> None:
         if (
             typed.type_expr.tag != "atom"
+            # A universe is not an empty inductive family. Its local spelling
+            # comes from the bridge, including arbitrary primitive renamings.
+            or is_universe_head(
+                result_head(typed.type_expr.canonical()), goal.sort_names
+            )
             or typed.term in action_terms
             or len(actions) >= max_actions
         ):

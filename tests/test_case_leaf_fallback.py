@@ -15,6 +15,7 @@ from agdaprover.constructor_search import (
     ConstructorStats,
     constructor_tree_prove,
 )
+from agdaprover.contracts import CandidateCheck
 from agdaprover.validation import validate_candidate, validate_reconstruction
 
 SOURCE = """{-# OPTIONS --safe --without-K #-}
@@ -84,7 +85,15 @@ take = {!!}
         )
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.dict("os.environ", {"AGDAPROVER_LOCAL_ELIMINATOR_READINESS": "1"}),
+            # Isolate the local-refinement fallback; supported composition
+            # can independently close this goal without a refinement query.
+            patch.dict(
+                "os.environ",
+                {
+                    "AGDAPROVER_LOCAL_ELIMINATOR_READINESS": "1",
+                    "AGDAPROVER_BACKWARD_SUPPORT": "0",
+                },
+            ),
         ):
             path = Path(directory) / "GuardedSequence.agda"
             path.write_text(source)
@@ -132,6 +141,45 @@ take = {!!}
             constructor.call_args.kwargs["excluded_premises"], frozenset({"take"})
         )
         self.assertIsNone(constructor.call_args.kwargs["recursive_call"])
+
+    def test_rejected_cases_release_the_reserved_construction_allowance(self):
+        source = """{-# OPTIONS --safe --without-K #-}
+module GuardedSequence where
+data Wrap (A : Set) : Set where
+  wrap : A → Wrap A
+take : {A B : Set} → Wrap A → (A → B) → B
+take = {!!}
+"""
+        allowances = []
+
+        def sliced(session, goal, **kwargs):
+            allowances.append(kwargs["action_budget"])
+            if len(allowances) == 1:
+                # Model a useful constructor search that needs more than its
+                # preliminary slice. Other local split proposals still exist.
+                stats = ConstructorStats(actions_considered=kwargs["action_budget"])
+                kwargs["on_statistics"](stats)
+                return ConstructorResult(
+                    "resource-exhausted", (), stats, "preliminary slice exhausted"
+                )
+            return constructor_tree_prove(session, goal, **kwargs)
+
+        with (
+            patch("agdaprover.case_search.constructor_tree_prove", side_effect=sliced),
+            patch.dict("os.environ", {"AGDAPROVER_CONTEXT_BINDING": "0"}),
+            # Isolate construction after case splitting from shallow closures.
+            patch.object(
+                AgdaSession,
+                "check_complete_candidate",
+                return_value=CandidateCheck(False, None, "route isolation", ()),
+            ),
+        ):
+            result = self.run_batch(source, action_budget=180)
+        self.assertEqual(result.status, "solved", result.diagnostic)
+        self.assertGreaterEqual(len(allowances), 2)
+        self.assertEqual(allowances[0], 64)
+        self.assertGreater(allowances[1], allowances[0])
+        self.assertLess(allowances[1], 180 - allowances[0])
 
 
 if __name__ == "__main__":

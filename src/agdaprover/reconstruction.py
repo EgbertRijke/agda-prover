@@ -104,6 +104,11 @@ def _line_indentation(source: str, offset: int) -> tuple[int, int]:
 
 def _format_at_hole(source: str, hole_start: int, body: str) -> FormattedProof:
     column, continuation = _line_indentation(source, hole_start)
+    # An inline expression belongs inside its declaration's layout block.
+    # Infix formatting can break between sibling branches without adding its
+    # own nesting; using the declaration column would start a new declaration.
+    if column > continuation:
+        continuation += 2
     return format_proof_term(
         body,
         initial_column=column,

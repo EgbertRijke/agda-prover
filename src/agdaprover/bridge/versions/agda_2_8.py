@@ -10,12 +10,23 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts import CapabilityManifest, SourceRange
+from ..interaction import ClauseAction, RewriteMode
 
 PROMPT = b"JSON> "
 
 
 def _quote(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def _rewrite(mode: RewriteMode) -> str:
+    return {
+        RewriteMode.AS_IS: "AsIs",
+        RewriteMode.INSTANTIATED: "Instantiated",
+        RewriteMode.HEAD_NORMAL: "HeadNormal",
+        RewriteMode.SIMPLIFIED: "Simplified",
+        RewriteMode.NORMAL: "Normalised",
+    }[RewriteMode(mode)]
 
 
 @dataclass(frozen=True)
@@ -108,6 +119,9 @@ class Agda28Adapter:
                 sorted(
                     {
                         "case-split",
+                        "make-clause",
+                        "helper-signature",
+                        "goal-view",
                         "check-definition",
                         "close",
                         "infer",
@@ -124,6 +138,7 @@ class Agda28Adapter:
                 "case-split responses are source clauses and cannot be committed in-place",
                 "internal term constructors are unavailable; terms are tagged Agda renderings",
                 "binder modality and quantity absent from JSON are represented as unknown",
+                "compute supports head-normal, normal and ignore-abstract; other rewrite policies apply to type/goal views",
             ),
         )
 
@@ -144,13 +159,65 @@ class Agda28Adapter:
         rendered_options = "[" + ",".join(_quote(item) for item in options) + "]"
         return f"Cmd_load {_quote(str(source_file))} {rendered_options}"
 
-    def inspect_goal(self, interaction_id: int) -> str:
-        return f'Cmd_goal_type_context Normalised {interaction_id} noRange ""'
+    def inspect_goal(
+        self, interaction_id: int, mode: RewriteMode = RewriteMode.NORMAL
+    ) -> str:
+        return f'Cmd_goal_type_context {_rewrite(mode)} {interaction_id} noRange ""'
 
-    def infer(self, interaction_id: int | None, expression: str) -> str:
+    def infer(
+        self,
+        interaction_id: int | None,
+        expression: str,
+        mode: RewriteMode = RewriteMode.NORMAL,
+    ) -> str:
         if interaction_id is None:
-            return f"Cmd_infer_toplevel Normalised {_quote(expression)}"
-        return f"Cmd_infer Normalised {interaction_id} noRange {_quote(expression)}"
+            return f"Cmd_infer_toplevel {_rewrite(mode)} {_quote(expression)}"
+        return (
+            f"Cmd_infer {_rewrite(mode)} {interaction_id} noRange {_quote(expression)}"
+        )
+
+    def helper_type(
+        self,
+        interaction_id: int,
+        application: str,
+        mode: RewriteMode = RewriteMode.NORMAL,
+    ) -> str:
+        return f"Cmd_helper_function {_rewrite(mode)} {interaction_id} noRange {_quote(application)}"
+
+    def helper_signature(
+        self, response: DecodedResponse, interaction_id: int
+    ) -> str | None:
+        if self.error_payload(response) is not None:
+            return None
+        results = []
+        for event in response.events:
+            info = event.value.get("info")
+            if not isinstance(info, dict) or info.get("kind") != "GoalSpecific":
+                continue
+            goal_info = info.get("goalInfo")
+            if (
+                not isinstance(goal_info, dict)
+                or goal_info.get("kind") != "HelperFunction"
+            ):
+                continue
+            point = info.get("interactionPoint")
+            signature = goal_info.get("signature")
+            if (
+                not isinstance(point, dict)
+                or type(point.get("id")) is not int
+                or point["id"] != interaction_id
+                or not isinstance(signature, str)
+                or not signature.strip()
+            ):
+                raise ValueError("invalid helper signature identity or text")
+            results.append(signature)
+        if len(results) != 1:
+            raise ValueError("expected one helper signature")
+        return results[0]
+
+    def make_clause(self, interaction_id: int, action: ClauseAction) -> str:
+        subject = "." if action.kind == "ellipsis" else " ".join(action.subjects)
+        return f"Cmd_make_case {interaction_id} noRange {_quote(subject)}"
 
     def normalize(
         self, interaction_id: int | None, expression: str, compute_mode: str
@@ -176,11 +243,13 @@ class Agda28Adapter:
         )
 
     def case_split(self, interaction_id: int, local_name: str) -> str:
-        return f"Cmd_make_case {interaction_id} noRange {_quote(local_name)}"
+        return self.make_clause(
+            interaction_id, ClauseAction("variables", (local_name,))
+        )
 
     def split_result(self, interaction_id: int) -> str:
         """Ask Agda to introduce the remaining telescope or result fields."""
-        return f'Cmd_make_case {interaction_id} noRange ""'
+        return self.make_clause(interaction_id, ClauseAction("result"))
 
     def auto(self, interaction_id: int) -> str:
         return f'Cmd_autoOne AsIs {interaction_id} noRange ""'
@@ -340,7 +409,27 @@ class Agda28Adapter:
             )
         return tuple(sorted(result, key=lambda goal: goal.interaction_id))
 
-    def goal(self, response: DecodedResponse) -> GoalObservation | None:
+    def goal(
+        self, response: DecodedResponse, *, interaction_id: int | None = None
+    ) -> GoalObservation | None:
+        if interaction_id is not None:
+            rows = [
+                event.value["info"]
+                for event in response.events
+                if isinstance(event.value.get("info"), dict)
+                and event.value["info"].get("kind") == "GoalSpecific"
+                and isinstance(event.value["info"].get("goalInfo"), dict)
+                and event.value["info"]["goalInfo"].get("kind") == "GoalType"
+            ]
+            if len(rows) != 1:
+                raise ValueError("missing or duplicate goal view")
+            point = rows[0].get("interactionPoint")
+            if (
+                not isinstance(point, dict)
+                or type(point.get("id")) is not int
+                or point["id"] != interaction_id
+            ):
+                raise ValueError("goal view belongs to the wrong interaction")
         for event in response.events:
             info = event.value.get("info")
             if not isinstance(info, dict) or info.get("kind") != "GoalSpecific":
@@ -499,43 +588,94 @@ class Agda28Adapter:
             )
         return ()
 
-    def inferred(self, response: DecodedResponse) -> InferObservation:
+    def _expression_view(
+        self, response: DecodedResponse, kind: str, interaction_id: int | None
+    ) -> str | None:
         if self.error_payload(response) is not None:
-            return InferObservation(False, None)
+            return None
+        found: list[str] = []
         for event in response.events:
             info = event.value.get("info")
             if not isinstance(info, dict):
                 continue
             if info.get("kind") == "GoalSpecific":
                 goal_info = info.get("goalInfo")
+                if not isinstance(goal_info, dict) or goal_info.get("kind") != kind:
+                    continue
+                point = info.get("interactionPoint")
                 if (
-                    isinstance(goal_info, dict)
-                    and goal_info.get("kind") == "InferredType"
+                    not isinstance(point, dict)
+                    or type(point.get("id")) is not int
+                    or point["id"] != interaction_id
                 ):
-                    return InferObservation(True, str(goal_info.get("expr", "")))
-            if info.get("kind") == "InferredType":
-                return InferObservation(True, str(info.get("expr", "")))
-        return InferObservation(False, None)
+                    raise ValueError("expression view belongs to the wrong interaction")
+                info = goal_info
+            elif info.get("kind") != kind:
+                continue
+            elif interaction_id is not None:
+                raise ValueError("expected a goal-specific expression view")
+            expression = info.get("expr")
+            if (
+                not isinstance(expression, str)
+                or not expression.strip()
+                or "\x00" in expression
+            ):
+                raise ValueError("malformed expression view")
+            found.append(expression)
+        if len(found) != 1:
+            raise ValueError("missing or duplicate expression view")
+        return found[0]
 
-    def normalized(self, response: DecodedResponse) -> NormalizeObservation:
-        if self.error_payload(response) is not None:
-            return NormalizeObservation(False, None, False)
-        for event in response.events:
-            info = event.value.get("info")
-            if not isinstance(info, dict):
-                continue
-            if info.get("kind") == "GoalSpecific":
-                goal_info = info.get("goalInfo")
-                if (
-                    isinstance(goal_info, dict)
-                    and goal_info.get("kind") == "NormalForm"
-                ):
-                    return NormalizeObservation(
-                        True, str(goal_info.get("expr", "")), True
-                    )
-            if info.get("kind") == "NormalForm":
-                return NormalizeObservation(True, str(info.get("expr", "")), True)
-        return NormalizeObservation(False, None, False)
+    def inferred(
+        self, response: DecodedResponse, interaction_id: int | None = None
+    ) -> InferObservation:
+        expression = self._expression_view(response, "InferredType", interaction_id)
+        return InferObservation(expression is not None, expression)
+
+    def normalized(
+        self, response: DecodedResponse, interaction_id: int | None = None
+    ) -> NormalizeObservation:
+        expression = self._expression_view(response, "NormalForm", interaction_id)
+        return NormalizeObservation(
+            expression is not None, expression, expression is not None
+        )
+
+    def residual_obligation_counts(
+        self, constraints: DecodedResponse, metas: DecodedResponse
+    ) -> tuple[int, int]:
+        """Require complete obligation reports; missing data is never zero."""
+        for response, kind, fields in (
+            (constraints, "Constraints", ("constraints",)),
+            (metas, "AllGoalsWarnings", ("visibleGoals", "invisibleGoals")),
+        ):
+            reports = [
+                e.value["info"]
+                for e in response.events
+                if isinstance(e.value.get("info"), dict)
+                and e.value["info"].get("kind") == kind
+            ]
+            if len(reports) != 1 or any(
+                not isinstance(reports[0].get(field), list) for field in fields
+            ):
+                raise ValueError("missing, malformed or duplicate obligation report")
+            if kind == "AllGoalsWarnings":
+                for field in fields:
+                    for item in reports[0][field]:
+                        obj = (
+                            item.get("constraintObj")
+                            if isinstance(item, dict)
+                            else None
+                        )
+                        key = "id" if field == "visibleGoals" else "name"
+                        if not isinstance(obj, dict) or type(obj.get(key)) not in (
+                            str,
+                            int,
+                        ):
+                            raise ValueError("malformed obligation identity")
+        return (
+            sum(item.interaction_id is None for item in self.meta_items(metas)),
+            len(self.constraint_items(constraints)),
+        )
 
     def constraint_items(
         self, response: DecodedResponse

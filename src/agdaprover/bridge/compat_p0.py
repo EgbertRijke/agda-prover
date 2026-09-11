@@ -38,6 +38,7 @@ from .contracts import (
     InteractionId,
     StateToken,
 )
+from .interaction import ClauseAction, RewriteMode
 from .operations import ActionInput, OpenProjectResult, TermInput, TryActionResult
 from .project import detect_toolchain
 from .proof_state import Goal
@@ -369,11 +370,48 @@ class AgdaSession:
             ),
         )
 
+    def check_complete_candidate(self, goal_id: int, expression: str) -> CandidateCheck:
+        """Distinguish elaboration success from a locally closed completion.
+
+        This remains search evidence, never a replacement for fresh validation.
+        The committed probe belongs to its own child; the caller's parent token
+        stays unchanged, including after an incomplete or rejected probe.
+        """
+        candidate = self.check_candidate(goal_id, expression)
+        if not candidate.accepted:
+            return candidate
+        state = self.current_state()
+        baseline = self.internal_obligation_counts(state)
+        checked = self.commit_proof_action(
+            state, kind="give", goal_id=goal_id, expression=expression
+        )
+        if (
+            checked.accepted
+            and checked.child_state is not None
+            and not checked.generated_goals
+        ):
+            obligations = self.internal_obligation_counts(checked.child_state)
+            if all(
+                current <= previous
+                for current, previous in zip(obligations, baseline, strict=True)
+            ):
+                return candidate
+        return CandidateCheck(
+            False, None, "candidate leaves unresolved internal obligations", ()
+        )
+
     def check_result_split(self, state: StateToken, *, goal_id: int) -> CaseSplitCheck:
         """Observe source clauses for a result, preserving the explicit parent."""
+        return self.check_clause_action(
+            state, goal_id=goal_id, action=ClauseAction("result")
+        )
+
+    def check_clause_action(
+        self, state: StateToken, *, goal_id: int, action: ClauseAction
+    ) -> CaseSplitCheck:
         try:
-            checked = self._session.split_result(
-                state, InteractionId(goal_id), self._budget
+            checked = self._session.make_clause(
+                state, InteractionId(goal_id), action, self._budget
             )
         except BridgeError as error:
             raise _p0_error(error) from error
@@ -394,6 +432,40 @@ class AgdaSession:
                 for item in checked.transition.diagnostics
             ),
         )
+
+    def helper_signature(
+        self,
+        state: StateToken,
+        *,
+        goal_id: int,
+        application: str,
+        mode: RewriteMode = RewriteMode.NORMAL,
+    ) -> str | None:
+        try:
+            return self._session.helper_signature(
+                state,
+                InteractionId(goal_id),
+                TermInput(application),
+                self._budget,
+                mode=mode,
+            )
+        except BridgeError as error:
+            raise _p0_error(error) from error
+
+    def inspect_goal_view(
+        self, state: StateToken, *, goal_id: int, mode: RewriteMode
+    ) -> GoalInfo | None:
+        """An observational view, not a replacement for cached canonical goals."""
+        try:
+            selected = self._session.inspect_selected_goals(
+                state,
+                (InteractionId(goal_id),),
+                self._budget,
+                mode=mode,
+            )
+        except BridgeError as error:
+            raise _p0_error(error) from error
+        return self._observe_universes(state, _goal(selected[0])) if selected else None
 
     def current_state(self) -> StateToken:
         """Return the immutable token for the currently loaded source state."""
@@ -506,15 +578,9 @@ class AgdaSession:
         """Return hidden open-meta and constraint counts for completion checks."""
 
         try:
-            snapshot = self._session.inspect_goals(state, self._budget).state
+            return self._session.residual_obligation_counts(state, self._budget)
         except BridgeError as error:
             raise _p0_error(error) from error
-        hidden_metas = sum(
-            1
-            for meta in snapshot.metas
-            if meta.status == "open" and meta.interaction_id is None
-        )
-        return hidden_metas, len(snapshot.constraints)
 
     def commit_proof_action(
         self,
@@ -732,6 +798,7 @@ class AgdaSession:
         *,
         goal_id: int,
         expression: str,
+        mode: RewriteMode = RewriteMode.NORMAL,
     ) -> str | None:
         """Infer an expression's type without changing the proof state."""
 
@@ -741,6 +808,7 @@ class AgdaSession:
                 TermInput(expression),
                 self._budget,
                 interaction_id=InteractionId(goal_id),
+                mode=mode,
             )
         except BridgeError as error:
             if error.failure != BridgeFailure.AGDA_REJECTION:
