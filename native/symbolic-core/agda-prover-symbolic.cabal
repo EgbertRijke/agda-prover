@@ -1,0 +1,43 @@
+cabal-version: 3.0
+name: agda-prover-symbolic
+version: 0.1.0.0
+synopsis: Typed symbolic engine boundaries for AgdaProver
+license: GPL-3.0-or-later
+build-type: Simple
+
+common defaults
+  default-language: Haskell2010
+  ghc-options: -Wall -Werror
+  build-depends: base ==4.18.*, aeson ==2.2.4.1
+
+library
+  import: defaults
+  hs-source-dirs: core
+  exposed-modules: AgdaProver.Symbolic.Protocol
+
+library agda28
+  import: defaults
+  hs-source-dirs: adapter
+  exposed-modules: AgdaProver.Agda28.Observation
+  other-modules: Structure, Decode, Atoms, StructureAnnotations
+  build-depends:
+    agda-prover-symbolic,
+    Agda ==2.8.0,
+    containers >=0.6 && <0.7,
+    mtl >=2.3 && <2.4,
+    transformers >=0.6 && <0.7,
+    text >=2.0 && <2.1,
+    vector >=0.13 && <0.14
+
+executable agdaprover-symbolic
+  import: defaults
+  hs-source-dirs: app
+  main-is: Main.hs
+  ghc-options: -threaded -rtsopts
+  build-depends:
+    agda-prover-symbolic,
+    agda-prover-symbolic:agda28,
+    Agda ==2.8.0,
+    bytestring ==0.11.5.4,
+    directory >=1.3 && <1.4,
+    filepath >=1.4 && <1.5

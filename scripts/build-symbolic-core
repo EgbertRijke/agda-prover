@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+repository_root="$(cd "$(dirname "$0")/.." && pwd)"
+package_db="${AGDAPROVER_AGDA_PACKAGE_DB:-$HOME/.cabal/store/ghc-9.6.7/package.db}"
+if [[ "$(ghc --numeric-version)" != 9.6.7 ]]; then
+  echo 'The symbolic adapter requires GHC 9.6.7 and Agda 2.8.0.' >&2
+  exit 2
+fi
+cd "$repository_root/native/symbolic-core"
+if [[ $# == 1 && $1 == --print-path ]]; then
+  exec cabal list-bin --offline --package-db="$package_db" exe:agdaprover-symbolic
+fi
+# Explicit installed constraints avoid silently rebuilding Agda/dependencies.
+# Provisioning a different toolchain is a separate, intentional operation.
+exec cabal v2-build --offline --package-db="$package_db" \
+  --constraint='any.Agda installed' --constraint='any.aeson installed' "$@" all

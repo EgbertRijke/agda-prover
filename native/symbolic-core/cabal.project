@@ -1,0 +1,6 @@
+packages: .
+with-compiler: ghc-9.6.7
+-- Use the locally cached toolchain; this migration does not upgrade Agda.
+offline: True
+optimization: 1
+constraints: any.Agda installed, any.aeson installed

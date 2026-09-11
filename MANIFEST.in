@@ -1,4 +1,5 @@
-recursive-include native *.hs *.rs Cargo.toml Cargo.lock
+recursive-include native *.hs *.rs *.cabal cabal.project Cargo.toml Cargo.lock
+prune native/symbolic-core/dist-newstyle
 recursive-include scripts *
 recursive-include editor *.el *.js *.json *.md
 recursive-include tests *.py

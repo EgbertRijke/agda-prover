@@ -7,6 +7,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 target/
+dist-newstyle/
+cabal.project.local
 *.agdai
 *.elc
 .DS_Store

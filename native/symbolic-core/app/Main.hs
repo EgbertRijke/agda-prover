@@ -1,0 +1,111 @@
+{-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE LambdaCase #-}
+-- SPDX-License-Identifier: GPL-3.0-or-later
+module Main (main) where
+
+import Control.Monad (unless)
+import Control.Monad.IO.Class (liftIO)
+import Control.Exception (Exception, Handler (..), IOException, bracket, catches, throwIO)
+import Data.Aeson (Value, encode, object, (.=))
+import Data.ByteString.Lazy.Char8 qualified as BL
+import Data.IORef (newIORef, readIORef, writeIORef)
+import System.Environment (getArgs, getProgName)
+import System.Exit (ExitCode (..), exitFailure)
+import System.FilePath (isAbsolute, takeDirectory)
+import System.IO (stdout, stderr, hClose)
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
+import Text.Read (readMaybe)
+
+import Agda.Interaction.Imports
+  ( Mode (TypeCheck), crMode, crWarnings, parseSource, typeCheckMain )
+import Agda.Interaction.Options (CommandLineOptions (..), defaultOptions)
+import Agda.Main (Interactor, runAgdaWithOptions, runTCMPrettyErrors)
+import Agda.Setup qualified
+import Agda.Syntax.Common (InteractionId)
+import Agda.TypeChecking.Monad
+import Agda.Utils.FileName (absolute)
+import Agda.Version (version)
+import AgdaProver.Agda28.Observation (observeGoal, encodeGoal)
+import AgdaProver.Symbolic.Protocol qualified as P
+
+main :: IO ()
+main = bracket (hDuplicate stdout) hClose $ \protocol -> do
+  -- Agda owns its reporting machinery. Route it as a whole to stderr rather
+  -- than assuming verbosity flags silence every successful/error code path.
+  hDuplicateTo stderr stdout
+  pending <- newIORef Nothing
+  let collect value = do
+        old <- readIORef pending
+        case old of
+          Nothing -> writeIORef pending (Just $ Right value)
+          Just _ -> reject "duplicate-response"
+      failure reason = writeIORef pending (Just $ Left reason)
+  -- Agda's top-level driver exits even on success. Buffer the observation until
+  -- that driver finishes; a late failure must never follow a published success.
+  run collect `catches`
+    [ Handler $ \(ObservationFailure reason) -> failure reason
+    , Handler $ \case
+        ExitSuccess -> pure ()
+        ExitFailure _ -> failure "agda-checking-failed"
+    , Handler $ \(_ :: IOException) -> failure "native-io-failure"
+    ]
+  response <- maybe (Left "missing-response") id <$> readIORef pending
+  case response of
+    Right value -> BL.hPutStrLn protocol (encode value)
+    Left reason -> do
+      BL.hPutStrLn protocol $ encode $ object
+        ["schema_version" .= ("agdaprover.symbolic-error.v1" :: String),
+         "status" .= ("observation-rejected" :: String), "reason" .= reason]
+      exitFailure
+
+run :: (Value -> IO ()) -> IO ()
+run emit = do
+  unless (version == "2.8.0") $
+    reject "toolchain-mismatch"
+  args <- getArgs
+  case args of
+    ["capabilities"] -> emit P.capabilities
+    "observe" : file : goal : mode : includes
+      | isAbsolute file, all isAbsolute includes
+      , Just point <- readGoal goal, Just policy <- P.parseMode mode -> do
+        Agda.Setup.setup False
+        program <- getProgName
+        let opts = defaultOptions
+              { optUseLibs = False, optDefaultLibs = False
+              , optIgnoreInterfaces = True
+              , optIncludePaths = takeDirectory file : includes
+              }
+        runTCMPrettyErrors $ runAgdaWithOptions (observe emit file point policy) program opts
+    _ -> reject "usage: capabilities | observe ABSOLUTE-FILE GOAL MODE [ABSOLUTE-INCLUDE ...]"
+
+readGoal :: String -> Maybe InteractionId
+readGoal text = do
+  n <- readMaybe text :: Maybe Integer
+  if n >= 0 && n <= toInteger (maxBound :: Int)
+    then Just (fromInteger n) else Nothing
+
+observe :: (Value -> IO ()) -> FilePath -> InteractionId -> P.ObservationMode -> Interactor ()
+observe emit file point mode setup _ = do
+  setup
+  path <- liftIO $ absolute file
+  result <- typeCheckMain TypeCheck =<< parseSource =<< srcFromPath path
+  unless (crMode result == ModuleTypeChecked && all expected (crWarnings result)) $
+    liftIO $ reject "unsupported-checker-warning"
+  points <- getInteractionPoints
+  unless (point `elem` points) $ liftIO $ reject "unknown-goal"
+  snapshot <- observeGoal point mode
+  either (liftIO . reject) (liftIO . emit) (encodeGoal snapshot)
+ where
+  expected warning = case tcWarning warning of
+    UnsolvedInteractionMetas{} -> True
+    UnsolvedMetaVariables{} -> True
+    UnsolvedConstraints{} -> True
+    _ -> False
+
+data ObservationFailure = ObservationFailure String deriving Show
+instance Exception ObservationFailure
+
+reject :: String -> IO a
+reject = throwIO . ObservationFailure
