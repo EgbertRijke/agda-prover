@@ -32,6 +32,7 @@ from .kernel.protocol import (
     ScopedRetrievalSession,
     TermInferenceSession,
     TransactionalKernelSession,
+    UniverseScopeSession,
 )
 from .notation import binary_mixfix_head, render_application, strip_outer_parentheses
 from .observability.policy_trace import PolicyChoice
@@ -107,7 +108,10 @@ from .scope_catalog import visible_scope_declarations
 from .search_frontier import BatchedFrontier
 from .terms import render_term
 from .type_syntax import (
+    DEFAULT_UNIVERSE_NAMES,
     binder_domains,
+    has_universe_codomain,
+    is_universe_head,
     normalize_type_text,
     result_head,
     split_adjacent_binders,
@@ -142,7 +146,7 @@ class _ScopedActions:
         return tuple(action for rank, action in self.entries if rank in admitted)
 
     def metadata(
-        self, limit: int
+        self, limit: int, universe_names: frozenset[str] = DEFAULT_UNIVERSE_NAMES
     ) -> dict[ScopePremiseAction, tuple[tuple[str, str], ...]]:
         admission_ranks = {
             rank: position for position, rank in enumerate(self.admission_order, 1)
@@ -156,7 +160,11 @@ class _ScopedActions:
                 ("retrieval-head-match", str(self.ranking.items[rank - 1].head_match)),
                 (
                     "retrieval-shallow-support",
-                    "yes" if premise_has_shallow_support(action.type_text) else "no",
+                    "yes"
+                    if premise_has_shallow_support(
+                        action.type_text, universe_names=universe_names
+                    )
+                    else "no",
                 ),
                 (
                     "retrieval-symbol-overlap",
@@ -1118,7 +1126,7 @@ class _ConstructorSearch:
                         and argument.name
                         and argument.name != entry.name
                         and not top_level_arrow_count(argument.type)
-                        and not result_head(argument.type).startswith("Set")
+                        and not has_universe_codomain(argument.type, goal.sort_names)
                         and result_head(argument.type) != "Level"
                     )
             applications_by_action[action] = tuple(dict.fromkeys(ready_applications))
@@ -1239,7 +1247,7 @@ class _ConstructorSearch:
             if entry.in_scope
             and entry.name
             and not top_level_arrow_count(entry.type)
-            and not result_head(entry.type).startswith("Set")
+            and not has_universe_codomain(entry.type, goal.sort_names)
             and result_head(entry.type) != "Level"
         )
         if not source_entries:
@@ -1248,7 +1256,9 @@ class _ConstructorSearch:
         for action in self._ordered_premise_actions(state, goal):
             source_domains = {
                 normalize_type_text(domain)
-                for domain in premise_eliminator_source_domains(action.type_text)
+                for domain in premise_eliminator_source_domains(
+                    action.type_text, universe_names=goal.sort_names
+                )
             }
             if not source_domains or (
                 explicit_arity(action.type_text) == 1
@@ -1345,6 +1355,8 @@ class _ConstructorSearch:
                 ),
                 None,
             )
+        if goal is not None:
+            goal = self._with_universes(state, goal)
         hint = self._goal_hints.get((state.structural_hash, goal_id))
         if (
             goal is not None
@@ -1354,6 +1366,20 @@ class _ConstructorSearch:
         ):
             return replace(goal, target=hint)
         return goal
+
+    def _with_universes(self, state: StateToken, goal: GoalInfo) -> GoalInfo:
+        if not isinstance(self.session, UniverseScopeSession):
+            return goal
+        names = self.session.universe_names(
+            state,
+            goal_id=goal.goal_id,
+            type_texts=(
+                goal.target,
+                *(e.type for e in goal.context),
+                *(ty for _, ty in self._scope_catalog or ()),
+            ),
+        )
+        return replace(goal, universe_names=names)
 
     def _record_focused(self, result: FocusedCandidatesResult) -> None:
         focused_stats = result.stats
@@ -1499,7 +1525,10 @@ class _ConstructorSearch:
             return False
         head = application[0]
         for entry in goal.context:
-            if not (entry.name == head and result_head(entry.type).startswith("Set")):
+            if not (
+                entry.name == head
+                and has_universe_codomain(entry.type, goal.sort_names)
+            ):
                 continue
             try:
                 telescope = split_top_level_arrows(entry.type)[:-1]
@@ -1536,12 +1565,12 @@ class _ConstructorSearch:
         if top_level_arrow_count(domain):
             return False
         head = result_head(domain)
-        if head.startswith("Set"):
+        if is_universe_head(head, goal.sort_names):
             return False
         return not any(
             entry.in_scope
             and entry.name == head
-            and result_head(entry.type).startswith("Set")
+            and has_universe_codomain(entry.type, goal.sort_names)
             for entry in goal.context
         )
 
@@ -1807,12 +1836,31 @@ class _ConstructorSearch:
         function_values: bool = False,
         implicit_values: bool = False,
         shallow_only: bool = True,
+        relation_families: dict[str, int] | None = None,
     ) -> tuple[ScopePremiseAction, ...]:
         """Return the bounded symbolic tier order, optionally NNUE-tiebroken."""
 
         actions = self._premise_actions(
             state, goal, retrieval_limit=retrieval_limit, shallow_only=shallow_only
         )
+        if relation_families:
+            # A lexical shortlist can omit the small operations needed to
+            # connect its larger theorems. Admit supplied endpoint-wired
+            # composition/inversion heads before NNUE ranking. Visibility and
+            # forbidden-premise filtering remain the ordinary retriever's job.
+            support = tuple(
+                (name, ty)
+                for name, ty in self._scope_catalog or ()
+                if relation_operation_shape(ty, prefix_heads=relation_families)
+                in {"chain", "reverse"}
+            )
+            additions = rank_scope_premises(
+                goal,
+                support,
+                excluded_names=self.excluded_premises,
+                max_candidates=len(support),
+            )
+            actions = tuple(dict.fromkeys((*actions, *additions)))
         if function_values:
             actions = tuple(
                 action
@@ -1830,7 +1878,9 @@ class _ConstructorSearch:
             )
         scoped = self._scoped_actions.get((state, goal.goal_id))
         retrieval_metadata = (
-            scoped.metadata(retrieval_limit) if scoped is not None else {}
+            scoped.metadata(retrieval_limit, goal.sort_names)
+            if scoped is not None
+            else {}
         )
         recursive_evidence = bool(
             self._recursive_action_cache.get((state.structural_hash, goal.goal_id))
@@ -2088,7 +2138,9 @@ class _ConstructorSearch:
             for entry in goal.context
             if entry.in_scope and entry.name
         )
-        families = family_names((*locals_, *(self._scope_catalog or ())))
+        families = family_names(
+            (*locals_, *(self._scope_catalog or ())), universe_names=goal.sort_names
+        )
         target = parse_relation(goal.target, prefix_heads=families)
         if _INTERNAL_META.search(goal.target):
             return ()
@@ -2116,6 +2168,7 @@ class _ConstructorSearch:
                     goal.target,
                     values,
                     tuple((a.expression, a.type_text) for a in actions),
+                    universe_names=goal.sort_names,
                 )
             )
             if target is None
@@ -2179,6 +2232,7 @@ class _ConstructorSearch:
             evidence_declarations,
             endpoint_terms=endpoints,
             relation_heads=edge_heads,
+            universe_names=goal.sort_names,
         )
         if next(proposals, None) is None and not expand_scoped_evidence:
             return ()
@@ -2256,6 +2310,7 @@ class _ConstructorSearch:
                         evidence_declarations,
                         endpoint_terms=endpoints,
                         relation_heads=edge_heads,
+                        universe_names=goal.sort_names,
                     )
                     if p.expression not in attempted
                 )
@@ -2285,6 +2340,7 @@ class _ConstructorSearch:
                         goal.target,
                         tuple(terms),
                         tuple((a.expression, a.type_text) for a in widened),
+                        universe_names=goal.sort_names,
                     )
                     if declaration not in evidence_declarations
                 )
@@ -2442,14 +2498,20 @@ class _ConstructorSearch:
         terms = tuple(
             EvidenceTerm(e.name, e.type) for e in goal.context if e.in_scope and e.name
         )
-        inputs = tuple(indexed_evidence_inputs(goal.target, terms))
+        inputs = tuple(
+            indexed_evidence_inputs(goal.target, terms, universe_names=goal.sort_names)
+        )
         if not inputs:
             return
-        families = family_names(tuple(self._scope_catalog or ()))
+        families = family_names(
+            tuple(self._scope_catalog or ()), universe_names=goal.sort_names
+        )
         heads = tuple(
             a
             for a in self._ordered_premise_actions(state, goal)
-            if is_family_transport(a.type_text, families)
+            if is_family_transport(
+                a.type_text, families, universe_names=goal.sort_names
+            )
         )
         for value in inputs:
             for head in heads:
@@ -2494,7 +2556,7 @@ class _ConstructorSearch:
         the generator, scope, ordinary admission or proof authority.
         """
         pool = self._scoped_actions[(state, goal.goal_id)]
-        metadata = pool.metadata(len(pool.ranking.items))
+        metadata = pool.metadata(len(pool.ranking.items), goal.sort_names)
         entries = sorted(pool.entries, key=lambda entry: entry[0])
         seen: set[str] = set()
         for width in pool.ranking.progressive_limits():
@@ -2723,7 +2785,9 @@ class _ConstructorSearch:
                 if surface is None:
                     continue
                 head = binary_mixfix_head(surface.operator)
-            if head not in catalog or not result_head(catalog[head]).startswith("Set"):
+            if head not in catalog or not has_universe_codomain(
+                catalog[head], goal.sort_names
+            ):
                 continue
             constructors = self.session.constructor_candidates(
                 state, goal_id=goal.goal_id, type_head=head
@@ -2792,7 +2856,9 @@ class _ConstructorSearch:
         if not terms:
             return
         actions = self._ordered_premise_actions(state, goal)
-        families = family_names(tuple(self._scope_catalog or ()))
+        families = family_names(
+            tuple(self._scope_catalog or ()), universe_names=goal.sort_names
+        )
         target = parse_relation(goal.target, prefix_heads=families)
         if target is None or _INTERNAL_META.search(goal.target):
             return
@@ -2821,7 +2887,7 @@ class _ConstructorSearch:
             for term in terms:
                 if (
                     top_level_arrow_count(term.type_text)
-                    or result_head(term.type_text).startswith("Set")
+                    or has_universe_codomain(term.type_text, goal.sort_names)
                     or len(split_top_level_application(term.type_text)) < 2
                     or result_head(term.type_text) != result_head(domains[0])
                 ):
@@ -2971,17 +3037,20 @@ class _ConstructorSearch:
             and isinstance(self.session, ScopeDeclarationSession)
         ):
             return ()
-        target_relation = parse_relation(goal.target)
-        referenced_relation_locals = tuple(
+        families = family_names(
+            tuple(self._scope_catalog or ()), universe_names=goal.sort_names
+        )
+        target_relation = parse_relation(goal.target, prefix_heads=families)
+        relation_locals = tuple(
             entry
             for entry in goal.context
             if entry.in_scope
             and entry.name
-            and re.search(rf"(?<!\w){re.escape(entry.name)}(?!\w)", goal.target)
             and target_relation is not None
             and parse_relation(
                 entry.type,
                 expected_operator=target_relation.operator,
+                prefix_heads=families,
             )
             is not None
         )
@@ -2995,17 +3064,18 @@ class _ConstructorSearch:
             and parse_relation(
                 action.inferred_type,
                 expected_operator=target_relation.operator,
+                prefix_heads=families,
             )
             is not None
         )
         if self.defer_concrete_premises or (
-            len(referenced_relation_locals) + len(recursive_relation_seeds) < 2
+            len(relation_locals) + len(recursive_relation_seeds) < 2
         ):
             return ()
         remaining = self.action_budget - self.stats.actions_considered
         if remaining <= 1:
             return ()
-        actions = self._ordered_premise_actions(state, goal)
+        actions = self._ordered_premise_actions(state, goal, relation_families=families)
         heads = tuple(
             RelationHead(action.expression, action.type_text, order)
             for order, action in enumerate(actions)
@@ -3022,8 +3092,10 @@ class _ConstructorSearch:
             query_budget=min(192, remaining - 1),
             deadline=self.deadline,
             seed_terms=recursive_seeds,
+            prefix_heads=families,
         )
         self.stats.relation_path = result.stats.to_dict()
+        self.stats.evidence_path_queries += result.stats.inference_queries
         self.stats.actions_considered += result.stats.inference_queries
         self.stats.actions_generated += result.stats.applications_generated
         if result.expression is None:
@@ -3504,6 +3576,7 @@ class _ConstructorSearch:
                         goal.target,
                         values,
                         tuple((a.expression, a.type_text) for a in actions),
+                        universe_names=goal.sort_names,
                     ),
                     *consumers,
                 )
@@ -3517,6 +3590,7 @@ class _ConstructorSearch:
                 declarations,
                 endpoint_terms=frozenset(),
                 relation_heads=frozenset(),
+                universe_names=goal.sort_names,
             )
             if (
                 result_head(proposal.function.type_text) == target_head
@@ -3724,6 +3798,15 @@ class _ConstructorSearch:
                 state, goal, depth, descendants, premise_query_stop
             )
 
+        families = family_names(
+            tuple(self._scope_catalog or ()), universe_names=goal.sort_names
+        )
+        early_relation_search = (
+            self.contextual_evidence_enabled and result_head(goal.target) in families
+        )
+        if early_relation_search:
+            yield from self._solve_with_relation_path(state, goal)
+
         yield from self._solve_with_expected_evidence(state, goal, premise_query_stop)
 
         # Function introduction is invertible.  Asking Agda once introduces
@@ -3744,7 +3827,9 @@ class _ConstructorSearch:
                 and domains
                 and parse_relation(
                     domains[0],
-                    prefix_heads=family_names(tuple(self._scope_catalog or ())),
+                    prefix_heads=family_names(
+                        tuple(self._scope_catalog or ()), universe_names=goal.sort_names
+                    ),
                 )
             ):
                 domain_head = result_head(domains[0])
@@ -4067,6 +4152,7 @@ class _ConstructorSearch:
                 for name, ty in self._scope_catalog or ()
                 if name not in self.excluded_premises
             ),
+            universe_names=goal.sort_names,
         )
         consequence_stop = min(self.action_budget, self.stats.actions_considered + 48)
         for expression in consequences if self.contextual_evidence_enabled else ():
@@ -4527,7 +4613,9 @@ class _ConstructorSearch:
                 yield solution
         if self.defer_concrete_premises and goal_has_concrete_nullary_scrutinee(goal):
             return
-        relation_solutions = self._solve_with_relation_path(state, goal)
+        relation_solutions = (
+            () if early_relation_search else self._solve_with_relation_path(state, goal)
+        )
         if relation_solutions:
             yield from relation_solutions
             return
@@ -4964,12 +5052,17 @@ class _ConstructorSearch:
             # declarations instead of silently shrinking to the current
             # module's textual prefix.
             self._scope_catalog = root_catalog
+            root_goal = self._with_universes(state, root_goal)
             self._nonrecursive_eliminator_sources = tuple(
                 (type_text, domains)
                 for _name, type_text in root_catalog
                 if not self._local_eliminator_readiness_enabled
                 or _name not in self.excluded_premises
-                if (domains := premise_eliminator_source_domains(type_text))
+                if (
+                    domains := premise_eliminator_source_domains(
+                        type_text, universe_names=root_goal.sort_names
+                    )
+                )
             )
             if scoped is not None:
                 self._rank_scoped_premises(state, root_goal, scoped)

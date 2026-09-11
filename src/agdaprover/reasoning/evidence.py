@@ -16,7 +16,9 @@ from ..notation import binary_mixfix_head, render_application, strip_outer_paren
 from ..relation_path import parse_relation
 from ..resource_budget import checkpoint
 from ..type_syntax import (
+    DEFAULT_UNIVERSE_NAMES,
     binder_domains,
+    has_universe_codomain,
     normalize_type_text,
     parse_named_binder,
     result_head,
@@ -93,7 +95,12 @@ def transport_index_labels(
     return None
 
 
-def is_family_transport(type_text: str, families: dict[str, int]) -> bool:
+def is_family_transport(
+    type_text: str,
+    families: dict[str, int],
+    *,
+    universe_names: frozenset[str] = DEFAULT_UNIVERSE_NAMES,
+) -> bool:
     """Recognize a supplied ``F x → F y`` operation requiring an ``R x y``.
 
     This records telescope wiring only. It assigns no transport law to R;
@@ -113,7 +120,7 @@ def is_family_transport(type_text: str, families: dict[str, int]) -> bool:
     if (
         motive is None
         or len(motive.names) != 1
-        or not result_head(motive.domain).startswith("Set")
+        or not has_universe_codomain(motive.domain, universe_names)
     ):
         return False
     relation = parse_relation(domains[1], prefix_heads=families)
@@ -129,7 +136,10 @@ def is_family_transport(type_text: str, families: dict[str, int]) -> bool:
 
 
 def indexed_evidence_inputs(
-    goal_type: str, terms: tuple[EvidenceTerm, ...]
+    goal_type: str,
+    terms: tuple[EvidenceTerm, ...],
+    *,
+    universe_names: frozenset[str] = DEFAULT_UNIVERSE_NAMES,
 ) -> Iterator[IndexedEvidence]:
     """Find ready values whose type varies along a visible contextual index."""
 
@@ -140,7 +150,7 @@ def indexed_evidence_inputs(
         t
         for t in terms
         if not top_level_arrow_count(t.type_text)
-        and not result_head(t.type_text).startswith("Set")
+        and not has_universe_codomain(t.type_text, universe_names)
     )
     target_names = names(goal_type)
     for value in indices:
@@ -234,6 +244,8 @@ def evidence_consequences(
     goal_type: str,
     terms: tuple[EvidenceTerm, ...],
     declarations: tuple[tuple[str, str], ...],
+    *,
+    universe_names: frozenset[str] = DEFAULT_UNIVERSE_NAMES,
 ) -> Iterator[str]:
     """Close a supplied relational eliminator with structured evidence.
 
@@ -242,14 +254,14 @@ def evidence_consequences(
     checking the complete application determines their actual types. No
     refutation or constructor disjointness is assumed by this generator.
     """
-    families = family_names(declarations)
+    families = family_names(declarations, universe_names=universe_names)
     if parse_relation(goal_type, prefix_heads=families):
         return
     values = tuple(
         term
         for term in terms
         if not top_level_arrow_count(term.type_text)
-        and not result_head(term.type_text).startswith("Set")
+        and not has_universe_codomain(term.type_text, universe_names)
     )
     for name, ty in declarations:
         checkpoint()
@@ -268,7 +280,7 @@ def evidence_consequences(
                     binder is None
                     or binder.visibility != "implicit"
                     or top_level_arrow_count(binder.domain)
-                    or result_head(binder.domain).startswith("Set")
+                    or has_universe_codomain(binder.domain, universe_names)
                 ):
                     continue
                 # Agda renders shadowed labels as {label = local : T}.
@@ -379,14 +391,18 @@ def implicit_value_type(type_text: str) -> str | None:
         return None
 
 
-def family_names(declarations: tuple[tuple[str, str], ...]) -> dict[str, int]:
+def family_names(
+    declarations: tuple[tuple[str, str], ...],
+    *,
+    universe_names: frozenset[str] = DEFAULT_UNIVERSE_NAMES,
+) -> dict[str, int]:
     """Recognize type-valued families from signatures, never their spelling."""
     result: dict[str, int] = {}
     for name, ty in declarations:
         checkpoint()
         try:
             arity = len(explicit_domains(ty))
-            if arity >= 2 and result_head(ty).startswith("Set"):
+            if arity >= 2 and has_universe_codomain(ty, universe_names):
                 result[strip_outer_parentheses(name)] = arity
         except ValueError:
             continue
@@ -434,6 +450,7 @@ def evidence_applications(
     *,
     endpoint_terms: frozenset[str],
     relation_heads: frozenset[str],
+    universe_names: frozenset[str] = DEFAULT_UNIVERSE_NAMES,
 ) -> Iterator[EvidenceApplication]:
     """Project ready structured inputs, then apply their observed functions.
 
@@ -445,7 +462,7 @@ def evidence_applications(
         term
         for term in terms
         if implicit_value_type(term.type_text) is not None
-        and not result_head(term.type_text).startswith("Set")
+        and not has_universe_codomain(term.type_text, universe_names)
         and result_head(term.type_text) not in relation_heads
     )
     functions = tuple(term for term in terms if explicit_domains(term.type_text))
@@ -539,6 +556,8 @@ def ready_evidence_declarations(
     goal_type: str,
     terms: tuple[EvidenceTerm, ...],
     declarations: tuple[tuple[str, str], ...],
+    *,
+    universe_names: frozenset[str] = DEFAULT_UNIVERSE_NAMES,
 ) -> Iterator[tuple[str, str]]:
     """Offer supplied maps and consumers supported by the current context.
 
@@ -558,7 +577,7 @@ def ready_evidence_declarations(
     for term in terms:
         checkpoint()
         try:
-            if result_head(term.type_text).startswith("Set"):
+            if has_universe_codomain(term.type_text, universe_names):
                 continue
         except ValueError:
             continue

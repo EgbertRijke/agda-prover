@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -219,6 +220,43 @@ class Agda28Adapter:
         return (
             f"Cmd_show_module_contents Normalised {interaction_id} noRange "
             f"{_quote(module_name)}"
+        )
+
+    def resolve_name(self, interaction_id: int, name: str) -> str:
+        return f"Cmd_why_in_scope {interaction_id} noRange {_quote(name)}"
+
+    def is_sort_name(self, response: DecodedResponse, name: str) -> bool:
+        """Decode Agda 2.8's scope identity, not a user-selected spelling.
+
+        The stock protocol exposes this identity in its version-specific
+        WhyInScope rendering. Reject shadowed, ambiguous and unknown shapes.
+        Native and stock bridges use the same response contract.
+        """
+        for event in response.events:
+            info = event.value.get("info")
+            if not isinstance(info, dict) or info.get("kind") != "WhyInScope":
+                continue
+            if info.get("thing") != name or not isinstance(info.get("message"), str):
+                return False
+            message = info["message"]
+            identities = re.findall(r"^\s*\* a ([^\n]+)", message, re.MULTILINE)
+            return (
+                len(identities) == 1
+                and re.fullmatch(
+                    r"primitive function Agda\.Primitive\.(?:Set|Prop|SSet)(?:ω)?(?: brought into scope by)?",
+                    identities[0].strip(),
+                )
+                is not None
+            )
+        return False
+
+    def is_unknown_name(self, response: DecodedResponse, name: str) -> bool:
+        return any(
+            isinstance(info := event.value.get("info"), dict)
+            and info.get("kind") == "WhyInScope"
+            and info.get("thing") == name
+            and info.get("message") == f"{name} is not in scope."
+            for event in response.events
         )
 
     def constraints(self) -> str:

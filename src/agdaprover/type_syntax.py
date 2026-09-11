@@ -15,6 +15,60 @@ from typing import Literal
 _OPEN_TO_CLOSE = {"(": ")", "{": "}", "[": "]", "⦃": "⦄"}
 _CLOSERS = set(_OPEN_TO_CLOSE.values())
 
+DEFAULT_UNIVERSE_NAMES = frozenset(
+    prefix + name
+    for prefix in ("", "Agda.Primitive.")
+    for name in ("Set", "Setω", "Prop", "SSet", "Propω", "SSetω")
+)
+
+
+def is_universe_head(
+    head: str, universe_names: frozenset[str] = DEFAULT_UNIVERSE_NAMES
+) -> bool:
+    """Recognize a sort spelling supplied by the kernel's local scope.
+
+    Live scopes supply exact observed spellings, including level suffixes,
+    so a shadowed suffixed name cannot inherit a primitive's identity.
+    Legacy callers retain canonical built-in notation. A prefix match is not
+    sufficient: SetLike is not a universe. This is not typing evidence.
+    """
+    return head in universe_names or (
+        universe_names == DEFAULT_UNIVERSE_NAMES
+        and head.rstrip("₀₁₂₃₄₅₆₇₈₉") in universe_names
+    )
+
+
+def has_universe_codomain(
+    type_text: str, universe_names: frozenset[str] = DEFAULT_UNIVERSE_NAMES
+) -> bool:
+    return is_universe_head(result_head(type_text), universe_names)
+
+
+def type_heads(type_text: str) -> frozenset[str]:
+    """Collect possible sort names from a displayed telescope, without guessing.
+
+    The kernel resolves these names; the scanner does not classify them.
+    Bound variables and applications may therefore occur in the result.
+    """
+    pending = [type_text]
+    heads: set[str] = set()
+    while pending:
+        text = pending.pop()
+        try:
+            parts = split_top_level_arrows(text)
+            heads.add(result_head(parts[-1]))
+            for part in parts[:-1]:
+                for group in split_adjacent_binders(part) or (part,):
+                    binder = parse_named_binder(group)
+                    pending.append(binder.domain if binder is not None else group)
+        except ValueError:
+            continue
+    return frozenset(
+        head
+        for head in heads
+        if head and head != "_" and not any(c.isspace() or c in "(){}⦃⦄" for c in head)
+    )
+
 
 class _ScanBatch:
     """Short-lived lexical work reuse, never a type/proof/visibility cache."""

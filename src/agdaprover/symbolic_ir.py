@@ -131,7 +131,9 @@ class SymbolicState:
         if set(value) != expected:
             raise ValueError("malformed symbolic state")
         goal_value = value["goal"]
-        if not isinstance(goal_value, Mapping) or set(goal_value) != {
+        if not isinstance(goal_value, Mapping) or set(goal_value) - {
+            "universe_names"
+        } != {
             "goal_id",
             "target",
             "context",
@@ -144,6 +146,16 @@ class SymbolicState:
         context = goal_value["context"]
         source_range = goal_value["source_range"]
         module_scope = goal_value["module_scope"]
+        universe_names = goal_value.get("universe_names")
+        if universe_names is not None and (
+            not isinstance(universe_names, list)
+            or not all(
+                isinstance(name, str) and name and not any(c.isspace() for c in name)
+                for name in universe_names
+            )
+            or universe_names != sorted(set(universe_names))
+        ):
+            raise ValueError("malformed symbolic-state universe names")
         if (
             not isinstance(goal_id, int)
             or isinstance(goal_id, bool)
@@ -190,6 +202,7 @@ class SymbolicState:
                 tuple(entries),
                 (source_range[0], source_range[1]),
                 ModuleScope.from_dict(module_scope),
+                None if universe_names is None else frozenset(universe_names),
             ),
             environment_id=value["environment_id"],
             source_revision=value["source_revision"],

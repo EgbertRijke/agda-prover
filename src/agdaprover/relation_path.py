@@ -13,6 +13,7 @@ import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Protocol
 
 from .bridge.contracts import StateToken
@@ -52,7 +53,7 @@ class RelationView:
     right: str
     canonical_endpoints: bool = False
 
-    @property
+    @cached_property
     def key(self) -> tuple[str, str]:
         key = _canonical_endpoint_key if self.canonical_endpoints else _endpoint_key
         return (key(self.left), key(self.right))
@@ -339,6 +340,22 @@ def relation_operation_shape(
         and result.key == (edges[0][0], edges[1][1])
     ):
         return "chain"
+    if len(edges) == 2:
+        # A binary operation can carry an edge through a context fixed by
+        # its other argument. Compare endpoint wiring, not operation names.
+        for position, (left, right) in enumerate(edges):
+            if left == right or not all(
+                re.fullmatch(r"[^\s()]+", e) for e in (left, right)
+            ):
+                continue
+            lhs = re.sub(
+                rf"(?<![\w′']){re.escape(left)}(?![\w′'])", "@edge", result.key[0]
+            )
+            rhs = re.sub(
+                rf"(?<![\w′']){re.escape(right)}(?![\w′'])", "@edge", result.key[1]
+            )
+            if "@edge" in lhs and lhs == rhs:
+                return f"map-{position}"
     return None
 
 
@@ -516,12 +533,14 @@ def solve_relation_path(
     )
 
     def close_boundary() -> str | None:
+        if stats.inference_queries >= query_budget or time.monotonic() >= deadline:
+            return None
         for left in tuple(terms):
-            for right in tuple(terms):
-                if (left.edge.key[0], right.edge.key[1]) != target.key or left.edge.key[
-                    1
-                ] != right.edge.key[0]:
-                    continue
+            if left.edge.key[0] != target.key[0]:
+                continue
+            for right in tuple(
+                edge_expressions.get((left.edge.key[1], target.key[1]), ())
+            ):
                 for head in binary_heads:
                     if shapes.get(head) == "chain":
                         if (solved := infer(head, (left, right))) is not None:
@@ -536,6 +555,39 @@ def solve_relation_path(
         if (solved := close_boundary()) is not None:
             stats.elapsed_ms = (time.monotonic() - started) * 1000.0
             return RelationPathResult(solved, stats, completed_inputs)
+        # Supplied two-input maps are as useful as unary maps. In particular,
+        # their second argument can fix hidden indices of the first. Infer
+        # the complete application before committing to a backwards split.
+        mapped_inputs = tuple(
+            sorted(
+                initial,
+                key=lambda term: (
+                    -_endpoint_overlap(term.edge, target),
+                    term.node_count,
+                ),
+            )
+        )
+        fixed_inputs = tuple(
+            sorted(
+                initial,
+                key=lambda term: (
+                    term.expression not in target.left
+                    and term.expression not in target.right,
+                    term.node_count,
+                ),
+            )
+        )
+        for head in binary_heads:
+            shape = shapes[head]
+            if shape not in {"map-0", "map-1"}:
+                continue
+            for mapped in mapped_inputs:
+                for fixed in fixed_inputs:
+                    arguments = (mapped, fixed) if shape == "map-0" else (fixed, mapped)
+                    solved = infer(head, arguments) or close_boundary()
+                    if solved is not None:
+                        stats.elapsed_ms = (time.monotonic() - started) * 1000.0
+                        return RelationPathResult(solved, stats, completed_inputs)
         # Interleave operators across the shortest observed generators.
         # A large set of edges must not spend the entire slice on the first
         # unary operation before another map can connect the goal boundary.
@@ -563,7 +615,10 @@ def solve_relation_path(
     for head in binary_heads:
         for left in initial:
             for right in initial:
-                if (solved := infer(head, (left, right))) is not None:
+                solved = infer(head, (left, right))
+                if solved is None and prefix_heads:
+                    solved = close_boundary()
+                if solved is not None:
                     stats.elapsed_ms = (time.monotonic() - started) * 1000.0
                     return RelationPathResult(solved, stats, completed_inputs)
 

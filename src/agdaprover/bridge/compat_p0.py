@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import time
+from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
@@ -21,9 +22,12 @@ from ..project_configuration import ProjectConfiguration
 from ..resource_budget import ResourceLimitError
 from ..retrieval import ScopedPremises
 from ..type_syntax import (
+    DEFAULT_UNIVERSE_NAMES,
+    is_universe_head,
     split_top_level_arrows,
     telescope_introduction,
     top_level_arrow_count,
+    type_heads,
 )
 from .configuration import project_request
 from .contracts import (
@@ -127,6 +131,7 @@ class AgdaSession:
         self._source_file: Path | None = None
         self._source_sha256: str | None = None
         self._search_contexts: dict[int, tuple[ContextEntry, ...]] = {}
+        self._sort_names: OrderedDict[tuple[StateToken, int, str], bool] = OrderedDict()
 
     @property
     def toolchain_id(self) -> str:
@@ -190,6 +195,7 @@ class AgdaSession:
         self._project_configuration = configuration
         self._state = None
         self._search_contexts.clear()
+        self._sort_names.clear()
 
     def load_module(self, source_file: Path) -> tuple[GoalInfo, ...]:
         self._ensure_project(source_file, self._project_configuration)
@@ -232,7 +238,7 @@ class AgdaSession:
         selected = next(iter(inspected), None)
         if selected is None:
             raise AgdaBridgeError(f"goal {goal.goal_id} is not open")
-        result = _goal(selected)
+        result = self._observe_universes(self._state, _goal(selected))
         self._search_contexts[result.goal_id] = result.context
         return result
 
@@ -426,9 +432,66 @@ class AgdaSession:
             raise _p0_error(error) from error
         if not selected:
             return None
-        goal = _goal(selected[0])
+        goal = self._observe_universes(state, _goal(selected[0]))
         self._search_contexts[goal.goal_id] = goal.context
         return goal
+
+    def universe_names(
+        self, state: StateToken, *, goal_id: int, type_texts: tuple[str, ...]
+    ) -> frozenset[str]:
+        """Resolve possible universe spellings in this exact interaction scope.
+
+        Imports, re-exports, qualification and shadowing are Agda's concern.
+        The cache never crosses a branch, interaction or source revision.
+        Rejected lookups are not evidence that any theorem is impossible.
+        """
+        candidates = frozenset().union(*(type_heads(ty) for ty in type_texts))
+        pending = tuple(
+            sorted(
+                name
+                for name in candidates
+                if (state, goal_id, name) not in self._sort_names
+            )
+        )
+        try:
+            # Even a cache hit must reject stale states and changed sources.
+            found = self._session.search_sort_names(
+                state, InteractionId(goal_id), pending, self._budget
+            )
+        except BridgeError as error:
+            raise _p0_error(error) from error
+        result = {
+            name
+            for name in candidates
+            if self._sort_names.get((state, goal_id, name), False)
+        } | set(found)
+        for name in pending:
+            self._sort_names[(state, goal_id, name)] = name in found
+        # Eviction only loses an optimization, never admissible search work.
+        while len(self._sort_names) > 2048:
+            self._sort_names.popitem(last=False)
+        return frozenset(result)
+
+    def _observe_universes(self, state: StateToken, goal: GoalInfo) -> GoalInfo:
+        type_texts = (goal.target, *(entry.type for entry in goal.context))
+        names = self.universe_names(
+            state,
+            goal_id=goal.goal_id,
+            type_texts=type_texts,
+        )
+        # Keep the legacy rendering unchanged when it already uses the
+        # default spellings, unless a canonical spelling is itself shadowed.
+        canonical_candidates = {
+            name
+            for ty in type_texts
+            for name in type_heads(ty)
+            if is_universe_head(name)
+        }
+        return (
+            goal
+            if names <= DEFAULT_UNIVERSE_NAMES and canonical_candidates <= names
+            else replace(goal, universe_names=names)
+        )
 
     def instantiated_goal(self, state: StateToken, *, goal_id: int) -> str | None:
         """Read an existing Agda assignment; no candidate is submitted."""

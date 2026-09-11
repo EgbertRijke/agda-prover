@@ -403,7 +403,13 @@ def analyze_module_scope(
         else mask_comments_and_strings(source)
     )
     headers = _module_frames(source, masked)
-    containing = [frame for frame in headers if frame.start <= position <= frame.end]
+    containing = [
+        frame
+        for frame in headers
+        if frame.start <= position < frame.end
+        or frame.kind == "root"
+        and position == frame.end
+    ]
     containing.sort(key=lambda frame: (frame.start, -frame.end))
     if not containing:
         raise ValueError("source contains no enclosing Agda module")
@@ -420,7 +426,7 @@ def analyze_module_scope(
         owners = [
             frame
             for frame in headers
-            if frame.header_end <= directive.source_range[0] <= frame.end
+            if frame.header_end <= directive.source_range[0] < frame.end
         ]
         owner = (
             min(owners, key=lambda frame: frame.end - frame.start) if owners else None

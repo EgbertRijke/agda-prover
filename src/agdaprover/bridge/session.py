@@ -1375,6 +1375,42 @@ class ConformingKernelSession:
             else adapter.named_contents(response)
         )
 
+    def search_sort_names(
+        self,
+        state: StateToken,
+        interaction_id: InteractionId,
+        names: tuple[str, ...],
+        budget: BridgeBudget,
+    ) -> frozenset[str]:
+        """Resolve local sort spellings in one read-only, source-checked batch.
+
+        The public scope query does not resolve Agda's generated level
+        suffixes. Only an unknown suffixed name may fall back to its base;
+        a variable or declaration with that exact name must not be bypassed.
+        Every command still spends the caller's resource/verifier budget.
+        """
+        self._activate(state, budget)
+        adapter = adapter_for_version(self.project.toolchain.version)
+        source = self._source_for(state.module_id)
+        found: set[str] = set()
+        for name in names:
+            _command_id, response = self.transport.command(
+                source, adapter.resolve_name(interaction_id.value, name)
+            )
+            if adapter.is_sort_name(response, name):
+                found.add(name)
+                continue
+            base = name.rstrip("₀₁₂₃₄₅₆₇₈₉")
+            if base and base != name and adapter.is_unknown_name(response, name):
+                _command_id, response = self.transport.command(
+                    source, adapter.resolve_name(interaction_id.value, base)
+                )
+                if adapter.is_sort_name(response, base):
+                    found.add(name)
+        self._active_state = state
+        self.transport.check_resources()
+        return frozenset(found)
+
     def case_split(
         self,
         state: StateToken,

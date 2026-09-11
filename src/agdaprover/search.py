@@ -53,8 +53,8 @@ from .resource_budget import ResourceLimitError, ResourceScope
 from .terms import Term, iter_terms, render_term, symbolic_key
 from .type_syntax import (
     binder_domains,
+    has_universe_codomain,
     parse_named_binder,
-    result_head,
     split_adjacent_binders,
     split_top_level_application,
     split_top_level_arrows,
@@ -86,7 +86,7 @@ def _has_abstract_final_result(goal: GoalInfo) -> bool:
     candidates = tuple(
         entry
         for entry in goal.context
-        if entry.name == head and result_head(entry.type).startswith("Set")
+        if entry.name == head and has_universe_codomain(entry.type, goal.sort_names)
     )
     binder_candidates = []
     for domain_group in telescope[:-1]:
@@ -103,7 +103,7 @@ def _has_abstract_final_result(goal: GoalInfo) -> bool:
         *(candidate.domain for candidate in binder_candidates),
     )
     for candidate_type in candidate_types:
-        if not result_head(candidate_type).startswith("Set"):
+        if not has_universe_codomain(candidate_type, goal.sort_names):
             continue
         try:
             arity = sum(

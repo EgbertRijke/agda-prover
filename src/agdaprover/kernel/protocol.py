@@ -137,6 +137,15 @@ class ScopeDeclarationSession(Protocol):
 
 
 @runtime_checkable
+class UniverseScopeSession(Protocol):
+    """Goal-local primitive identities, resolved through Agda's import scope."""
+
+    def universe_names(
+        self, state: StateToken, *, goal_id: int, type_texts: tuple[str, ...]
+    ) -> frozenset[str]: ...
+
+
+@runtime_checkable
 class InternalObligationSession(Protocol):
     """Optional observation of hidden metas and constraints in a state."""
 

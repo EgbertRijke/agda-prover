@@ -26,8 +26,11 @@ from .notation import (
 from .relation_path import parse_relation
 from .retrieval import RetrievalResult, ScopedPremises
 from .type_syntax import (
+    DEFAULT_UNIVERSE_NAMES,
     binder_domain,
     binder_domains,
+    has_universe_codomain,
+    is_universe_head,
     normalize_type_text,
     parse_named_binder,
     result_head,
@@ -386,7 +389,9 @@ def _binder_names(type_text: str) -> frozenset[str]:
     return frozenset(names)
 
 
-def _type_binder_names(type_text: str) -> frozenset[str]:
+def _type_binder_names(
+    type_text: str, universe_names: frozenset[str] = DEFAULT_UNIVERSE_NAMES
+) -> frozenset[str]:
     """Collect telescope variables whose codomain is a universe."""
 
     names: set[str] = set()
@@ -403,7 +408,7 @@ def _type_binder_names(type_text: str) -> frozenset[str]:
             if binder is None:
                 continue
             codomain = normalize_type_text(_result_type(binder.domain))
-            if codomain == "Set" or codomain.startswith("Set "):
+            if has_universe_codomain(codomain, universe_names):
                 names.update(binder.names)
     return frozenset(names)
 
@@ -1913,9 +1918,11 @@ def premise_static_priority(
     )
 
 
-def _is_type_constructor(type_text: str) -> bool:
+def _is_type_constructor(
+    type_text: str, universe_names: frozenset[str] = DEFAULT_UNIVERSE_NAMES
+) -> bool:
     result = normalize_type_text(_result_type(type_text))
-    return result == "Set" or result.startswith("Set ")
+    return has_universe_codomain(result, universe_names)
 
 
 def _has_bare_polymorphic_result(type_text: str) -> bool:
@@ -1951,7 +1958,9 @@ def premise_independent_result_domains(type_text: str) -> tuple[str, ...]:
     return explicit_domains
 
 
-def premise_eliminator_source_domains(type_text: str) -> tuple[str, ...]:
+def premise_eliminator_source_domains(
+    type_text: str, *, universe_names: frozenset[str] = DEFAULT_UNIVERSE_NAMES
+) -> tuple[str, ...]:
     """Return concrete source domains of a result-polymorphic eliminator.
 
     An eliminator may have result-dependent branch arguments while its final
@@ -1984,7 +1993,7 @@ def premise_eliminator_source_domains(type_text: str) -> tuple[str, ...]:
         for domain in explicit_domains
         if result_name not in _expression_tokens(domain)
         and not top_level_arrow_count(domain)
-        and not result_head(domain).startswith("Set")
+        and not has_universe_codomain(domain, universe_names)
         and result_head(domain) != "Level"
     )
 
@@ -2057,7 +2066,7 @@ def premise_has_local_source(
         if entry.in_scope
         and entry.name
         and not top_level_arrow_count(entry.type)
-        and not result_head(entry.type).startswith("Set")
+        and not has_universe_codomain(entry.type, goal.sort_names)
         and result_head(entry.type) != "Level"
         for domain in source_domains
     )
@@ -2147,7 +2156,9 @@ def _has_structured_result_domain(type_text: str) -> bool:
     return bool(premise_structured_result_domains(type_text))
 
 
-def premise_has_shallow_support(type_text: str) -> bool:
+def premise_has_shallow_support(
+    type_text: str, *, universe_names: frozenset[str] = DEFAULT_UNIVERSE_NAMES
+) -> bool:
     """Whether the existing small composition fragment supports this head.
 
     Type formation and result-polymorphic operations which need that same
@@ -2158,12 +2169,14 @@ def premise_has_shallow_support(type_text: str) -> bool:
     """
 
     return not (
-        _is_type_constructor(type_text)
+        _is_type_constructor(type_text, universe_names)
         or (
             _has_bare_polymorphic_result(type_text)
             and not _has_independent_explicit_domain(type_text)
             and not _has_structured_result_domain(type_text)
-            and not premise_eliminator_source_domains(type_text)
+            and not premise_eliminator_source_domains(
+                type_text, universe_names=universe_names
+            )
         )
     )
 
@@ -2179,12 +2192,16 @@ def shallow_composition_actions(
     Ordinary, non-deferred search must still receive the complete input.
     """
 
-    target_head = result_head(goal.target).rsplit(".", 1)[-1]
-    if _INTERNAL_META.search(goal.target) or re.fullmatch(
-        r"(?:S?Set|Prop)(?:ω)?[₀-₉]*", target_head
+    target_head = result_head(goal.target)
+    if _INTERNAL_META.search(goal.target) or is_universe_head(
+        target_head, goal.sort_names
     ):
         return actions
-    return tuple(a for a in actions if premise_has_shallow_support(a.type_text))
+    return tuple(
+        a
+        for a in actions
+        if premise_has_shallow_support(a.type_text, universe_names=goal.sort_names)
+    )
 
 
 @syntax_scan_batch()
@@ -2221,7 +2238,12 @@ def rank_scope_premises(
             or name in seen
             or name in excluded_names
             or short_name in excluded_names
-            or (shallow_only and not premise_has_shallow_support(type_text))
+            or (
+                shallow_only
+                and not premise_has_shallow_support(
+                    type_text, universe_names=goal.sort_names
+                )
+            )
         ):
             continue
         seen.add(name)

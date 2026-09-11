@@ -14,7 +14,7 @@ from typing import Protocol
 from .contracts import GoalInfo
 from .dependency_tower import DependencyTower, tower_from_goal
 from .dependent_actions import DependentEliminationAction, EliminationReason
-from .type_syntax import normalize_type_text, result_head
+from .type_syntax import has_universe_codomain, normalize_type_text, result_head
 
 
 def goal_has_concrete_nullary_scrutinee(goal: GoalInfo) -> bool:
@@ -27,7 +27,9 @@ def goal_has_concrete_nullary_scrutinee(goal: GoalInfo) -> bool:
     abstract_heads = {
         entry.name
         for entry in goal.context
-        if entry.in_scope and entry.name and result_head(entry.type).startswith("Set")
+        if entry.in_scope
+        and entry.name
+        and has_universe_codomain(entry.type, goal.sort_names)
     }
     for entry in goal.context:
         if not entry.in_scope or not entry.name:

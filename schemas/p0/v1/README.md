@@ -136,6 +136,38 @@ lineage remain shared. Checks spend the current action/premise budget and count
 as `proof_checks` and `premise_queries`, not inference queries. Provisional success
 does not cut off alternatives on generator resume or bypass fresh validation.
 
+## Scope-derived universes and relation composition
+
+Goal observations may include `universe_names`, a sorted, duplicate-free array
+of local spellings that Agda resolves to universe primitives. The optional field
+also round-trips in symbolic-state v1; older observations without it retain
+canonical built-in spellings. These are search hints, not typing evidence.
+Shared family recognition, evidence generation and premise filtering consume
+the same observation rather than assuming that the displayed name is `Set`.
+
+The optional `UniverseScopeSession` boundary resolves names in the exact state
+and interaction scope. Existing project discovery supplies `.agda-lib` settings;
+Agda resolves imports, public reexports, qualification and shadowing. The stock
+2.8 adapter decodes primitive identities from its version-specific `WhyInScope`
+response and rejects unknown or ambiguous identities. Generated numeric level
+suffixes may fall back to their base only when the exact name is absent. Cached
+observations remain branch/source/goal-local and cannot bypass source or resource
+checks. Physical verifier accounting includes these read-only commands.
+
+For a recognized prefix relation, contextual evidence search can try supplied
+relation operations before speculative construction. Composition and inversion
+operations are admitted by their endpoint wiring even when lexical retrieval
+omits them from its first batch. Normal visibility/exclusion filters and the
+existing visible-premise NNUE ranking still apply. All local relation evidence
+is eligible, not only locals whose names appear in the target. Supplied binary
+maps can infer hidden indices from both arguments; newly inferred edges can
+immediately connect the target boundary. No relation laws are assumed: Agda
+infers each intermediate application, checks the proposed completion and freshly
+validates the reconstructed source. `evidence_path_queries` includes direct as
+well as contextual relation-path inference. Disabling
+`AGDAPROVER_CONTEXTUAL_EVIDENCE` disables the new early scheduling preference;
+ordinary later relation search remains available.
+
 ## Editor search profiles
 
 Editor request v1 accepts an optional `search_profile`: `standard` (default)

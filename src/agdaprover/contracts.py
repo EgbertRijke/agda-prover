@@ -56,6 +56,17 @@ class GoalInfo:
     context: tuple[ContextEntry, ...]
     source_range: tuple[int, int]
     module_scope: ModuleScope | None = None
+    universe_names: frozenset[str] | None = None
+
+    @property
+    def sort_names(self) -> frozenset[str]:
+        from .type_syntax import DEFAULT_UNIVERSE_NAMES
+
+        return (
+            DEFAULT_UNIVERSE_NAMES
+            if self.universe_names is None
+            else self.universe_names
+        )
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -66,6 +77,8 @@ class GoalInfo:
         }
         if self.module_scope is not None:
             result["module_scope"] = self.module_scope.to_dict()
+        if self.universe_names is not None:
+            result["universe_names"] = sorted(self.universe_names)
         return result
 
 
