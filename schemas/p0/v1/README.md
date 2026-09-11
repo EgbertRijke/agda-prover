@@ -168,6 +168,37 @@ well as contextual relation-path inference. Disabling
 `AGDAPROVER_CONTEXTUAL_EVIDENCE` disables the new early scheduling preference;
 ordinary later relation search remains available.
 
+## Result-determined complete and partial applications
+
+The shared premise generator retains expression trees and exact source spans
+when matching a declaration result to a goal. Ranking may use lossy shape
+features, but proof reconstruction never concatenates those features. Recovered
+arguments keep application grouping, lambdas, literals and hidden/instance
+syntax. Substitution declines binder-bearing templates requiring scoped
+substitution rather than risking variable capture.
+
+A function goal can reuse a supplied declaration or local function by applying
+only its leading arguments. Those arguments must be result-determined and
+independent of the expected function's own binders. Agda checks the residual
+dependent telescope and implicit arguments. A provisional accepted application
+is not a verified proof: hidden obligations and fresh validation still apply.
+
+`AGDAPROVER_EXPECTED_APPLICATIONS=0` disables the early scheduling pass for
+testing. By default it runs before broad operand enumeration, using the same
+visible shortlist, exclusions, premise-query slice, action/verifier budgets
+and cancellation as ordinary search. Rejections do not remove later search
+alternatives. The NNUE `visible-premise` family ranks actual application
+expressions tagged `check-expected-application`, with `application-kind`,
+`supplied-arguments`, `remaining-arguments` and `arguments-from-result` metadata.
+No new model format or required trained family is introduced.
+
+Bounded diagnostic attempts use `agdaprover.expected-application-attempt.v1`
+and record the expression, target, acceptance/rejection, and this metadata.
+They share the existing premise-attempt retention bound. Pure matching hints
+are limited to 256 lexemes and 4,096 matching states; larger or unsupported
+expressions retain ordinary kernel-driven search, rather than receiving a
+task-wide failure from this optional hint.
+
 ## Editor search profiles
 
 Editor request v1 accepts an optional `search_profile`: `standard` (default)

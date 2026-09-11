@@ -167,7 +167,9 @@ def parse_relation(
     part of the operator, so different family instances cannot share edges.
     """
 
-    text = " ".join(type_text.strip().split())
+    # Endpoints can be copied into proof applications. Preserve their source,
+    # including whitespace inside literals; normalization is only a key/view.
+    text = type_text.strip()
     try:
         if len(split_top_level_arrows(text)) != 1:
             return None

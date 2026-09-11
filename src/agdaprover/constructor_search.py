@@ -34,12 +34,19 @@ from .kernel.protocol import (
     TransactionalKernelSession,
     UniverseScopeSession,
 )
-from .notation import binary_mixfix_head, render_application, strip_outer_parentheses
+from .notation import (
+    binary_mixfix_head,
+    render_application,
+    render_declaration_head,
+    strip_outer_parentheses,
+)
 from .observability.policy_trace import PolicyChoice
 from .or_policy import ORPolicyRouter, policy_candidate
 from .premise_search import (
+    ExpectedApplication,
     ScopePremiseAction,
     premise_eliminator_source_domains,
+    premise_expected_application,
     premise_expected_arguments,
     premise_function_shape_matches,
     premise_has_local_source,
@@ -571,6 +578,9 @@ class _ConstructorSearch:
         )
         self._expected_evidence_enabled = (
             os.environ.get("AGDAPROVER_EXPECTED_EVIDENCE", "1") != "0"
+        )
+        self._expected_applications_enabled = (
+            os.environ.get("AGDAPROVER_EXPECTED_APPLICATIONS", "1") != "0"
         )
         self._scoped_evidence_sources_enabled = (
             os.environ.get("AGDAPROVER_SCOPED_EVIDENCE_SOURCES", "1") != "0"
@@ -3509,6 +3519,128 @@ class _ConstructorSearch:
                         choice.decision_id, choice.candidate_id, outcome="invalid"
                     )
 
+    def _solve_with_expected_applications(
+        self,
+        state: StateToken,
+        goal: GoalInfo,
+        premise_query_stop: int,
+    ) -> Iterator[ConstructorSolution]:
+        """Check result-determined applications before operand enumeration.
+
+        This lane consumes the ordinary visible shortlist and local context;
+        it neither expands scope nor synthesizes unknown operands. NNUE ranks
+        the actual complete/partial expressions, not just their heads. Failed
+        checks and provisional completions leave every ordinary lane available.
+        """
+        if (
+            not self._expected_applications_enabled
+            or self.defer_concrete_premises
+            or not self._available()
+            or self._scope_premise_queries
+            >= min(premise_query_stop, self.stats.premise_query_limit)
+        ):
+            return
+        actions = (
+            *self._premise_actions(state, goal, shallow_only=False),
+            *(
+                ScopePremiseAction(
+                    entry.name, entry.type, render_declaration_head(entry.name)
+                )
+                for entry in goal.context
+                if entry.in_scope and entry.name and top_level_arrow_count(entry.type)
+            ),
+        )
+        proposals: dict[str, tuple[ScopePremiseAction, ExpectedApplication]] = {}
+        for action in actions:
+            proposal = premise_expected_application(
+                goal, action, excluded_names=self.excluded_premises
+            )
+            if proposal is not None:
+                proposals.setdefault(proposal.expression, (action, proposal))
+        candidates = tuple(
+            policy_candidate(
+                family="visible-premise",
+                tag="check-expected-application",
+                expression=expression,
+                type_text=action.type_text,
+                symbolic_key=(len(proposal.arguments), expression),
+                metadata=(
+                    (
+                        "application-kind",
+                        "partial" if proposal.remaining_arguments else "complete",
+                    ),
+                    ("supplied-arguments", str(len(proposal.arguments))),
+                    ("remaining-arguments", str(proposal.remaining_arguments)),
+                    ("arguments-from-result", "true"),
+                ),
+            )
+            for expression, (action, proposal) in sorted(
+                proposals.items(), key=lambda row: (len(row[1][1].arguments), row[0])
+            )
+        )
+        before_items = self.policy_router.model_items_scored
+        before_batches = self.policy_router.model_batches
+        before_elapsed = self.policy_router.model_elapsed_ms
+        before_fallbacks = self.policy_router.symbolic_fallbacks
+        ranked = self.policy_router.rank(goal, candidates)
+        self.stats.model_calls += self.policy_router.model_items_scored - before_items
+        self.stats.model_batches += self.policy_router.model_batches - before_batches
+        self.stats.model_elapsed_ms += (
+            self.policy_router.model_elapsed_ms - before_elapsed
+        )
+        self.stats.symbolic_fallbacks += (
+            self.policy_router.symbolic_fallbacks - before_fallbacks
+        )
+        choices = self.policy_router.snapshot_choices("visible-premise", goal)
+        stop = min(
+            premise_query_stop,
+            self.stats.premise_query_limit,
+            self._scope_premise_queries + _PREMISE_BRANCH_QUERY_SLICE,
+        )
+        for candidate in ranked.candidates:
+            if self._scope_premise_queries >= stop or not self._charge():
+                return
+            choice = choices.get(candidate.expression)
+            if choice is not None:
+                self.policy_router.recorder.mark(
+                    choice.decision_id, choice.candidate_id
+                )
+            checked = self.session.commit_proof_action(
+                state,
+                kind="give",
+                goal_id=goal.goal_id,
+                expression=candidate.expression,
+            )
+            self.stats.actions_generated += 1
+            self.stats.premise_candidates += 1
+            self.stats.premise_queries += 1
+            self.stats.proof_checks += 1
+            self._scope_premise_queries += 1
+            attempt = {
+                "schema_version": "agdaprover.expected-application-attempt.v1",
+                "tag": candidate.tag,
+                "expression": candidate.expression,
+                "goal_target": goal.target,
+                "accepted": checked.accepted,
+                "rejection_code": checked.rejection_code,
+                "metadata": dict(candidate.metadata),
+            }
+            if len(self.stats.premise_attempts) < _MAX_RECORDED_PREMISE_ATTEMPTS:
+                self.stats.premise_attempts.append(attempt)
+            else:
+                self.stats.premise_attempts_omitted += 1
+            if checked.accepted and checked.child_state is not None:
+                yield ConstructorSolution(
+                    checked.child_state,
+                    ProofPlan(
+                        candidate.expression, policy_choices=(choice,) if choice else ()
+                    ),
+                )
+            elif choice is not None:
+                self.policy_router.recorder.mark(
+                    choice.decision_id, choice.candidate_id, outcome="invalid"
+                )
+
     def _solve_with_expected_evidence(
         self,
         state: StateToken,
@@ -3797,6 +3929,10 @@ class _ConstructorSearch:
             yield from self._solve_with_copattern_call(
                 state, goal, depth, descendants, premise_query_stop
             )
+
+        yield from self._solve_with_expected_applications(
+            state, goal, premise_query_stop
+        )
 
         families = family_names(
             tuple(self._scope_catalog or ()), universe_names=goal.sort_names

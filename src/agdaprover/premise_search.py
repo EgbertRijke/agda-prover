@@ -12,7 +12,7 @@ import heapq
 import itertools
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache
 from typing import Any
 
@@ -25,6 +25,7 @@ from .notation import (
 )
 from .relation_path import parse_relation
 from .retrieval import RetrievalResult, ScopedPremises
+from .surface_matching import SurfaceTerm, match_surface, substitute_surface
 from .type_syntax import (
     DEFAULT_UNIVERSE_NAMES,
     binder_domain,
@@ -131,7 +132,7 @@ def _observed_application_arities(
 def _shared_mixfix_result_binding(
     goal: GoalInfo,
     action: ScopePremiseAction,
-) -> dict[str, tuple[str, ...]] | None:
+) -> dict[str, SurfaceTerm] | None:
     """Bind a repeated result head from a shared binary surface operator."""
 
     binders = _binder_names(action.type_text)
@@ -164,7 +165,7 @@ def _shared_mixfix_result_binding(
         operation = binary_mixfix_head(shared_operators[0])
     except ValueError:
         return None
-    return {repeated[0]: (operation,)}
+    return {repeated[0]: SurfaceTerm(operation)}
 
 
 @dataclass(frozen=True)
@@ -414,6 +415,7 @@ def _type_binder_names(
 
 
 def _expression_tokens(text: str) -> tuple[str, ...]:
+    """Lossy shape features for ranking only; never render these as terms."""
     try:
         surface = strip_outer_delimiters(text)
     except ValueError:
@@ -480,7 +482,7 @@ def premise_result_matches(goal: GoalInfo, action: ScopePremiseAction) -> bool:
 
 def _result_bindings(
     goal: GoalInfo, action: ScopePremiseAction
-) -> dict[str, tuple[str, ...]] | None:
+) -> dict[str, SurfaceTerm] | None:
     """Match a result while retaining telescope-variable substitutions."""
 
     variables = _binder_names(action.type_text)
@@ -498,107 +500,21 @@ def _result_bindings(
                 and parsed.visibility in {"explicit", "implicit", "instance"}
             ):
                 function_variables.update(parsed.names)
-    premise_relation = parse_relation(_result_type(action.type_text))
-    target_relation = (
-        parse_relation(goal.target, expected_operator=premise_relation.operator)
-        if premise_relation is not None
-        else None
+    return match_surface(
+        _result_type(action.type_text),
+        goal.target,
+        variables,
+        longest_first=frozenset(function_variables),
+        step_limit=_RESULT_MATCH_STEP_LIMIT,
     )
-    if premise_relation is not None and target_relation is not None:
-        endpoint_bindings: dict[str, tuple[str, ...]] = {}
-        endpoint_match = True
-        for pattern_endpoint, target_endpoint in (
-            (premise_relation.left, target_relation.left),
-            (premise_relation.right, target_relation.right),
-        ):
-            pattern_terms = _top_level_terms(strip_outer_parentheses(pattern_endpoint))
-            target_terms = _top_level_terms(strip_outer_parentheses(target_endpoint))
-            if (
-                len(pattern_terms) < 2
-                or pattern_terms[0] not in function_variables
-                or any(term not in variables for term in pattern_terms[1:])
-                or len(target_terms) <= len(pattern_terms) - 1
-            ):
-                endpoint_match = False
-                break
-            argument_count = len(pattern_terms) - 1
-            substitutions = {
-                pattern_terms[0]: _expression_tokens(
-                    " ".join(target_terms[:-argument_count])
-                ),
-                **{
-                    name: _expression_tokens(value)
-                    for name, value in zip(
-                        pattern_terms[1:],
-                        target_terms[-argument_count:],
-                        strict=True,
-                    )
-                },
-            }
-            for name, value in substitutions.items():
-                previous = endpoint_bindings.get(name)
-                if previous is not None and previous != value:
-                    endpoint_match = False
-                    break
-                endpoint_bindings[name] = value
-            if not endpoint_match:
-                break
-        if endpoint_match:
-            return endpoint_bindings
-    pattern = _expression_tokens(_result_type(action.type_text))
-    target = _expression_tokens(goal.target)
-    if len(pattern) > 128 or len(target) > 128:
-        return None
-    steps = 0
-
-    def visit(
-        pattern_index: int,
-        target_index: int,
-        bindings: dict[str, tuple[str, ...]],
-    ) -> dict[str, tuple[str, ...]] | None:
-        nonlocal steps
-        steps += 1
-        if steps > _RESULT_MATCH_STEP_LIMIT:
-            return None
-        if pattern_index == len(pattern):
-            return bindings if target_index == len(target) else None
-        token = pattern[pattern_index]
-        if token not in variables:
-            if target_index >= len(target) or target[target_index] != token:
-                return None
-            return visit(pattern_index + 1, target_index + 1, bindings)
-        previous = bindings.get(token)
-        if previous is not None:
-            end = target_index + len(previous)
-            if target[target_index:end] != previous:
-                return None
-            return visit(pattern_index + 1, end, bindings)
-        ends: Iterable[int] = range(target_index + 1, len(target) + 1)
-        if token in function_variables:
-            # In an endpoint such as ``c a x``, a higher-order result pattern
-            # ``f x`` must first try the maximal common application prefix
-            # ``f := c a``.  The shortest wildcard match ``f := c`` is also a
-            # syntactic solution, but usually has the wrong function domain
-            # and causes the checked congruence proposal to be discarded.
-            # Binder kinds come from the declaration telescope; Agda remains
-            # authoritative for every resulting application.
-            ends = reversed(tuple(ends))
-        for end in ends:
-            extended = {**bindings, token: target[target_index:end]}
-            matched = visit(pattern_index + 1, end, extended)
-            if matched is not None:
-                return matched
-        return None
-
-    return visit(0, 0, {})
 
 
-def _endpoint_bindings(
+def _shape_bindings(
     pattern: tuple[str, ...],
     target: tuple[str, ...],
     variables: frozenset[str],
 ) -> dict[str, tuple[str, ...]] | None:
-    """Match one relation endpoint against a telescope-parametric pattern."""
+    """Approximate type-shape compatibility; bindings are not proof source."""
 
     if len(pattern) > 128 or len(target) > 128:
         return None
@@ -641,7 +557,7 @@ def _endpoint_bindings(
 
 def _application_from_bindings(
     action: ScopePremiseAction,
-    bindings: dict[str, tuple[str, ...]],
+    bindings: dict[str, SurfaceTerm],
 ) -> str | None:
     """Render a complete explicit application from matched result variables."""
 
@@ -660,7 +576,7 @@ def _application_from_bindings(
                     value = bindings.get(name)
                     if value is None:
                         return None
-                    arguments.append(" ".join(value))
+                    arguments.append(value.text)
             elif not group.lstrip().startswith(("{", "⦃")):
                 return None
     if not arguments:
@@ -684,19 +600,17 @@ def premise_relation_endpoint_applications(
     """
 
     variables = _binder_names(action.type_text)
-    result = _expression_tokens(_result_type(action.type_text))
-    separators = tuple(
-        index for index, token in enumerate(result) if token == relation_operator
+    result = parse_relation(
+        _result_type(action.type_text),
+        expected_operator=relation_operator,
+        allowed_operators=frozenset({relation_operator}),
     )
-    if len(separators) != 1:
+    if result is None:
         return ()
-    separator = separators[0]
-    patterns = (result[:separator], result[separator + 1 :])
     applications: list[str] = []
     for endpoint in endpoints:
-        target = _expression_tokens(endpoint)
-        for pattern in patterns:
-            bindings = _endpoint_bindings(pattern, target, variables)
+        for pattern in (result.left, result.right):
+            bindings = match_surface(pattern, endpoint, variables)
             if bindings is None:
                 continue
             application = _application_from_bindings(action, bindings)
@@ -1329,7 +1243,7 @@ def premise_reflexive_arguments(goal: GoalInfo, action: ScopePremiseAction) -> i
             unresolved = False
             for token in _expression_tokens(body):
                 if token in bindings:
-                    instantiated.extend(bindings[token])
+                    instantiated.extend(_expression_tokens(bindings[token].text))
                 elif token in binder_names:
                     unresolved = True
                     break
@@ -1367,19 +1281,15 @@ def premise_expected_arguments(
             body = stripped
             if stripped.startswith("(") and ":" in stripped:
                 body = stripped.split(":", 1)[1].rsplit(")", 1)[0]
-            rendered: list[str] = []
-            unresolved = False
-            for token in _expression_tokens(body):
-                if token in bindings:
-                    rendered.extend(bindings[token])
-                elif token in binders:
-                    unresolved = True
-                    break
-                else:
-                    rendered.append(token)
-            if unresolved or not rendered:
+            if any(
+                token in binders and token not in bindings
+                for token in _expression_tokens(body)
+            ):
                 return ()
-            expected.append(" ".join(rendered))
+            rendered = substitute_surface(body, bindings)
+            if not rendered:
+                return ()
+            expected.append(rendered)
     return tuple(expected)
 
 
@@ -1412,7 +1322,7 @@ def premise_result_arguments(
                     value = bindings.get(name)
                     if value is None:
                         return None
-                    arguments.append(" ".join(value))
+                    arguments.append(value.text)
             elif not group.lstrip().startswith(("{", "⦃")):
                 return None
     return tuple(arguments)
@@ -1511,7 +1421,7 @@ def premise_inferred_application(
 
     bindings = _result_bindings(goal, action)
     if bindings is None or not _result_arguments_allowed(
-        goal, action, (" ".join(value) for value in bindings.values()), excluded_names
+        goal, action, (value.text for value in bindings.values()), excluded_names
     ):
         return None
     try:
@@ -1533,7 +1443,7 @@ def premise_inferred_application(
                 continue
             for name in parsed.names:
                 value = bindings.get(name)
-                argument = "_" if value is None else " ".join(value)
+                argument = "_" if value is None else value.text
                 if any(
                     re.search(rf"(?<!\w){re.escape(hidden)}(?!\w)", argument)
                     for hidden in inaccessible
@@ -1543,6 +1453,80 @@ def premise_inferred_application(
     if not arguments or "_" not in arguments:
         return None
     return render_application(action.expression, tuple(arguments))
+
+
+@dataclass(frozen=True)
+class ExpectedApplication:
+    """A result-determined prefix to check against the whole expected type."""
+
+    expression: str
+    arguments: tuple[str, ...]
+    remaining_arguments: int
+
+
+def premise_expected_application(
+    goal: GoalInfo,
+    action: ScopePremiseAction,
+    *,
+    excluded_names: frozenset[str] = frozenset(),
+) -> ExpectedApplication | None:
+    """Recover a complete or partial application without inventing operands.
+
+    Match the codomain and leave the expected function's telescope unapplied.
+    Supplied arguments must be fixed by the result, independent of that local
+    telescope. Agda checks the residual dependent domains and hidden arguments;
+    this surface hint never confers type correctness or closes inferred metas.
+    """
+    try:
+        goal_parts = split_top_level_arrows(goal.target)
+        action_parts = split_top_level_arrows(action.type_text)
+        remaining = 0
+        for part in goal_parts[:-1]:
+            for group in split_adjacent_binders(part) or (part,):
+                binder = parse_named_binder(group)
+                if binder is None:
+                    remaining += 1
+                elif binder.visibility == "explicit":
+                    remaining += len(binder.names)
+        operands: list[str | None] = []
+        for part in action_parts[:-1]:
+            for group in split_adjacent_binders(part) or (part,):
+                binder = parse_named_binder(group)
+                if binder is None:
+                    operands.append(None)
+                elif binder.visibility == "explicit":
+                    operands.extend(binder.names)
+    except ValueError:
+        return None
+    supplied = len(operands) - remaining
+    if supplied <= 0:
+        return None
+    bindings = _result_bindings(replace(goal, target=goal_parts[-1]), action)
+    if bindings is None:
+        return None
+    arguments: list[str] = []
+    future_names = _binder_names(goal.target)
+    inaccessible = frozenset(
+        entry.name for entry in goal.context if entry.name and not entry.in_scope
+    )
+    for name in operands[:supplied]:
+        if name is None or name not in bindings:
+            return None
+        value = bindings[name]
+        # A prefix cannot mention the arguments of its residual function.
+        # Decline instead of moving a term across a binder or capturing it.
+        if future_names.intersection(_expression_tokens(value.text)):
+            return None
+        arguments.append(value.text)
+    if not _result_arguments_allowed(goal, action, arguments, excluded_names):
+        return None
+    visible = tuple(
+        "_" if inaccessible.intersection(_expression_tokens(arg)) else arg
+        for arg in arguments
+    )
+    return ExpectedApplication(
+        render_application(action.expression, visible), visible, remaining
+    )
 
 
 def _premise_result_prefix(
@@ -1571,79 +1555,33 @@ def _premise_result_prefix(
         # higher-order argument.  Match the rigid endpoint alone so
         # ``f rigid R ?m`` may still determine the leading ``f``.  The
         # resulting partial application is only a proposal to Agda.
-        target = _expression_tokens(goal.target)
-        metas = tuple(
-            index
-            for index, token in enumerate(target)
-            if _INTERNAL_META.fullmatch(token)
+        fixed_tokens = frozenset(
+            _expression_tokens(_result_type(action.type_text))
+        ) - _binder_names(action.type_text)
+        result_relation = parse_relation(
+            _result_type(action.type_text), allowed_operators=fixed_tokens
         )
-        result = _expression_tokens(_result_type(action.type_text))
-        if len(metas) == 1 and len(target) >= 3:
-            meta = metas[0]
-            if meta == len(target) - 1:
-                separator = target[-2]
-                rigid = target[:-2]
-                result_separators = tuple(
-                    index for index, token in enumerate(result) if token == separator
-                )
-                pattern = (
-                    result[: result_separators[0]]
-                    if len(result_separators) == 1
-                    else ()
-                )
-            elif meta == 0:
-                separator = target[1]
-                rigid = target[2:]
-                result_separators = tuple(
-                    index for index, token in enumerate(result) if token == separator
-                )
-                pattern = (
-                    result[result_separators[0] + 1 :]
-                    if len(result_separators) == 1
-                    else ()
-                )
-            else:
-                pattern = ()
-                rigid = ()
-
-            variables = _binder_names(action.type_text)
-            steps = 0
-
-            def match_side(
-                pattern_index: int,
-                rigid_index: int,
-                current: dict[str, tuple[str, ...]],
-            ) -> dict[str, tuple[str, ...]] | None:
-                nonlocal steps
-                steps += 1
-                if steps > _RESULT_MATCH_STEP_LIMIT:
-                    return None
-                if pattern_index == len(pattern):
-                    return current if rigid_index == len(rigid) else None
-                token = pattern[pattern_index]
-                if token not in variables:
-                    if rigid_index >= len(rigid) or rigid[rigid_index] != token:
-                        return None
-                    return match_side(pattern_index + 1, rigid_index + 1, current)
-                previous = current.get(token)
-                if previous is not None:
-                    end = rigid_index + len(previous)
-                    if rigid[rigid_index:end] != previous:
-                        return None
-                    return match_side(pattern_index + 1, end, current)
-                for end in range(rigid_index + 1, len(rigid) + 1):
-                    matched = match_side(
-                        pattern_index + 1,
-                        end,
-                        {**current, token: rigid[rigid_index:end]},
+        target_relation = (
+            parse_relation(
+                goal.target,
+                expected_operator=result_relation.operator,
+                allowed_operators=fixed_tokens,
+            )
+            if result_relation is not None
+            else None
+        )
+        if result_relation is not None and target_relation is not None:
+            for pattern, rigid, other in (
+                (result_relation.left, target_relation.left, target_relation.right),
+                (result_relation.right, target_relation.right, target_relation.left),
+            ):
+                if _INTERNAL_META.fullmatch(other.strip()):
+                    bindings = match_surface(
+                        pattern, rigid, _binder_names(action.type_text)
                     )
-                    if matched is not None:
-                        return matched
-                return None
-
-            if pattern and rigid:
-                bindings = match_side(0, 0, {})
-                one_sided = bindings is not None
+                    one_sided = bindings is not None
+                    if bindings is not None:
+                        break
     if bindings is None:
         return None
     try:
@@ -1667,7 +1605,7 @@ def _premise_result_prefix(
                 if value is None:
                     stopped = True
                     break
-                arguments.append(" ".join(value))
+                arguments.append(value.text)
             if stopped:
                 break
         if stopped:
@@ -1922,7 +1860,12 @@ def _is_type_constructor(
     type_text: str, universe_names: frozenset[str] = DEFAULT_UNIVERSE_NAMES
 ) -> bool:
     result = normalize_type_text(_result_type(type_text))
-    return has_universe_codomain(result, universe_names)
+    try:
+        return has_universe_codomain(result, universe_names)
+    except ValueError:
+        # Unsupported scope renderings are not grounds to invalidate a task.
+        # This is only a ranking classification; Agda still checks any use.
+        return False
 
 
 def _has_bare_polymorphic_result(type_text: str) -> bool:
@@ -2040,7 +1983,7 @@ def premise_type_pattern_matches(
     if not pattern or not concrete:
         return False
     return (
-        _endpoint_bindings(
+        _shape_bindings(
             pattern,
             concrete,
             frozenset(_binder_names(type_text)),
