@@ -80,6 +80,7 @@ from .reasoning.evidence import (
     transport_index_labels,
 )
 from .recursive_calls import (
+    CopatternCallSpec,
     RecursiveCallAction,
     RecursiveCallSpec,
     RecursiveCallStats,
@@ -538,6 +539,7 @@ class _ConstructorSearch:
         excluded_premises: frozenset[str],
         defer_concrete_premises: bool,
         recursive_call: RecursiveCallSpec | None,
+        copattern_call: CopatternCallSpec | None = None,
         preferred_constructor_arity: int | None,
         require_recursive_call: bool,
     ) -> None:
@@ -575,6 +577,8 @@ class _ConstructorSearch:
         self.excluded_premises = excluded_premises
         self.defer_concrete_premises = defer_concrete_premises
         self.recursive_call = recursive_call
+        self.copattern_call = copattern_call
+        self._constructing_copattern_arguments = False
         self.preferred_constructor_arity = preferred_constructor_arity
         self.require_recursive_call = require_recursive_call
         self._scope_catalog: tuple[tuple[str, str], ...] | None = None
@@ -787,6 +791,84 @@ class _ConstructorSearch:
                 self.policy_router.mark(
                     "recursive-call", action.expression, outcome="invalid"
                 )
+
+    def _solve_with_copattern_call(
+        self,
+        state: StateToken,
+        goal: GoalInfo,
+        depth: int,
+        ancestors: frozenset[tuple[object, ...]],
+        premise_query_stop: int,
+    ) -> Iterator[ConstructorSolution]:
+        """Refine a copattern leaf with its owner; solve arguments normally.
+
+        The owner is never added to the local context or premise catalogue.
+        Nested calls while constructing its arguments are disabled, so this
+        cannot turn ordinary cycle detection into unrestricted self application.
+        Type/coverage/productivity of all completed clauses remains Agda-owned.
+        """
+        spec = self.copattern_call
+        if spec is None or self._constructing_copattern_arguments:
+            return
+        if not isinstance(self.session, TermInferenceSession) or not self._charge():
+            return
+        inferred = self.session.infer_type(
+            state, goal_id=goal.goal_id, expression=spec.root_name
+        )
+        self.stats.recursive_inference_queries += 1
+        if inferred is None:
+            return
+        candidate = policy_candidate(
+            family="recursive-call",
+            tag="refine-copattern-owner",
+            expression=spec.root_name,
+            type_text=inferred,
+            symbolic_key=(spec.root_name,),
+            metadata=(("subject-origin", "kernel-copattern-clause"),),
+        )
+        self.policy_router.rank(goal, (candidate,))
+        choice = self.policy_router.snapshot_choices("recursive-call", goal).get(
+            spec.root_name
+        )
+        self.stats.actions_generated += 1
+        self.stats.recursive_applications_generated += 1
+        if not self._charge():
+            return
+        self.policy_router.mark("recursive-call", spec.root_name)
+        checked = self.session.commit_proof_action(
+            state, kind="refine", goal_id=goal.goal_id, expression=spec.root_name
+        )
+        self.stats.recursive_proof_checks += 1
+        self.stats.proof_checks += 1
+        if len(self.stats.recursive_actions) < 64:
+            self.stats.recursive_actions.append(
+                {
+                    "schema_version": "agdaprover.copattern-call.v1",
+                    "tag": "refine-copattern-owner",
+                    "expression": spec.root_name,
+                    "inferred_type": inferred,
+                    "clause_prefix": spec.clause_prefix,
+                    "accepted": checked.accepted,
+                }
+            )
+        if not checked.accepted:
+            self.policy_router.mark("recursive-call", spec.root_name, outcome="invalid")
+            return
+        self._constructing_copattern_arguments = True
+        try:
+            for solution in self._accepted_introduction(
+                goal,
+                checked,
+                depth,
+                ancestors,
+                premise_query_stop,
+                policy_choice=choice,
+            ):
+                yield ConstructorSolution(
+                    solution.state, replace(solution.plan, recursive_call=True)
+                )
+        finally:
+            self._constructing_copattern_arguments = False
 
     def _solve_with_local_refinements(
         self,
@@ -3291,6 +3373,41 @@ class _ConstructorSearch:
                         choice.decision_id, choice.candidate_id, outcome="invalid"
                     )
 
+    def _solve_with_local_meta_values(
+        self,
+        state: StateToken,
+        goal: GoalInfo,
+        *,
+        attempted_terms: frozenset[str] = frozenset(),
+        deprioritized_terms: frozenset[str] = frozenset(),
+    ) -> Iterator[ConstructorSolution]:
+        """Let supplied values instantiate unknown domains and indices.
+
+        The same checked reuse applies to function and non-function goals.
+        In particular, introducing a lambda first can conceal the fact that
+        an existing function determines its still-unknown domain.
+        """
+        if not _INTERNAL_META.search(goal.target):
+            return
+        names = sorted(
+            (
+                entry.name
+                for entry in goal.context
+                if entry.in_scope and entry.name and entry.name not in attempted_terms
+            ),
+            key=lambda name: (name in deprioritized_terms, name),
+        )
+        self.stats.actions_generated += len(names)
+        for name in names:
+            if not self._charge():
+                return
+            checked = self.session.commit_proof_action(
+                state, kind="give", goal_id=goal.goal_id, expression=name
+            )
+            self.stats.proof_checks += 1
+            if checked.accepted and checked.child_state is not None:
+                yield ConstructorSolution(checked.child_state, ProofPlan(name))
+
     def _solve_goal(
         self,
         state: StateToken,
@@ -3397,10 +3514,18 @@ class _ConstructorSearch:
         if premise_query_stop is None:
             premise_query_stop = self.stats.premise_query_limit
 
+        if self.copattern_call is not None and not top_level_arrow_count(goal.target):
+            yield from self._solve_with_copattern_call(
+                state, goal, depth, descendants, premise_query_stop
+            )
+
         # Function introduction is invertible.  Asking Agda once introduces
         # the complete visible telescope, rather than one binder per search
         # state or one whole-file reload per binder.
         if top_level_arrow_count(goal.target):
+            yield from self._solve_with_local_meta_values(
+                state, goal, deprioritized_terms=deprioritized_locals
+            )
             yield from self._solve_with_supplied_values(
                 state, goal, premise_query_stop, function_values=True
             )
@@ -3965,36 +4090,12 @@ class _ConstructorSearch:
         # local type even though unification makes that local the unique valid
         # choice. Probe each remaining in-scope local once; the kernel rejects
         # wrong dependency levels and indices.
-        local_probes = (
-            tuple(
-                entry.name
-                for entry in goal.context
-                if entry.in_scope
-                and entry.name
-                and entry.name not in attempted_local_terms
-            )
-            if _INTERNAL_META.search(goal.target)
-            else ()
+        yield from self._solve_with_local_meta_values(
+            state,
+            goal,
+            attempted_terms=frozenset(attempted_local_terms),
+            deprioritized_terms=deprioritized_locals,
         )
-        local_probes = tuple(
-            sorted(
-                local_probes,
-                key=lambda name: (name in deprioritized_locals, name),
-            )
-        )
-        self.stats.actions_generated += len(local_probes)
-        for name in local_probes:
-            if not self._charge():
-                return
-            checked = self.session.commit_proof_action(
-                state,
-                kind="give",
-                goal_id=goal.goal_id,
-                expression=name,
-            )
-            self.stats.proof_checks += 1
-            if checked.accepted and checked.child_state is not None:
-                yield ConstructorSolution(checked.child_state, ProofPlan(name))
 
         # Agda may display an implicit context value in the target while
         # marking its printed name out of scope in the generated clause.  The
@@ -4755,6 +4856,7 @@ def constructor_tree_prove(
     excluded_premises: frozenset[str] = frozenset(),
     defer_concrete_premises: bool = False,
     recursive_call: RecursiveCallSpec | None = None,
+    copattern_call: CopatternCallSpec | None = None,
     preferred_constructor_arity: int | None = None,
     require_recursive_call: bool = False,
     on_statistics: Callable[[ConstructorStats], None] | None = None,
@@ -4795,6 +4897,7 @@ def constructor_tree_prove(
             excluded_premises=excluded_premises,
             defer_concrete_premises=defer_concrete_premises,
             recursive_call=recursive_call,
+            copattern_call=copattern_call,
             preferred_constructor_arity=preferred_constructor_arity,
             require_recursive_call=require_recursive_call,
         )

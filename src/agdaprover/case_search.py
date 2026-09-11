@@ -9,6 +9,7 @@ batch, and lets the next Agda load validate the complete level.
 
 from __future__ import annotations
 
+import os
 import re
 import tempfile
 import time
@@ -33,6 +34,7 @@ from .kernel.p0 import AgdaLoadError, AgdaSession, open_kernel_session
 from .kernel.protocol import (
     KernelSession,
     KernelSessionFactory,
+    ResultSplittingSession,
     ScopeDeclarationSession,
     TermInferenceSession,
     TransactionalKernelSession,
@@ -78,6 +80,7 @@ from .reasoning.classifications import (
     reorders_homogeneous_coordinates,
 )
 from .recursive_calls import (
+    CopatternCallSpec,
     RecursiveCallAction,
     RecursiveCallSpec,
     generate_recursive_call_actions,
@@ -132,6 +135,9 @@ class CaseBatchStats(ScopedRetrievalStats):
     refinement_queries: int = 0
     constructor_queries: int = 0
     case_queries: int = 0
+    result_split_queries: int = 0
+    copattern_clauses_generated: int = 0
+    copattern_search_enabled: bool = False
     case_lookahead_queries: int = 0
     case_lookahead_loads: int = 0
     case_lookahead_elapsed_ms: float = 0.0
@@ -309,6 +315,26 @@ def _top_level_terms(text: str) -> tuple[str, ...]:
     if start is not None:
         terms.append(text[start:])
     return tuple(terms)
+
+
+def _is_result_projection(parent_lhs: str, generated_lhs: str) -> bool:
+    """Recognize both renderings of an Agda-generated result projection.
+
+    Only used on a successful kernel result-split response. This distinguishes
+    projections from argument introduction, not records from arbitrary types.
+    """
+    parent = parent_lhs.strip()
+    generated = generated_lhs.strip()
+    if not parent:
+        return False
+    if generated.startswith(parent + " ."):
+        return True
+    parts = _top_level_terms(generated)
+    return (
+        len(parts) == 2
+        and parts[1].startswith("(")
+        and strip_outer_parentheses(parts[1]) == parent
+    )
 
 
 def _application_subterms(text: str, *, limit: int = 48) -> tuple[str, ...]:
@@ -801,6 +827,9 @@ def _batched_case_prove(
     current_end = initial_end
     depth = 0
     case_split_seen = False
+    copattern_prefixes: set[str] = set()
+    copattern_search_enabled = os.environ.get("AGDAPROVER_COPATTERN_SEARCH", "1") != "0"
+    stats.copattern_search_enabled = copattern_search_enabled
     recursive_call: RecursiveCallSpec | None = None
     recursive_split_depth: int | None = None
     recursive_baseline_context_size: int | None = None
@@ -908,6 +937,7 @@ def _batched_case_prove(
         allow_wrapping: bool,
         preferred_arity: int | None,
         case_alternatives_remain: bool,
+        copattern_spec: CopatternCallSpec | None = None,
     ) -> ConstructorResult:
         """Share one construction boundary before or after case probing."""
         stats.structural_leaf_attempts += 1
@@ -946,6 +976,7 @@ def _batched_case_prove(
                 if recursive_spec is not None
                 else None
             ),
+            copattern_call=copattern_spec,
             preferred_constructor_arity=preferred_arity,
             on_statistics=record_structural_stats,
         )
@@ -1252,6 +1283,13 @@ def _batched_case_prove(
                 edits: list[dict[str, object]] = []
                 level_choices: list[PolicyChoice] = []
                 for shallow in sorted(target_goals, key=lambda goal: goal.source_range):
+                    if copattern_prefixes and edits:
+                        # A later projection's type can refer to an earlier
+                        # projection of this same definition. Re-elaborate the
+                        # pending assignment before searching the next field;
+                        # its old telescope is only provisional. Do not assume
+                        # that the fields of a result split are independent.
+                        break
                     if not available():
                         raise TimeoutError(
                             "batched case search exhausted its action budget"
@@ -1320,6 +1358,7 @@ def _batched_case_prove(
                     # an impossible branch into a dead state before global
                     # premise search recursively invents intermediates.
                     rigid_relation = parse_relation(goal.target)
+                    has_nullary_reflexive_constructor = False
                     if rigid_relation is not None and isinstance(
                         active_session, TransactionalKernelSession
                     ):
@@ -1332,6 +1371,7 @@ def _batched_case_prove(
                         relation_families = reflexive_family_constructors(
                             rigid_relation_catalog
                         )
+                        has_nullary_reflexive_constructor = bool(relation_families)
                         if (
                             len(rigid_relation_catalog) == 1
                             and len(relation_families) == 1
@@ -1837,6 +1877,95 @@ def _batched_case_prove(
                                 )
                             )
                             continue
+
+                    # Only a clause prefix actually returned by Agda's result
+                    # split can expose the owner in this source branch. Merely
+                    # having a recursive record in context is not such evidence.
+                    copattern_lhs = (scheduling_lhs or "").strip()
+                    copattern_prefix = next(
+                        (
+                            prefix
+                            for prefix in sorted(copattern_prefixes)
+                            if copattern_lhs == prefix
+                            or copattern_lhs.startswith(prefix + " ")
+                        ),
+                        None,
+                    )
+                    if (
+                        copattern_prefix is not None
+                        and root_name is not None
+                        and isinstance(active_session, TransactionalKernelSession)
+                        and available()
+                    ):
+                        structural = construct_leaf(
+                            active_session,
+                            goal,
+                            leaf_depth=depth,
+                            recursive_spec=None,
+                            allow_wrapping=False,
+                            preferred_arity=None,
+                            case_alternatives_remain=False,
+                            copattern_spec=CopatternCallSpec(
+                                root_name, copattern_prefix
+                            ),
+                        )
+                        if structural.solutions:
+                            chosen = structural.solutions[0]
+                            edits.append(
+                                reconstruct_hole_completion(
+                                    current_source, goal, chosen.proof_text
+                                )
+                            )
+                            level_choices.extend(chosen.plan.choices_on_proof())
+                            continue
+
+                    if (
+                        copattern_search_enabled
+                        # A live nullary reflexive constructor has no result
+                        # fields to expose. Reuse the family observation above
+                        # instead of spending a make_case probe on these leaves.
+                        and not has_nullary_reflexive_constructor
+                        and scheduling_lhs is not None
+                        and isinstance(active_session, ResultSplittingSession)
+                        and isinstance(active_session, TransactionalKernelSession)
+                        and available()
+                    ):
+                        stats.actions_considered += 1
+                        stats.case_queries += 1
+                        stats.result_split_queries += 1
+                        split = active_session.check_result_split(
+                            active_session.current_state(), goal_id=goal.goal_id
+                        )
+                        # Restrict this lane to new result projections, not the
+                        # implicit-argument naming that make_case also offers.
+                        prefixes = tuple(
+                            clause.rsplit(" =", 1)[0].strip()
+                            for clause in split.clauses
+                        )
+                        if (
+                            split.accepted
+                            and prefixes
+                            and all(
+                                _is_result_projection(copattern_lhs, prefix)
+                                for prefix in prefixes
+                            )
+                        ):
+                            try:
+                                edit = reconstruct_case_split(
+                                    current_source, goal, split.clauses
+                                )
+                            except ValueError:
+                                pass
+                            else:
+                                copattern_prefixes.update(prefixes)
+                                stats.actions_generated += 1
+                                stats.copattern_clauses_generated += len(prefixes)
+                                stats.generated_subgoals += sum(
+                                    len(_HOLE.findall(clause))
+                                    for clause in split.clauses
+                                )
+                                edits.append(edit)
+                                continue
 
                     # A case split often leaves a purely implicational leaf.
                     # Close that fragment in memory before asking Agda for

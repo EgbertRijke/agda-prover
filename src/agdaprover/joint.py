@@ -127,6 +127,9 @@ class JointStats(ScopedRetrievalStats):
     completion_queries: int = 0
     incomplete_solutions_pruned: int = 0
     case_queries: int = 0
+    result_split_queries: int = 0
+    copattern_clauses_generated: int = 0
+    copattern_search_enabled: bool = False
     zero_constructor_candidates: int = 0
     zero_constructor_closures: int = 0
     zero_candidate_validation_checks: int = 0
@@ -339,6 +342,9 @@ def _accumulate_case_stats(target: JointStats, source: CaseBatchStats) -> int:
     target.zero_constructor_closures += source.zero_constructor_closures
     target.zero_candidate_validation_checks += source.zero_candidate_validation_checks
     target.case_batches += 1
+    target.result_split_queries += source.result_split_queries
+    target.copattern_clauses_generated += source.copattern_clauses_generated
+    target.copattern_search_enabled |= source.copattern_search_enabled
     target.case_levels += source.levels_completed
     target.induction_proposals += source.induction_proposals
     target.recursive_lift_proposals += source.recursive_lift_proposals

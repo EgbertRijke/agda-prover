@@ -62,6 +62,22 @@ class RecursiveCallSpec:
 
 
 @dataclass(frozen=True)
+class CopatternCallSpec:
+    """Owner callable only inside a kernel-introduced copattern clause.
+
+    This is source-branch provenance, not an assertion of coinductivity or
+    productivity. Agda must check the reconstructed recursive definition.
+    """
+
+    root_name: str
+    clause_prefix: str
+
+    def __post_init__(self) -> None:
+        if not self.root_name.strip() or not self.clause_prefix.strip():
+            raise ValueError("copattern recursion requires owner and clause provenance")
+
+
+@dataclass(frozen=True)
 class RecursiveCallAction:
     """One fully applied recursive call accepted by observational inference."""
 

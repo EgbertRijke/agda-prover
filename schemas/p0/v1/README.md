@@ -44,6 +44,43 @@ existing visible-premise OR/NNUE candidates and proof-choice boundary are reused
 no model feature version changes. Actions, proof checks and physical dispatch
 remain charged, and fresh validation remains independent.
 
+## Copattern construction
+
+Case search can request kernel-generated result projections through the optional
+`ResultSplittingSession` interface. `AGDAPROVER_COPATTERN_SEARCH=0` disables this
+lane; other construction and named-variable splitting remain available. Generated
+prefix and postfix copattern clauses retain their enclosing scope and indentation.
+Assignments are re-elaborated before searching later fields, whose types may
+depend on earlier projections.
+
+Within those generated clauses, `CopatternCallSpec` carries the owner and exact
+clause-prefix provenance into shared constructor search. It is not a certificate
+of coinductivity or productivity. The owner stays excluded from ordinary premise
+retrieval; a checked refinement may expose dependent argument obligations, solved
+by ordinary search. Recursive owner proposals are disabled while constructing
+their own arguments. Supplied local functions can instantiate unknown argument
+domains before lambda introduction, using the same checked reuse as other local
+values. No type, field or benchmark name determines applicability.
+
+The existing `recursive-call` policy boundary carries `refine-copattern-owner`
+candidates with `subject-origin=kernel-copattern-clause`; symbolic ordering remains
+available. Bounded `agdaprover.copattern-call.v1` diagnostic rows in
+`recursive_actions` record `tag`, `expression`, `inferred_type`, `clause_prefix`
+and provisional `accepted`. They do not claim that the whole definition passes
+coverage or productivity. Policy choices earn proof credit only after fresh
+validation of the reconstructed result.
+
+`result_split_queries` is a subset of `case_queries`, not an additional physical
+cost. `copattern_clauses_generated` counts admitted generated clauses and
+`copattern_search_enabled` records activation. Owner inference and checked
+refinements use the existing recursive-inference/proof counters and shared budget.
+Ordinary inductive records also admit result splitting: invalid recursion, missing
+guardedness, unresolved fields and unauthorized option changes still cannot yield
+`verified`. This initial lane does not cover every existing user copattern,
+pattern-lambda/mutual definition, or change of argument patterns.
+
+## Editor search profiles
+
 Editor request v1 accepts an optional `search_profile`: `standard` (default)
 or `deep`. This is a search-only option, not valid for `inspect`. Omitted
 `max_candidates` resolves to 500 or 8,000 respectively; an explicitly supplied
