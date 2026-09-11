@@ -17,6 +17,16 @@ The optional `on_statistics` callbacks are aggregation-only: they cannot perform
 budgeted work or grant proof credit. Counter fields retain their existing units
 and schema; historical reports with missing child work are not rewritten.
 
+Joint search treats fast implicational inhabitants as proposals, not as proof
+authority. It retains a bounded, source-local structural continuation and resumes
+it only after the ordinary frontier is exhausted. Rejected elaborations, failed
+descendants and fresh-validation rejection cannot silently remove that fallback.
+The continuation skips the same approximate search once; changed goals start
+normally. Its exact search identity includes that distinction. Pending work shares
+the frontier/resource bounds and appears in principal-variation frontier counts.
+`focused_fallbacks_deferred` and `focused_fallbacks_resumed` count the continuations;
+no extra checker calls or resumed work occur on a successful fast path.
+
 Editor request v1 accepts an optional `search_profile`: `standard` (default)
 or `deep`. This is a search-only option, not valid for `inspect`. Omitted
 `max_candidates` resolves to 500 or 8,000 respectively; an explicitly supplied
