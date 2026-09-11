@@ -17,7 +17,7 @@ from .application import (
     inspect_source,
 )
 from .contracts import EXIT_CODES, Status, TaskSpec
-from .editor_api import EditorRequest, error_envelope, response_envelope
+from .editor_api import EditorRequest, error_envelope, event_envelope, response_envelope
 from .interactive import launch_interactive_run, serve_interactive
 from .offline import offline_audit
 from .project_configuration import ProjectConfiguration
@@ -240,6 +240,27 @@ def _editor_api() -> tuple[int, dict[str, Any]]:
             raise ValueError("editor request must be one JSON object")
         request = EditorRequest.from_dict(value)
         arguments = Namespace(**request.to_namespace_values())
+        if request.operation == "test-entries":
+
+            def publish(event: str, payload: dict[str, Any]) -> None:
+                print(
+                    json.dumps(
+                        event_envelope(request, event, payload), ensure_ascii=False
+                    ),
+                    flush=True,
+                )
+
+            outcome = default_application.test_entries(
+                task_from_arguments(
+                    arguments, arguments.source, arguments.ranker, arguments.model
+                ),
+                publish=publish,
+            )
+            return outcome.exit_code, response_envelope(
+                request,
+                exit_code=outcome.exit_code,
+                result=outcome.payload,
+            )
         handlers = {
             "inspect": _inspect,
             "prove": _prove,
@@ -416,7 +437,14 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         for handled, previous in previous_handlers.items():
             signal.signal(handled, previous)
-    print(json.dumps(output, indent=2, sort_keys=True, ensure_ascii=False))
+    print(
+        json.dumps(
+            output,
+            indent=None if arguments.command == "editor-api" else 2,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+    )
     return exit_code
 
 

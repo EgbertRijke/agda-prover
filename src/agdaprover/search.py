@@ -391,7 +391,7 @@ def prove(
                 budget.account_actions(batched.stats.actions_considered)
                 if batched.patch is not None and batched.proof_text is not None:
                     selected_policy_choices = batched.policy_choices
-                    _finish_guided_candidate(
+                    finished = _finish_guided_candidate(
                         result,
                         source_file=source_file,
                         patch=batched.patch,
@@ -402,7 +402,9 @@ def prove(
                         project_configuration=task.project_configuration,
                         expected_inputs=original_inputs,
                     )
-                    return True
+                    if finished:
+                        return True
+                    selected_policy_choices = ()
                 if batched.status == "resource-exhausted":
                     result.status = "resource-exhausted"
                     result.diagnostics.append(
@@ -483,8 +485,7 @@ def prove(
                     on_statistics=record_constructor_stats,
                 )
                 budget.account_actions(constructor.stats.actions_considered)
-                if constructor.solutions:
-                    solution = constructor.solutions[0]
+                for solution in constructor.solutions:
                     selected_policy_choices = solution.plan.choices_on_proof()
                     binders, body = solution.plan.clause_parts()
                     patch = reconstruct_checked_clause_completion(
@@ -493,7 +494,7 @@ def prove(
                         binders=binders,
                         body=body,
                     )
-                    _finish_guided_candidate(
+                    finished = _finish_guided_candidate(
                         result,
                         source_file=source_file,
                         patch=patch,
@@ -504,7 +505,9 @@ def prove(
                         project_configuration=task.project_configuration,
                         expected_inputs=original_inputs,
                     )
-                    return result
+                    if finished:
+                        return result
+                    selected_policy_choices = ()
 
             if focused.status == "no-proof" and budget.remaining_seconds() > 0.01:
                 impossibility = certify_impossible(
@@ -565,7 +568,7 @@ def prove(
                     )
                 )
                 if checked.accepted:
-                    _finish_verified_candidate(
+                    finished = _finish_verified_candidate(
                         result,
                         source_file=source_file,
                         goal=goal,
@@ -577,7 +580,8 @@ def prove(
                         project_configuration=task.project_configuration,
                         expected_inputs=original_inputs,
                     )
-                    return result
+                    if finished:
+                        return result
                 result.diagnostics.append(
                     {
                         "kind": "focused-fallback",
@@ -644,7 +648,7 @@ def prove(
                 )
                 return result
             if guided.patch is not None and guided.proof_text is not None:
-                _finish_guided_candidate(
+                finished = _finish_guided_candidate(
                     result,
                     source_file=source_file,
                     patch=guided.patch,
@@ -655,7 +659,9 @@ def prove(
                     project_configuration=task.project_configuration,
                     expected_inputs=original_inputs,
                 )
-                return result
+                if finished:
+                    return result
+                selected_policy_choices = ()
 
             local_names = tuple(
                 entry.name for entry in goal.context if entry.in_scope and entry.name
@@ -726,7 +732,7 @@ def prove(
                 if not checked.accepted:
                     continue
 
-                _finish_verified_candidate(
+                finished = _finish_verified_candidate(
                     result,
                     source_file=source_file,
                     goal=goal,
@@ -738,7 +744,8 @@ def prove(
                     project_configuration=task.project_configuration,
                     expected_inputs=original_inputs,
                 )
-                break
+                if finished:
+                    break
             else:
                 if generation_complete:
                     result.status = "unsolved"
@@ -822,8 +829,8 @@ def _finish_verified_candidate(
     agda_version: str,
     project_configuration: ProjectConfiguration | None = None,
     expected_inputs: ProjectInputs | None = None,
-) -> None:
-    """Reconstruct and independently validate an Agda-accepted term."""
+) -> bool:
+    """Return whether search should stop; a rejected candidate is not terminal."""
 
     patch = reconstruct_term_as_clause(
         source_file.read_text(),
@@ -857,11 +864,15 @@ def _finish_verified_candidate(
     result.patch = patch
     if validation["checked"]:
         result.status = "verified"
+        return True
     elif validation["timed_out"]:
         result.status = "resource-exhausted"
         result.diagnostics.append(
             {"kind": "resource", "message": "fresh validation timed out"}
         )
+        result.proof_term = None
+        result.patch = None
+        return True
     else:
         prefix_status = validation.get("prefix_validation", {}).get("status")
         result.status = (
@@ -870,15 +881,14 @@ def _finish_verified_candidate(
             else "resource-exhausted"
             if prefix_status == "resource-exhausted"
             else "unsolved"
-            if prefix_status is not None
-            else "internal-error"
         )
         result.diagnostics.append(
             {
-                "kind": "validation-mismatch",
+                "kind": "validation-rejection",
                 "message": validation["diagnostic"] or "fresh Agda rejected candidate",
             }
         )
+        return _reject_completion(result)
 
 
 def _finish_guided_candidate(
@@ -892,8 +902,8 @@ def _finish_guided_candidate(
     agda_version: str,
     project_configuration: ProjectConfiguration | None = None,
     expected_inputs: ProjectInputs | None = None,
-) -> None:
-    """Fresh-validate a completed multi-step source reconstruction."""
+) -> bool:
+    """Fresh-validate a completed source reconstruction, allowing backtracking."""
 
     validation, trust_report = validate_reconstruction(
         source_file,
@@ -910,11 +920,15 @@ def _finish_guided_candidate(
     result.patch = patch
     if validation["checked"]:
         result.status = "verified"
+        return True
     elif validation["timed_out"]:
         result.status = "resource-exhausted"
         result.diagnostics.append(
             {"kind": "resource", "message": "fresh validation timed out"}
         )
+        result.proof_term = None
+        result.patch = None
+        return True
     else:
         prefix_status = validation.get("prefix_validation", {}).get("status")
         result.status = (
@@ -923,13 +937,26 @@ def _finish_guided_candidate(
             else "resource-exhausted"
             if prefix_status == "resource-exhausted"
             else "unsolved"
-            if prefix_status is not None
-            else "internal-error"
         )
         result.diagnostics.append(
             {
-                "kind": "validation-mismatch",
+                "kind": "validation-rejection",
                 "message": validation["diagnostic"]
                 or "fresh Agda rejected guided proof",
             }
         )
+        return _reject_completion(result)
+
+
+def _reject_completion(result: ProverResult) -> bool:
+    """Retain failure evidence and costs, never a rejected applicable patch."""
+    result.proof_term = None
+    result.patch = None
+    if result.status != "unsolved":
+        return True
+    if result.search_stats is None:
+        result.search_stats = {}
+    result.search_stats["terminal_validation_rejections"] = (
+        result.search_stats.get("terminal_validation_rejections", 0) + 1
+    )
+    return False

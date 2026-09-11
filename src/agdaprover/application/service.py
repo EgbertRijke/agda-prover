@@ -6,7 +6,9 @@ legacy module-level entry points remain supported while the prototype evolves.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from ..contracts import ProverResult, StepResult, TaskSpec
 from ..joint import prove_joint_prefix
@@ -15,11 +17,13 @@ from ..kernel.protocol import KernelSessionFactory
 from ..principal_variation import PrincipalVariationObserver
 from ..search import prove
 from ..step import propose_step
+from .entry_testing import test_entries
+from .inspection import CommandResult
 
 
 @dataclass(frozen=True)
 class ProverApplication:
-    """Composition root for the current proof, prefix, and step use cases."""
+    """Composition root for proof, prefix, step, and independent entry tests."""
 
     session_factory: KernelSessionFactory = default_session_factory
 
@@ -48,6 +52,11 @@ class ProverApplication:
             collect_all=collect_all,
             session_factory=self.session_factory,
         )
+
+    def test_entries(
+        self, task: TaskSpec, *, publish: Callable[[str, dict[str, Any]], None]
+    ) -> CommandResult:
+        return test_entries(task, solve=self.prove, publish=publish)
 
 
 default_application = ProverApplication()

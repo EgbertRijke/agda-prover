@@ -192,6 +192,8 @@ without prompting.  `never' only records and displays the result."
 (defvar-local agdaprover--last-source-tick nil)
 (defvar-local agdaprover--last-goal-marker nil)
 (defvar-local agdaprover--last-output-buffer nil)
+(defvar-local agdaprover--entry-report-process nil
+  "Process currently owning this entry-test report buffer.")
 
 (defun agdaprover--project-root ()
   "Return the normalized configured AgdaProver repository root."
@@ -222,7 +224,7 @@ The backend supplies operation-specific bundled models when none is selected."
 
 (defun agdaprover--action-model-for-operation (operation)
   "Return the role-compatible optional action model for OPERATION."
-  (when (memq operation '(prove prove-prefix))
+  (when (memq operation '(prove prove-prefix test-entries))
     agdaprover-action-model-file))
 
 (defun agdaprover--search-command
@@ -424,6 +426,8 @@ patch-application anchor."
 
 (defun agdaprover--process-filter (process text)
   "Append TEXT from PROCESS to its output buffer."
+  (when (eq (process-get process 'agdaprover-operation) 'test-entries)
+    (agdaprover--entry-test-filter process text))
   (when-let* ((buffer (process-buffer process)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
@@ -797,6 +801,18 @@ the complete machine-readable action result."
           (when owns-source
             (setq agdaprover--process nil))))
       (cond
+       ((and owns-source (eq (process-get process 'agdaprover-operation) 'test-entries))
+        (unless (process-get process 'agdaprover-entry-final)
+          (agdaprover--entry-test-append
+           process "\n%s\n"
+           (or (process-get process 'agdaprover-entry-error)
+               (and (process-get process 'agdaprover-cancelled) "Entry testing cancelled.")
+               (format "Entry testing stopped unexpectedly (%s). See the error buffer."
+                       (string-trim event)))))
+        (when (and (not (process-get process 'agdaprover-entry-final))
+                   (buffer-live-p stderr-buffer)
+                   (> (buffer-size stderr-buffer) 0))
+          (display-buffer stderr-buffer)))
        ((process-get process 'agdaprover-cancelled)
         (message "AgdaProver search cancelled"))
        ((and (buffer-live-p source-buffer) (not owns-source))
@@ -846,14 +862,18 @@ the first goal as its stale-snapshot anchor while passing a later cutoff."
          (action-model-file
           (agdaprover--action-model-for-operation operation))
          (ranker (agdaprover--resolve-ranker ranker model-file))
-         (goal-id (or selected-goal-id (agdaprover--goal-at-point))))
+         (goal-id (unless (eq operation 'test-entries)
+                    (or selected-goal-id (agdaprover--goal-at-point)))))
     (unless buffer-file-name
       (user-error "The current Agda buffer is not visiting a file"))
     (when (process-live-p agdaprover--process)
       (user-error "An AgdaProver search is already running in this buffer"))
-    (save-buffer)
+    (if (eq operation 'test-entries)
+        (when (or (buffer-modified-p) (not (verify-visited-file-modtime (current-buffer))))
+          (user-error "Save or revert your changes before testing; entry testing never writes this file"))
+      (save-buffer))
     (let* ((goal-position
-            (or selected-goal-position
+            (or (and (eq operation 'test-entries) 1) selected-goal-position
                 (agdaprover--goal-source-position goal-id)))
            (source-buffer (current-buffer))
            (source-tick (buffer-chars-modified-tick))
@@ -899,22 +919,159 @@ the first goal as its stale-snapshot anchor while passing a later cutoff."
       (process-put process 'agdaprover-stderr-buffer stderr-buffer)
       (process-put process 'agdaprover-operation operation)
       (process-put process 'agdaprover-request-id request-id)
+      (process-put process 'agdaprover-source-sha256 (alist-get 'source_sha256 request))
       (setq agdaprover--process process)
+      (when (eq operation 'test-entries)
+        (let ((report (agdaprover--prepare-process-buffer
+                       (format "*AgdaProver entry tests %s*" (buffer-name source-buffer)))))
+          (process-put process 'agdaprover-entry-report report)
+          (with-current-buffer report
+            (setq agdaprover--entry-report-process process)
+            (use-local-map (copy-keymap (current-local-map)))
+            (local-set-key (kbd "C-c C-x C-k")
+                           (lambda () (interactive) (agdaprover--stop-process process)))
+            (add-hook 'kill-buffer-hook
+                      (lambda () (agdaprover--stop-process process)) nil t))
+          (setq agdaprover--last-output-buffer report)
+          (agdaprover--entry-test-append process "Independent entry tests: %s\n\nInspecting declarations…\n"
+                                        (buffer-name source-buffer))
+          (display-buffer report))
+        (add-hook 'kill-buffer-hook #'agdaprover--cancel-entry-tests-on-kill nil t))
       (set-process-sentinel process #'agdaprover--sentinel)
       (process-send-string process (concat (json-serialize request) "\n"))
       (process-send-eof process)
       (when (memq (process-status process) '(exit signal))
         (agdaprover--sentinel process "finished before initialization\n"))
-      (if (eq operation 'prove-prefix)
-          (message "AgdaProver: jointly searching %s with %s ranking (%s effort)..."
-                   (agdaprover--prefix-progress-target goal-position)
-                   ranker agdaprover-search-profile)
+      (cond
+       ((eq operation 'test-entries)
+        (message "AgdaProver: independently testing entries with %s ranking…" ranker))
+       ((eq operation 'prove-prefix)
+        (message "AgdaProver: jointly searching %s with %s ranking (%s effort)..."
+                 (agdaprover--prefix-progress-target goal-position)
+                 ranker agdaprover-search-profile))
+       (t
         (message "AgdaProver: %s goal %s with %s ranking..."
                  (if (eq operation 'step)
                      "choosing a step for"
                    "searching")
                  goal-id
-                 ranker)))))
+                 ranker))))))
+
+(defun agdaprover--entry-test-append (process format-string &rest arguments)
+  "Append a formatted entry-test update for PROCESS."
+  (when-let* ((report (process-get process 'agdaprover-entry-report)))
+    (when (buffer-live-p report)
+      (with-current-buffer report
+        (when (eq agdaprover--entry-report-process process)
+          (let ((inhibit-read-only t))
+            (save-excursion
+              (goto-char (point-max))
+              (insert (apply #'format format-string arguments)))))))))
+
+(defun agdaprover--entry-test-event (process envelope)
+  "Render one validated streaming ENVELOPE for PROCESS, without applying edits."
+  (when (and (equal (alist-get 'schema_version envelope) "agdaprover.editor.response.v1")
+             (null (alist-get 'request_id envelope))
+             (equal (alist-get 'status (alist-get 'result envelope)) "invalid-task"))
+    (error "Cannot start entry testing: %s"
+           (alist-get 'diagnostic (alist-get 'result envelope))))
+  (unless (and (equal (alist-get 'request_id envelope)
+                     (process-get process 'agdaprover-request-id))
+               (equal (alist-get 'operation envelope) "test-entries")
+               (equal (alist-get 'source_sha256 envelope)
+                      (process-get process 'agdaprover-source-sha256)))
+    (error "Entry-test response identity mismatch"))
+  (pcase (alist-get 'schema_version envelope)
+    ("agdaprover.editor.event.v1"
+     (let ((payload (alist-get 'payload envelope)))
+       (pcase (alist-get 'event envelope)
+         ("started"
+          (process-put process 'agdaprover-entry-total (alist-get 'total payload))
+          (agdaprover--entry-test-append process "Testing %s entries, one at a time, in their original preceding context.\n"
+                                        (alist-get 'total payload)))
+         ("entry-started"
+          (agdaprover--entry-test-append
+           process "\n%s/%s. %s (line %s) — testing…\n"
+           (alist-get 'index payload) (process-get process 'agdaprover-entry-total)
+           (alist-get 'name payload) (alist-get 'line payload)))
+         ("entry-result"
+          (if (equal (alist-get 'status payload) "verified")
+              (let ((validation (alist-get 'validation payload))
+                    (solution (alist-get 'solution payload)))
+                (unless (and (eq (alist-get 'fresh_process validation) t)
+                             (eq (alist-get 'checked validation) t)
+                             (stringp solution))
+                  (error "Entry solution lacks fresh validation"))
+                (agdaprover--entry-test-append
+                 process "  ✓ Solved (%.2f s)\n%s\n"
+                 (/ (alist-get 'elapsed_ms payload) 1000.0) solution))
+            (agdaprover--entry-test-append
+             process "  ✗ Unable to solve (%s): %s\n"
+             (alist-get 'status payload) (or (alist-get 'diagnostic payload) ""))))
+         (_ (error "Unknown entry-test event")))))
+    ("agdaprover.editor.response.v1"
+     (let ((result (alist-get 'result envelope)))
+       (when (equal (alist-get 'status result) "completed")
+         (unless (and (equal (alist-get 'schema_version result) "agdaprover.entry-tests.v1")
+                      (eq (alist-get 'exit_code envelope) 0)
+                      (natnump (alist-get 'total result))
+                      (equal (alist-get 'solved result) (alist-get 'total result)))
+           (error "Malformed entry-test completion")))
+       (process-put process 'agdaprover-entry-final t)
+       (agdaprover--entry-test-append
+        process "\n%s: %s/%s entries solved.%s\n"
+        (if (equal (alist-get 'status result) "completed") "Finished" "Stopped")
+        (or (alist-get 'solved result) 0) (or (alist-get 'total result) 0)
+        (if-let* ((diagnostic (alist-get 'diagnostic result)))
+            (concat " " diagnostic) ""))))
+    (_ (error "Unsupported entry-test response schema"))))
+
+(defun agdaprover--entry-test-filter (process text)
+  "Decode incremental JSON lines from PROCESS and display solutions as they arrive."
+  (unless (or (process-get process 'agdaprover-cancelled)
+              (process-get process 'agdaprover-entry-error))
+    (condition-case error-data
+        (let* ((source (process-get process 'agdaprover-source-buffer))
+               (pending (concat (or (process-get process 'agdaprover-entry-pending) "") text))
+               end)
+          (unless (and (buffer-live-p source)
+                       (with-current-buffer source
+                         (and (eq agdaprover--process process)
+                              (= (buffer-chars-modified-tick)
+                                 (process-get process 'agdaprover-source-tick)))))
+            (error "Source buffer changed or this run was superseded"))
+          (while (setq end (string-match "\n" pending))
+            (let ((line (substring pending 0 end)))
+              (unless (string-empty-p line)
+                (when (or (process-get process 'agdaprover-entry-final)
+                          (> (string-bytes line) (* 16 1024 1024)))
+                  (error "Invalid trailing or oversized entry-test response"))
+                (agdaprover--entry-test-event
+                 process (json-parse-string line :object-type 'alist :array-type 'list
+                                            :null-object nil :false-object nil))))
+            (setq pending (substring pending (1+ end))))
+          (when (> (string-bytes pending) (* 16 1024 1024))
+            (error "Entry-test response exceeds the protocol buffer allowance"))
+          (process-put process 'agdaprover-entry-pending pending))
+      (error
+       (process-put process 'agdaprover-entry-error (error-message-string error-data))
+       (agdaprover--stop-process process)))))
+
+(defun agdaprover--cancel-entry-tests-on-kill ()
+  "Reap an entry-test worker when its source buffer is killed."
+  (when (and (process-live-p agdaprover--process)
+             (eq (process-get agdaprover--process 'agdaprover-operation) 'test-entries))
+    (agdaprover--entry-test-append agdaprover--process "\nSource buffer closed; entry testing cancelled.\n")
+    (agdaprover--stop-process agdaprover--process)))
+
+;;;###autoload
+(defun agdaprover-test-entries ()
+  "Independently test file entries using virtual holes, stopping at the first failure.
+Never edit or save the source buffer or apply returned solutions.  Each entry
+starts from the saved original file, with only that definition replaced.
+Results appear incrementally in a separate buffer.  Cancel with C-c C-x C-k."
+  (interactive)
+  (agdaprover--start-operation 'test-entries agdaprover-ranker))
 
 (defun agdaprover--start-proof (ranker)
   "Start an asynchronous proof search for the goal at point using RANKER."
@@ -974,7 +1131,11 @@ Explicit `agdaprover-max-candidates' and other resource limits remain active."
   (interactive)
   (unless (process-live-p agdaprover--process)
     (user-error "No AgdaProver search is running in this buffer"))
-  (let ((process agdaprover--process))
+  (agdaprover--stop-process agdaprover--process))
+
+(defun agdaprover--stop-process (process)
+  "Interrupt PROCESS cooperatively, with a bounded hard-stop fallback."
+  (when (process-live-p process)
     (process-put process 'agdaprover-cancelled t)
     ;; SIGINT lets Python unwind its active bridge/session context managers,
     ;; which cancel and reap the separate Agda process group.  Retain a bounded
@@ -1069,6 +1230,7 @@ existing map also updates buffers in which the mode is already enabled."
    ("C-c C-x C-n" . agdaprover-reserved-n)
    ("C-c C-x C-v" . agdaprover-apply-last-proof)
    ("C-c C-x C-k" . agdaprover-cancel)
+   ("C-c C-x C-t" . agdaprover-test-entries)
    ("C-c C-x C-q" . agdaprover-reload)))
 
 (easy-menu-define agdaprover-mode-menu agdaprover-mode-map
@@ -1076,6 +1238,7 @@ existing map also updates buffers in which the mode is already enabled."
   '("AgdaProver"
     ["Prove through current goal, or all goals" agdaprover-prove-goal t]
     ["Deep search through current goal, or all goals" agdaprover-prove-deep t]
+    ["Test file entries independently" agdaprover-test-entries t]
     ["Take one refinement step" agdaprover-step-goal t]
     ["Take one step with NNUE" agdaprover-step-goal-nnue t]
     ["Prove goal symbolically" agdaprover-prove-goal-symbolic t]

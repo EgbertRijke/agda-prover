@@ -18,6 +18,10 @@ the environment variable above or `agdaprover-source-parser` on PATH. Search
 never builds or downloads it. The parser finds declaration boundaries; Agda
 still checks the completed prefix independently.
 
+The same parser supports independent entry testing (`C-c C-x C-t` in Emacs).
+Rebuild it after updating AgdaProver to obtain the `--entries` operation;
+the command does not fall back to guessing declaration boundaries.
+
 ## Optional acceleration and models
 
 `./scripts/build-native` builds CPU NNUE inference with Rust. Without it, the

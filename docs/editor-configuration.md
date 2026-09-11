@@ -22,6 +22,45 @@ Reloading does not download updates, reload your Agda files, or switch the
 configured backend checkout. The next search starts a new backend process
 using the configured installation.
 
+## Testing entries
+
+Save your file, then press `C-c C-x C-t` or run
+`M-x agdaprover-test-entries`. No open goal or cursor position is required.
+The command never saves or edits your source. Unsaved changes must first
+be saved or reverted by you.
+
+Definitions and lemmas are tested in file order. For each entry, AgdaProver
+replaces its whole implementation—including pattern-matching clauses and
+local anonymous `where` helpers—with one virtual hole in a private workspace.
+It checks through that entry in the original preceding context, not against
+later definitions that may require the original implementation. Agda's checking
+groups stay intact: mutual definitions and record bodies cannot be split into
+independently checked fragments.
+After a successful solve, it reports the freshly Agda-checked solution and
+starts the next test from the **original file**, not from earlier generated
+solutions. Datatypes, records, signatures, imports, and preceding definitions
+remain as context. This tests finding an inhabitant of the declared type;
+it does not assert that a new definition computes exactly like the original.
+For example, a type-valued entry declared as `Set` can be solved with any
+available type in `Set`; later tests still use its original definition.
+
+A separate report lists solutions as they arrive. The first unsuccessful
+entry stops the run and reports its status, including resource exhaustion.
+Uncertain declaration boundaries, definitions without a fixed signature,
+macros, and exported named `where` modules are reported as unsupported rather
+than silently skipped. Anonymous-module entries and ordinary or
+Markdown-literate Agda files are supported.
+
+Each entry uses your current NNUE models and search-effort settings, including
+the `deep` preset if selected. Press `C-c C-x C-k` in the source or report
+buffer to cancel. Closing either buffer cancels its worker. Editing the
+source invalidates the run; reported solutions are never automatically applied,
+regardless of `agdaprover-apply-policy`.
+
+Entry testing requires the native [source parser](installation.md) built from
+the current checkout with `scripts/build-source-parser`. The Emacs command
+uses the editor-neutral [entry-testing API](../schemas/entry-tests-v1.md).
+
 ## Backend and Agda
 
 The checkout setting identifies **AgdaProver**, not the Agda project you are

@@ -22,7 +22,8 @@ from .search_profiles import search_profile
 
 EDITOR_REQUEST_SCHEMA = "agdaprover.editor.request.v1"
 EDITOR_RESPONSE_SCHEMA = "agdaprover.editor.response.v1"
-EditorOperation = Literal["inspect", "prove", "prove-prefix", "step"]
+EditorOperation = Literal["inspect", "prove", "prove-prefix", "step", "test-entries"]
+EDITOR_EVENT_SCHEMA = "agdaprover.editor.event.v1"
 _REQUEST_KEYS = frozenset(
     {
         "schema_version",
@@ -81,7 +82,13 @@ class EditorRequest:
         ):
             raise ValueError("editor request_id is malformed")
         operation = value.get("operation")
-        if operation not in {"inspect", "prove", "prove-prefix", "step"}:
+        if operation not in {
+            "inspect",
+            "prove",
+            "prove-prefix",
+            "step",
+            "test-entries",
+        }:
             raise ValueError("unsupported editor operation")
         profile = search_profile(value.get("search_profile", "standard"))
         if operation == "inspect" and "search_profile" in value:
@@ -201,6 +208,22 @@ def response_envelope(
         "source_sha256": request.source_sha256,
         "exit_code": exit_code,
         "result": dict(result),
+    }
+
+
+def event_envelope(
+    request: EditorRequest, event: str, payload: Mapping[str, Any]
+) -> dict[str, Any]:
+    if source_sha256(request.source_file) != request.source_sha256:
+        raise ValueError("Editor source changed during entry testing")
+    return {
+        "schema_version": EDITOR_EVENT_SCHEMA,
+        "request_id": request.request_id,
+        "operation": request.operation,
+        "source_file": str(request.source_file),
+        "source_sha256": request.source_sha256,
+        "event": event,
+        "payload": dict(payload),
     }
 
 

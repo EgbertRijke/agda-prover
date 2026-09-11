@@ -1,7 +1,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- Runtime prefix proposals only; fresh Agda remains the acceptance authority.
+-- Runtime declaration-boundary proposals; fresh Agda decides acceptance.
 module Main (main) where
 
 import Control.Monad (when)
@@ -19,6 +19,7 @@ import Agda.Syntax.Position (mkRangeFile)
 import Agda.Utils.FileName (absolute)
 import Agda.Version (version)
 import Prefix qualified
+import Entries qualified
 
 failure :: String -> IO a
 failure diagnostic = do
@@ -34,8 +35,9 @@ main :: IO ()
 main = do
   arguments <- getArgs
   (position, path) <- case arguments of
-    ["--prefix", offset, file] | Just n <- readMaybe offset, n >= 0 -> pure (n, file)
-    _ -> failure "expected-prefix-position-and-source-file"
+    ["--prefix", offset, file] | Just n <- readMaybe offset, n >= 0 -> pure (Just n, file)
+    ["--entries", file] -> pure (Nothing, file)
+    _ -> failure "expected-prefix-or-entries-and-source-file"
   bytes <- withBinaryFile path ReadMode $ \handle -> BS.hGet handle (4 * 1024 * 1024 + 1)
   when (BS.length bytes > 4 * 1024 * 1024) $ failure "source-size-limit"
   text <- either (failure . show) pure (decodeUtf8' bytes)
@@ -44,17 +46,28 @@ main = do
   let file = mkRangeFile absolutePath Nothing
   (parsed, warnings) <- P.runPMIO $ P.parseFile P.moduleParser file source
   ((modul, _), _) <- either (failure . show) pure parsed
-  end <- either failure pure (Prefix.boundary source modul position)
-  omissions <- either failure pure (Prefix.omissions modul)
-  when (length omissions > 4096) $ failure "prefix-declaration-count-limit"
-  BL.putStrLn $ encode $ object
-    [ "schema_version" .= ("agdaprover.source-prefix.v1" :: String)
-    , "parser_version" .= version
-    , "source_characters" .= length source
-    , "position" .= position
-    , "prefix_end" .= end
-    , "parse_warning_count" .= length warnings
-    , "omission_candidates" .=
-        [ object ["name" .= name, "start" .= start, "end" .= stop]
-        | (name, start, stop) <- omissions, stop < position ]
-    ]
+  case position of
+    Nothing -> do
+      entries <- either failure pure (Entries.inventory source modul)
+      BL.putStrLn $ encode $ object
+        [ "schema_version" .= ("agdaprover.source-entries.v1" :: String)
+        , "parser_version" .= version
+        , "source_characters" .= length source
+        , "parse_warning_count" .= length warnings
+        , "entries" .= entries
+        ]
+    Just offset -> do
+      end <- either failure pure (Prefix.boundary source modul offset)
+      omissions <- either failure pure (Prefix.omissions modul)
+      when (length omissions > 4096) $ failure "prefix-declaration-count-limit"
+      BL.putStrLn $ encode $ object
+        [ "schema_version" .= ("agdaprover.source-prefix.v1" :: String)
+        , "parser_version" .= version
+        , "source_characters" .= length source
+        , "position" .= offset
+        , "prefix_end" .= end
+        , "parse_warning_count" .= length warnings
+        , "omission_candidates" .=
+            [ object ["name" .= name, "start" .= start, "end" .= stop]
+            | (name, start, stop) <- omissions, stop < offset ]
+        ]

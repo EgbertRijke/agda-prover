@@ -23,8 +23,8 @@ python3 -m venv .venv
 .venv/bin/python -m pip install .
 ```
 
-For solving part of a file while later goals remain open, also install the
-[prefix parser](docs/installation.md). Ordinary `.agda` and Markdown-literate
+For testing entries or solving part of a file while later goals remain open,
+also install the [prefix parser](docs/installation.md). Ordinary `.agda` and Markdown-literate
 `.lagda.md` files are supported.
 
 ## Setting up your editor
@@ -68,6 +68,7 @@ act on the current goal and may leave new subgoals.
 | Solve | `C-c C-x C-p` | `Ctrl+C Ctrl+X Ctrl+P` |
 | Deep search | `C-c C-x C-d` | `Ctrl+C Ctrl+X Ctrl+D` |
 | Apply one refinement step | `C-c C-x C-s` | `Ctrl+C Ctrl+X Ctrl+S` |
+| Test entries independently | `C-c C-x C-t` | — |
 | Cancel | `C-c C-x C-k` | `Ctrl+C Ctrl+X Ctrl+K` |
 | Reload editor mode | `C-c C-x C-q` | — |
 | Apply last verified proof | `C-c C-x C-v` | — |
@@ -87,8 +88,15 @@ Finish or cancel active AgdaProver runs first. See
 [reloading the Emacs mode](docs/editor-configuration.md#reloading-the-emacs-mode)
 for first-time activation in an older session.
 
-Both editors save before searching and reject stale edits. Emacs asks before
-applying completed proofs; `agdaprover-apply-policy` controls this behavior.
+To test a saved file, press `C-c C-x C-t` in Emacs. AgdaProver virtually
+replaces one definition at a time with a hole, reports its solution, and
+checks it in its original preceding context. The next test uses the original
+file again, discarding the solver's replacement. The report updates live
+and stops at the first unsuccessful entry. Your file stays unchanged; no
+solutions are applied. See [entry testing](docs/editor-configuration.md#testing-entries).
+
+Normal solve commands save before searching and reject stale edits. Emacs asks
+before applying completed proofs; `agdaprover-apply-policy` controls this behavior.
 One-step refinements apply automatically. VS Code applies and saves successful
 edits automatically, then reloads through an available companion extension.
 Cancel stops the current buffer's search in Emacs or the active operation in
