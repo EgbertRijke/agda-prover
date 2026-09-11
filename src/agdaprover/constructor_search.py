@@ -3461,8 +3461,20 @@ class _ConstructorSearch:
         if not values:
             return
         target_head = result_head(goal.target)
+
+        def supplied_consumer(type_text: str) -> bool:
+            if not self._scoped_evidence_sources_enabled:
+                return False
+            domains = explicit_domains(type_text)
+            return bool(
+                domains
+                and domains[0] in premise_structured_result_domains(type_text)
+                and premise_has_local_source(goal, type_text, domains[:1])
+            )
+
         if self._scope_catalog is not None and not any(
-            result_head(ty) == target_head and explicit_domains(ty)
+            (result_head(ty) == target_head and explicit_domains(ty))
+            or supplied_consumer(ty)
             for _name, ty in (
                 *((v.expression, v.type_text) for v in values),
                 *self._scope_catalog,
@@ -3470,11 +3482,28 @@ class _ConstructorSearch:
         ):
             return
         actions = self._ordered_premise_actions(state, goal, shallow_only=False)
+        actions = self._admit_evidence_sources(state, goal, actions)
+        # A dependent field's result family need not print like the expected
+        # type. Its supplied structured input and the kernel's expected-type
+        # check recover that dependency; no result type is guessed here.
+        consumers = tuple(
+            (a.expression, a.type_text)
+            for a in actions
+            if supplied_consumer(a.type_text)
+        )
         declarations = tuple(
-            ready_evidence_declarations(
-                goal.target, values, tuple((a.expression, a.type_text) for a in actions)
+            dict.fromkeys(
+                (
+                    *ready_evidence_declarations(
+                        goal.target,
+                        values,
+                        tuple((a.expression, a.type_text) for a in actions),
+                    ),
+                    *consumers,
+                )
             )
         )
+        consumer_types = {ty for _name, ty in consumers}
         proposals = tuple(
             proposal
             for proposal in evidence_applications(
@@ -3483,7 +3512,10 @@ class _ConstructorSearch:
                 endpoint_terms=frozenset(),
                 relation_heads=frozenset(),
             )
-            if result_head(proposal.function.type_text) == target_head
+            if (
+                result_head(proposal.function.type_text) == target_head
+                or proposal.function.type_text in consumer_types
+            )
             and len(explicit_domains(proposal.function.type_text))
             == len(proposal.arguments)
         )

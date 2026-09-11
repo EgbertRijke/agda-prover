@@ -83,6 +83,17 @@ and infers hidden parameters. Missing explicit arguments are not synthesized by
 this lane, and an unresolved inferred result is not stored as intermediate
 evidence. Rejection leaves the parent available for other alternatives.
 
+This lane shares the source-directed admission view above. A supplied dependent
+consumer may return a family such as `P (front value)`, whose printed head does
+not match the expected target before application. The existing structural-input
+recognizer and a matching public local source may offer its fully supplied
+application anyway. Agda checks the actual result against the expected type;
+the generator does not substitute a field's result type or assume a record law.
+Private/nonmatching sources and missing explicit arguments supply no candidate.
+The ordinary admission order remains unchanged, and NNUE ranks all generated
+checking alternatives. The existing source-admission switch disables this
+additional flexible-result eligibility as well as the scoped admission view.
+
 These decisions use the same family, typed candidates, structural features,
 NNUE router and branch-local proof lineage as inference decisions. The action
 tag distinguishes checking from observation without changing existing-family
