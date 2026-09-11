@@ -168,6 +168,34 @@ well as contextual relation-path inference. Disabling
 `AGDAPROVER_CONTEXTUAL_EVIDENCE` disables the new early scheduling preference;
 ordinary later relation search remains available.
 
+## Incremental relation evidence
+
+Both contextual and direct relation search retain a branch-local agenda of
+observations. An intermediate obtained in an early mapping or composition pass
+remains eligible for later unary applications and either binary argument slot.
+Established proposal priorities run first; the agenda interleaves remaining
+expansions, including new consequences, within the same remaining query, term
+and task allowances. Applications already attempted by a priority pass are not
+queried again. Infix and recognized prefix relations use the same continuation.
+
+The early boundary-closing preference also tries a supplied reversal when its
+inferred result could join a known edge. Operation signatures provide scheduling
+hints, not relation laws. Agda infers applications and checks completions; fresh
+validation remains required. Distinct witnesses with identical types/endpoints
+are retained separately. Exact-expression keys are local to one parent state
+and interaction; no results are reused across branches. Record projections and
+their applications enter through the existing contextual-evidence boundary.
+
+`AGDAPROVER_INCREMENTAL_RELATION_EVIDENCE=0` restores the previous staged
+behavior for controlled comparisons. Default behavior preserves the caller's
+ranked head order within structural tiers and introduces no new model format or
+NNUE decision family. `relation_path.worklist_expansions` counts expansions
+started and `relation_path.worklist_peak` counts peak pending expansions.
+Their kernel inferences remain included in existing path-query/action/verifier
+counters, rather than constituting a second budget. This is bounded search over
+admitted unary/binary operations, not a completeness claim for arbitrary Agda
+terms or relation reasoning.
+
 ## Result-determined complete and partial applications
 
 The shared premise generator retains expression trees and exact source spans

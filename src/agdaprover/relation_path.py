@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from .bridge.contracts import StateToken
 from .contracts import GoalInfo
@@ -23,6 +23,7 @@ from .notation import (
     render_application,
     strip_outer_parentheses,
 )
+from .resource_budget import checkpoint
 from .type_syntax import (
     binder_domains,
     normalize_type_text,
@@ -31,6 +32,9 @@ from .type_syntax import (
     split_top_level_application,
     split_top_level_arrows,
 )
+
+if TYPE_CHECKING:
+    from .reasoning.agenda import EvidenceAgenda
 
 _WORD = re.compile(r"^[^\W\d]\w*$", re.UNICODE)
 _EXCLUDED_OPERATORS = frozenset({"→", "=", ":", "::", "∀"})
@@ -92,6 +96,8 @@ class RelationPathStats:
     composition_rounds: int = 0
     frontier_peak: int = 0
     seed_terms: int = 0
+    worklist_expansions: int = 0
+    worklist_peak: int = 0
     elapsed_ms: float = 0.0
 
     def to_dict(self) -> dict[str, object]:
@@ -386,6 +392,7 @@ def solve_relation_path(
     seed_terms: tuple[tuple[str, str], ...] = (),
     prefix_heads: Mapping[str, int] | None = None,
     excluded_expressions: frozenset[str] = frozenset(),
+    incremental: bool = True,
 ) -> RelationPathResult:
     """Search a small kernel-typed relation graph for the goal edge."""
 
@@ -413,6 +420,7 @@ def solve_relation_path(
     expressions: set[str] = set()
     edge_expressions: dict[tuple[str, str], list[RelationTerm]] = {}
     completed_inputs: frozenset[str] = frozenset()
+    agenda: EvidenceAgenda[tuple[RelationHead, tuple[RelationTerm, ...]]] | None = None
 
     def retain(term: RelationTerm) -> str | None:
         nonlocal completed_inputs
@@ -429,7 +437,8 @@ def solve_relation_path(
             return None
         bucket = edge_expressions.get(term.edge.key, [])
         if (
-            not prefix_heads
+            not incremental
+            and not prefix_heads
             and len(bucket) >= 2
             and all(existing.node_count <= term.node_count for existing in bucket)
         ):
@@ -441,6 +450,9 @@ def solve_relation_path(
         edge_expressions.setdefault(term.edge.key, []).append(term)
         stats.edges_retained += 1
         stats.frontier_peak = max(stats.frontier_peak, len(terms))
+        if agenda is not None:
+            agenda.add(term.expression, expand(term))
+            stats.worklist_peak = agenda.peak_pending
         return None
 
     initial_entries = (
@@ -525,14 +537,10 @@ def solve_relation_path(
 
     unary_heads = tuple(head for head in usable_heads if head.arity == 1)
     binary_heads = tuple(head for head in usable_heads if head.arity == 2)
-    shapes = (
-        {
-            head: relation_operation_shape(head.type_text, prefix_heads=prefix_heads)
-            for head in usable_heads
-        }
-        if prefix_heads
-        else {}
-    )
+    shapes = {
+        head: relation_operation_shape(head.type_text, prefix_heads=prefix_heads)
+        for head in usable_heads
+    }
 
     def close_boundary() -> str | None:
         if stats.inference_queries >= query_budget or time.monotonic() >= deadline:
@@ -549,12 +557,97 @@ def solve_relation_path(
                             return solved
         return None
 
+    boundary_generation = -1
+
+    def close_reoriented_boundary() -> str | None:
+        """Try supplied unary wiring when it enables immediate composition.
+
+        Reorientation is a proposal, never a law granted to the relation.
+        Other applications remain on the fair agenda regardless of whether
+        this inexpensive endpoint-directed scheduling hint applies.
+        """
+        nonlocal boundary_generation
+        if not incremental:
+            return close_boundary()
+        # Duplicate/rejected applications do not change the graph. Rewalking
+        # its boundary after every such agenda proposal would be quadratic
+        # work on top of the application cross product. This negative hint is
+        # valid only for this exact parent state and admitted set of witnesses.
+        if boundary_generation == len(terms):
+            return None
+        boundary_generation = len(terms)
+        solved = close_boundary()
+        if solved is not None:
+            return solved
+        for term in tuple(terms):
+            checkpoint()
+            left, right = term.edge.key
+            if not (
+                (right, left) == target.key
+                or (
+                    right == target.key[0] and (left, target.key[1]) in edge_expressions
+                )
+                or (
+                    left == target.key[1] and (target.key[0], right) in edge_expressions
+                )
+            ):
+                continue
+            for head in unary_heads:
+                if shapes.get(head) == "reverse":
+                    solved = infer(head, (term,)) or close_boundary()
+                    if solved is not None:
+                        return solved
+        return None
+
+    def expand(
+        term: RelationTerm,
+    ) -> Iterator[tuple[RelationHead, tuple[RelationTerm, ...]]]:
+        """Every observation can feed unary operators and either binary slot.
+
+        A later observation owns combinations with earlier ones. Taking this
+        snapshot when expansion begins may also include later terms; exact
+        application deduplication below makes those overlaps harmless.
+        """
+        stats.worklist_expansions += 1
+        partners = sorted(
+            terms,
+            key=lambda other: (
+                term.edge.key[1] != other.edge.key[0]
+                and other.edge.key[1] != term.edge.key[0],
+                -_endpoint_overlap(other.edge, target),
+                other.node_count,
+                other.expression,
+            ),
+        )
+        # Keep the caller's ranked head order within structural tiers. The
+        # agenda interleaves observations; no one stream owns the whole slice.
+        for head in unary_heads:
+            checkpoint()
+            yield head, (term,)
+        for other in partners:
+            for head in binary_heads:
+                checkpoint()
+                yield head, (term, other)
+                if term.expression != other.expression:
+                    yield head, (other, term)
+
+    if incremental:
+        # The reasoning facade exports classifiers using this module's parser.
+        # Load the optional continuation only when searching, after imports have
+        # settled, so the parser also remains independently importable.
+        from .reasoning.agenda import EvidenceAgenda
+
+        agenda = EvidenceAgenda()
+        for term in initial:
+            agenda.add(term.expression, expand(term))
+        stats.worklist_peak = agenda.peak_pending
+
     # A typed family observation permits an inexpensive endpoint-directed
     # lane before general congruence exploration. It never assigns algebraic
     # laws to the relation: only supplied declarations with matching wiring
     # are proposed, and inference decides what they actually produce.
     if prefix_heads:
-        if (solved := close_boundary()) is not None:
+        if (solved := close_reoriented_boundary()) is not None:
             stats.elapsed_ms = (time.monotonic() - started) * 1000.0
             return RelationPathResult(solved, stats, completed_inputs)
         # Supplied two-input maps are as useful as unary maps. In particular,
@@ -586,7 +679,7 @@ def solve_relation_path(
             for mapped in mapped_inputs:
                 for fixed in fixed_inputs:
                     arguments = (mapped, fixed) if shape == "map-0" else (fixed, mapped)
-                    solved = infer(head, arguments) or close_boundary()
+                    solved = infer(head, arguments) or close_reoriented_boundary()
                     if solved is not None:
                         stats.elapsed_ms = (time.monotonic() - started) * 1000.0
                         return RelationPathResult(solved, stats, completed_inputs)
@@ -597,7 +690,7 @@ def solve_relation_path(
             for head in unary_heads:
                 if shapes[head] not in {"map", "reverse"}:
                     continue
-                solved = infer(head, (term,)) or close_boundary()
+                solved = infer(head, (term,)) or close_reoriented_boundary()
                 if solved is not None:
                     stats.elapsed_ms = (time.monotonic() - started) * 1000.0
                     return RelationPathResult(solved, stats, completed_inputs)
@@ -761,6 +854,26 @@ def solve_relation_path(
                 break
         if len(terms) == before_round:
             break
+
+    # The preceding proposal priorities are hints, not ownership of evidence.
+    # Continue every admitted observation, including discoveries made before
+    # those snapshots and the consequences of later compositions. Exact
+    # deduplication shares attempts and the same remaining query allowance.
+    if agenda is not None:
+        while (
+            stats.inference_queries < query_budget
+            and time.monotonic() < deadline
+            and len(terms) < max_terms
+        ):
+            checkpoint()
+            proposal = agenda.pop()
+            if proposal is None:
+                break
+            head, operands = proposal
+            solved = infer(head, operands) or close_reoriented_boundary()
+            if solved is not None:
+                stats.elapsed_ms = (time.monotonic() - started) * 1000.0
+                return RelationPathResult(solved, stats, completed_inputs)
 
     stats.elapsed_ms = (time.monotonic() - started) * 1000.0
     return RelationPathResult(None, stats)

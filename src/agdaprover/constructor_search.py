@@ -582,6 +582,9 @@ class _ConstructorSearch:
         self._expected_applications_enabled = (
             os.environ.get("AGDAPROVER_EXPECTED_APPLICATIONS", "1") != "0"
         )
+        self._incremental_relation_evidence = (
+            os.environ.get("AGDAPROVER_INCREMENTAL_RELATION_EVIDENCE", "1") != "0"
+        )
         self._scoped_evidence_sources_enabled = (
             os.environ.get("AGDAPROVER_SCOPED_EVIDENCE_SOURCES", "1") != "0"
         )
@@ -2478,6 +2481,7 @@ class _ConstructorSearch:
                 seed_terms=tuple(seeds),
                 prefix_heads=families,
                 excluded_expressions=frozenset(s.proof_text for s in solutions),
+                incremental=self._incremental_relation_evidence,
             )
             self.stats.evidence_path_queries += path.stats.inference_queries
             self.stats.actions_considered += path.stats.inference_queries
@@ -3103,6 +3107,7 @@ class _ConstructorSearch:
             deadline=self.deadline,
             seed_terms=recursive_seeds,
             prefix_heads=families,
+            incremental=self._incremental_relation_evidence,
         )
         self.stats.relation_path = result.stats.to_dict()
         self.stats.evidence_path_queries += result.stats.inference_queries
