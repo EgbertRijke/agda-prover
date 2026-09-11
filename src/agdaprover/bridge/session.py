@@ -1413,6 +1413,69 @@ class ConformingKernelSession:
             rejection_code=rejection,
         )
 
+    def split_result(
+        self,
+        state: StateToken,
+        interaction_id: InteractionId,
+        budget: BridgeBudget,
+    ) -> CaseSplitResult:
+        """Observe Agda-owned telescope/copattern clauses without committing.
+
+        This internal capability does not widen the serialized v1 CaseSplit
+        request: its subject must still be a local name. A result split has no
+        subject and no in-place commit. It uses the existing clause response
+        and requires source reconstruction/reloading before any field is solved.
+        """
+        record = self._activate(state, budget)
+        if all(g.interaction_id != interaction_id for g in record.state.goals):
+            raise self._error(
+                BridgeFailure.INVALID_REQUEST,
+                "result-split-goal-not-open",
+                "Result splitting requires an open interaction",
+            )
+        before = self.transport.cost.copy()
+        adapter = adapter_for_version(self.project.toolchain.version)
+        # An interrupted or malformed observation must not leave an optimistic
+        # active marker. Only a complete, identity-checked response preserves it.
+        self._active_state = None
+        command_id, response = self.transport.command(
+            self._source_for(state.module_id),
+            adapter.split_result(interaction_id.value),
+        )
+        diagnostics = diagnostics_from_response(
+            response,
+            primary_range=self._goal_range(record.state, interaction_id),
+            project_root=self.project.project_root,
+        )
+        try:
+            observation = adapter.result_split(
+                response, interaction_id=interaction_id.value
+            )
+        except ValueError as error:
+            raise self._error(
+                BridgeFailure.PROTOCOL_FAILURE,
+                "invalid-result-split-response",
+                str(error),
+            ) from error
+        self._active_state = state
+        diagnostic = first_error(diagnostics)
+        return CaseSplitResult(
+            transition=self._transition(
+                command_id,
+                parent=state,
+                child=None,
+                diagnostics=diagnostics,
+                cost=self.transport.cost.delta(before),
+            ),
+            accepted=observation.accepted,
+            clauses=observation.clauses,
+            variant=observation.variant,
+            generated_goals=(),
+            rejection_code=(
+                diagnostic.code if not observation.accepted and diagnostic else None
+            ),
+        )
+
     def check_definition(
         self,
         state: StateToken,

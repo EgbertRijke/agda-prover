@@ -52,6 +52,21 @@ class KernelSession(Protocol):
 
 
 @runtime_checkable
+class ResultSplittingSession(Protocol):
+    """Optional kernel-owned clause introduction, including copatterns.
+
+    This observes clauses for an open goal without applying them. It neither
+    classifies a record as coinductive nor certifies a recursive call as guarded.
+    Reconstruction must reload the changed source and freshly validate a
+    completed definition, including Agda's coverage/productivity checks.
+    """
+
+    def check_result_split(
+        self, state: StateToken, *, goal_id: int
+    ) -> CaseSplitCheck: ...
+
+
+@runtime_checkable
 class ProjectRevisionSession(Protocol):
     """Optional new-epoch loading with explicitly rebound project routing.
 

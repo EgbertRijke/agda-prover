@@ -363,6 +363,32 @@ class AgdaSession:
             ),
         )
 
+    def check_result_split(self, state: StateToken, *, goal_id: int) -> CaseSplitCheck:
+        """Observe source clauses for a result, preserving the explicit parent."""
+        try:
+            checked = self._session.split_result(
+                state, InteractionId(goal_id), self._budget
+            )
+        except BridgeError as error:
+            raise _p0_error(error) from error
+        return CaseSplitCheck(
+            checked.accepted,
+            checked.clauses,
+            checked.variant,
+            next(
+                (
+                    item.message
+                    for item in checked.transition.diagnostics
+                    if item.severity == "error"
+                ),
+                "",
+            ),
+            tuple(
+                {"kind": "BridgeDiagnostic", "diagnostic": item.to_dict()}
+                for item in checked.transition.diagnostics
+            ),
+        )
+
     def current_state(self) -> StateToken:
         """Return the immutable token for the currently loaded source state."""
 

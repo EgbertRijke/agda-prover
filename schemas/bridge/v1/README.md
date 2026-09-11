@@ -54,6 +54,31 @@ an ordinary checked action, retain unresolved obligations, and freshly validate
 any reconstructed completion. No search ordering or editor default changes;
 this is an internal Python capability, not a new serialized bridge-v1 operation.
 
+## Result splitting
+
+The optional solver-facing `ResultSplittingSession.check_result_split(state,
+goal_id=...)` asks Agda for clause introductions without naming a scrutinee.
+Its Agda 2.8 adapter uses `Cmd_make_case` with an empty subject. This can name
+remaining arguments or introduce result-field copatterns, including for records
+whose constructors cannot be pattern-matched. It does not infer applicability
+from source names, classify records as coinductive, or certify guarded recursion.
+
+The internal bridge method `split_result(state, interaction_id, budget)` returns
+the existing clause-proposal structure. There is no in-place commit: clauses
+must pass ordinary scoped reconstruction, reload and final fresh validation.
+The serialized v1 operations and named `CaseSplit` contract are unchanged; an
+empty subject is still invalid for that operation. No default search ordering,
+editor binding, recursive-call admission or NNUE weights change with this API.
+
+A proposal is bound to the exact open interaction and immutable parent. Missing,
+duplicate, malformed or wrong-interaction responses fail explicitly and clear
+the active-state marker. Complete observations preserve the parent without a
+reload; each physical command remains charged. Stale inputs, cancelled commands,
+resource refusals and replacement-budget attempts use the existing bridge
+failure paths. Ordinary Agda rejection means this split is unavailable, not that
+the goal is false. Introduced arguments alone are not evidence of a productivity
+guard, and a clause proposal is not a complete proof or training success.
+
 ## Process completion and resource sampling
 
 An operating-system resource sample can disappear just before a checker's exit

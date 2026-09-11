@@ -177,6 +177,10 @@ class Agda28Adapter:
     def case_split(self, interaction_id: int, local_name: str) -> str:
         return f"Cmd_make_case {interaction_id} noRange {_quote(local_name)}"
 
+    def split_result(self, interaction_id: int) -> str:
+        """Ask Agda to introduce the remaining telescope or result fields."""
+        return f'Cmd_make_case {interaction_id} noRange ""'
+
     def auto(self, interaction_id: int) -> str:
         return f'Cmd_autoOne AsIs {interaction_id} noRange ""'
 
@@ -401,6 +405,44 @@ class Agda28Adapter:
                     str(variant) if variant is not None else None,
                 )
         return CaseObservation(False, (), None)
+
+    def result_split(
+        self, response: DecodedResponse, *, interaction_id: int
+    ) -> CaseObservation:
+        """Decode a clause proposal for exactly the requested interaction.
+
+        An explicit Agda error is an unavailable split, not a protocol error.
+        Missing/malformed success responses must not silently suppress an
+        applicable structural action or route another goal's clauses here.
+        """
+        if self.error_payload(response) is not None:
+            return CaseObservation(False, (), None)
+        rows = [event.value for event in response.events if event.kind == "MakeCase"]
+        if len(rows) != 1:
+            raise ValueError("missing/duplicate result-split response")
+        row = rows[0]
+        point = row.get("interactionPoint")
+        if (
+            row.get("kind") != "MakeCase"
+            or not isinstance(point, dict)
+            or type(point.get("id")) is not int
+            or point["id"] != interaction_id
+        ):
+            raise ValueError("result-split response has the wrong interaction")
+        clauses = row.get("clauses")
+        variant = row.get("variant")
+        if (
+            not isinstance(clauses, list)
+            or not clauses
+            or any(
+                not isinstance(clause, str) or not clause.strip() or "\x00" in clause
+                for clause in clauses
+            )
+            or not isinstance(variant, str)
+            or not variant
+        ):
+            raise ValueError("invalid result-split clauses or variant")
+        return CaseObservation(True, tuple(clauses), variant)
 
     def named_contents(self, response: DecodedResponse) -> tuple[tuple[str, str], ...]:
         if self.error_payload(response) is not None:
