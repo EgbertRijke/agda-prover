@@ -5256,7 +5256,15 @@ def _batched_case_prove(
                             edits.append(direct_edit)
                             continue
                         for action in direct_actions[:16]:
-                            direct_expression = premise_result_application(goal, action)
+                            direct_expression = premise_result_application(
+                                goal,
+                                action,
+                                excluded_names=(
+                                    frozenset((root_name,))
+                                    if root_name is not None
+                                    else frozenset()
+                                ),
+                            )
                             if direct_expression is None:
                                 continue
                             if not available():

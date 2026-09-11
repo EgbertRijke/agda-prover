@@ -1413,8 +1413,51 @@ def premise_result_arguments(
     return tuple(arguments)
 
 
+def _result_arguments_allowed(
+    goal: GoalInfo,
+    action: ScopePremiseAction,
+    arguments: Iterable[str],
+    excluded_names: frozenset[str],
+) -> bool:
+    """Keep excluded declarations out of terms copied from a result type.
+
+    A dependent result can mention an unfinished definition through its earlier
+    projections. That occurrence is not permission to use the whole definition
+    as a premise argument. This conservative surface filter mirrors catalogue
+    name exclusions; ordinary refinement and explicit recursive actions remain
+    separate. It does not establish scope or resolve aliases.
+    """
+    if not excluded_names:
+        return True
+    if (
+        action.name in excluded_names
+        or action.name.rsplit(".", 1)[-1] in excluded_names
+    ):
+        return False
+    # Include the printed spelling of a unary/binary mixfix name. Keep complete
+    # identifier tokens: an exclusion of f must not also exclude f₁ or f-tail.
+    spellings = excluded_names | frozenset(
+        name.rpartition(".")[0] + "." + name.rpartition(".")[2].strip("_")
+        if "." in name
+        else name.strip("_")
+        for name in excluded_names
+    )
+    locals_in_scope = {entry.name for entry in goal.context if entry.in_scope}
+    return not any(
+        token not in locals_in_scope
+        and (token in spellings or token.rsplit(".", 1)[-1] in spellings)
+        for argument in arguments
+        # Unlike the type-pattern tokenizer, keep punctuation within names
+        # (for example _:::_). This is a name filter, not telescope parsing.
+        for token in re.findall(r"[^\s()[\]{}⦃⦄]+", argument)
+    )
+
+
 def premise_result_application(
-    goal: GoalInfo, action: ScopePremiseAction
+    goal: GoalInfo,
+    action: ScopePremiseAction,
+    *,
+    excluded_names: frozenset[str] = frozenset(),
 ) -> str | None:
     """Render a complete application when the result fixes every argument.
 
@@ -1425,7 +1468,9 @@ def premise_result_application(
     """
 
     arguments = premise_result_arguments(goal, action)
-    if not arguments:
+    if not arguments or not _result_arguments_allowed(
+        goal, action, arguments, excluded_names
+    ):
         return None
     inaccessible = tuple(
         entry.name for entry in goal.context if entry.name and not entry.in_scope
@@ -1443,7 +1488,10 @@ def premise_result_application(
 
 
 def premise_inferred_application(
-    goal: GoalInfo, action: ScopePremiseAction
+    goal: GoalInfo,
+    action: ScopePremiseAction,
+    *,
+    excluded_names: frozenset[str] = frozenset(),
 ) -> str | None:
     """Render a result-matched application with inferred telescope entries.
 
@@ -1457,7 +1505,9 @@ def premise_inferred_application(
     """
 
     bindings = _result_bindings(goal, action)
-    if bindings is None:
+    if bindings is None or not _result_arguments_allowed(
+        goal, action, (" ".join(value) for value in bindings.values()), excluded_names
+    ):
         return None
     try:
         domains = split_top_level_arrows(action.type_text)[:-1]
@@ -1491,7 +1541,10 @@ def premise_inferred_application(
 
 
 def _premise_result_prefix(
-    goal: GoalInfo, action: ScopePremiseAction
+    goal: GoalInfo,
+    action: ScopePremiseAction,
+    *,
+    excluded_names: frozenset[str] = frozenset(),
 ) -> tuple[str, bool] | None:
     """Render the longest leading application fixed by the result shape.
 
@@ -1614,17 +1667,24 @@ def _premise_result_prefix(
                 break
         if stopped:
             break
-    if not arguments or (not stopped and not one_sided):
+    if (
+        not arguments
+        or (not stopped and not one_sided)
+        or not _result_arguments_allowed(goal, action, arguments, excluded_names)
+    ):
         return None
     return render_application(action.expression, arguments), not stopped
 
 
 def premise_result_prefix_application(
-    goal: GoalInfo, action: ScopePremiseAction
+    goal: GoalInfo,
+    action: ScopePremiseAction,
+    *,
+    excluded_names: frozenset[str] = frozenset(),
 ) -> str | None:
     """Return a result-determined leading application, when one exists."""
 
-    result = _premise_result_prefix(goal, action)
+    result = _premise_result_prefix(goal, action, excluded_names=excluded_names)
     return None if result is None else result[0]
 
 

@@ -80,6 +80,16 @@ with the same kernel-generated owner provenance. This fallback neither renews
 resources nor exposes the owner as an ordinary premise. Subsequent argument
 pattern changes do not manufacture new copattern provenance.
 
+Result-directed premise applications respect the same exclusions in recovered
+arguments as in premise heads. An unfinished definition can legitimately occur
+in a later field's target type; that does not authorize copying it into an
+ordinary premise application. Complete, inferred and leading-prefix application
+proposals share this conservative name filter before inaccessible arguments are
+masked. Visible local shadowing remains available. Ordinary head refinement,
+permitted prefixes and dedicated checked recursion remain separate alternatives.
+The filter does not resolve aliases or establish scope, termination or
+productivity; independent Agda validation still decides the completed proof.
+
 The existing `recursive-call` policy boundary carries `refine-copattern-owner`
 candidates with `subject-origin=kernel-copattern-clause`; symbolic ordering remains
 available. Bounded `agdaprover.copattern-call.v1` diagnostic rows in

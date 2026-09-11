@@ -3130,9 +3130,13 @@ class _ConstructorSearch:
                     return
                 if not self._charge():
                     return
-            application = premise_result_application(goal, action)
+            application = premise_result_application(
+                goal, action, excluded_names=self.excluded_premises
+            )
             if application is None:
-                application = premise_inferred_application(goal, action)
+                application = premise_inferred_application(
+                    goal, action, excluded_names=self.excluded_premises
+                )
             if application is not None:
                 direct = self.session.commit_proof_action(
                     state,
@@ -3161,7 +3165,9 @@ class _ConstructorSearch:
                 self._recursive_action_cache.get((state.structural_hash, goal.goal_id))
             )
             prefix_application = (
-                premise_result_prefix_application(goal, action)
+                premise_result_prefix_application(
+                    goal, action, excluded_names=self.excluded_premises
+                )
                 if recursive_evidence
                 else None
             )
