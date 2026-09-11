@@ -26,6 +26,7 @@ jobs:
           python -W error::ResourceWarning -m unittest -v
           test_runtime.RuntimeContracts.test_fresh_proof_in_unrelated_temporary_directory
           test_examples.ExampleTests.test_example_loads_with_all_twelve_goals_outside_checkout
+          test_library_environments.LibraryEnvironmentTests.test_fresh_validation_does_not_inherit_the_temporary_parent_library
   product:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

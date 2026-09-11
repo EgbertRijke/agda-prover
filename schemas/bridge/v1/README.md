@@ -54,6 +54,14 @@ Absolute in-root include paths and escaped spaces are supported. Interfaces and
 ambient default libraries are not copied or consulted. Configuration artifacts
 are included in storage accounting and fresh-check artifact hashes.
 
+For a library-backed source, batch validation starts in the copied candidate's
+directory, with include and candidate paths relative to that directory. Agda's
+working-directory library discovery therefore stays below the relocated
+manifest even when the task's temporary directory lies inside the original
+library. Named and unnamed libraries retain their own flags; no synthetic
+manifest or disabled library checking is needed. Sources without a library
+continue to use `--no-libraries` from the overlay root.
+
 The optional Agda 2.8 adapter accepts either the historical
 `--no-libraries --ignore-interfaces --interaction-json` startup profile or
 `--no-default-libraries --library-file=ABSOLUTE_PATH --ignore-interfaces

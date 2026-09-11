@@ -263,7 +263,14 @@ def validate_patch(
         artifacts = materialized.artifacts
         temporary_bytes = materialized.total_bytes
         storage.sample(force=True)
-        relative_candidate = candidate_path.relative_to(overlay).as_posix()
+        # Batch Agda also discovers a library from its working directory.
+        # Starting above the relocated manifests can inherit an original
+        # library when TMPDIR is inside that project. Start within the copied
+        # candidate's library instead, preserving unnamed libraries as well.
+        working_directory = (
+            candidate_path.parent if materialized.library_file is not None else overlay
+        )
+        relative_candidate = os.path.relpath(candidate_path, working_directory)
         options = project.command_options
         command_parts = [
             str(project.toolchain.executable),
@@ -271,13 +278,15 @@ def validate_patch(
             "--ignore-interfaces",
         ]
         for include in materialized.include_roots:
-            command_parts.extend(("-i", str(include.relative_to(overlay)) or "."))
+            command_parts.extend(("-i", os.path.relpath(include, working_directory)))
         if profile.require_safe and "--safe" not in options:
             command_parts.append("--safe")
         command_parts.extend(options)
         command_parts.append(relative_candidate)
         command = tuple(command_parts)
-        run = _run_checker(command, overlay=overlay, budget=budget, cancellation=token)
+        run = _run_checker(
+            command, overlay=working_directory, budget=budget, cancellation=token
+        )
         storage.sample(force=True)
         successful = run.exit_status == 0 and not run.timed_out
         diagnostics = (

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from agdaprover.bridge.contracts import (
     BridgeBudget,
@@ -76,6 +77,96 @@ class LibraryParsingTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("agda"), "requires Agda 2.8")
 class LibraryEnvironmentTests(unittest.TestCase):
+    def test_fresh_validation_does_not_inherit_the_temporary_parent_library(
+        self,
+    ) -> None:
+        cases = (
+            (".", True, "Main", ".agda"),
+            ("src", True, "Nested.Main", ".agda"),
+            ("source space", False, "Main", ".lagda.md"),
+            ("src", False, "Nested.Main", ".lagda.md"),
+        )
+        for include, named, module, suffix in cases:
+            with (
+                self.subTest(
+                    include=include, named=named, module=module, suffix=suffix
+                ),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                sources = root / include
+                sources.mkdir(exist_ok=True)
+                manifest = root / "local.agda-lib"
+                escaped_include = include.replace(" ", "\\ ")
+                manifest.write_text(
+                    ("name: local\n" if named else "")
+                    + f"include: {escaped_include}\nflags: --without-K\n"
+                )
+                registry = root / "libraries"
+                registry.write_text(str(manifest) + "\n")
+                source = sources / (module.replace(".", "/") + suffix)
+                source.parent.mkdir(parents=True, exist_ok=True)
+                text = f"module {module} where\nidentity : {{A : Set}} → A → A\nidentity = {{!!}}\n"
+                if suffix == ".lagda.md":
+                    text = "# A literate library\n\n```agda\n" + text + "```\n"
+                source.write_text(text)
+                temporary = root / "temporary"
+                temporary.mkdir()
+                budget = BridgeBudget.for_run(15)
+                with patch.object(tempfile, "tempdir", str(temporary)):
+                    session = ConformingKernelSession()
+                    try:
+                        opened = session.open_project(
+                            OpenProjectRequest(source, library_file=registry), budget
+                        )
+                        loaded = session.load_module(
+                            opened.project,
+                            opened.root_module,
+                            opened.source_revision,
+                            budget,
+                        )
+                        self.assertIsNotNone(loaded.transition.child_state)
+                        start = text.index("{!!}") + 1
+                        edit = SourcePatch(
+                            opened.environment_id,
+                            opened.source_revision,
+                            opened.root_module,
+                            (
+                                SourceEdit(
+                                    SourceRange(start, start + 4), "{!!}", "λ x → x"
+                                ),
+                            ),
+                        )
+                        result = session.validate_patch(
+                            opened.project,
+                            edit,
+                            PolicyProfile("test-library-overlay"),
+                            budget,
+                        )
+                        self.assertTrue(result.verified, result.to_dict())
+                        assert result.trust_report is not None
+                        self.assertTrue(result.trust_report.fresh_process)
+                        invalid = replace(
+                            edit,
+                            edits=(
+                                SourceEdit(
+                                    SourceRange(start, start + 4), "{!!}", "λ x → Set"
+                                ),
+                            ),
+                        )
+                        rejected = session.validate_patch(
+                            opened.project,
+                            invalid,
+                            PolicyProfile("test-library-overlay"),
+                            budget,
+                        )
+                        self.assertFalse(rejected.verified)
+                        assert rejected.trust_report is not None
+                        self.assertNotEqual(rejected.trust_report.exit_status, 0)
+                        self.assertEqual(source.read_text(), text)
+                    finally:
+                        session.close()
+
     def test_escaped_include_spaces_and_comma_dependencies_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
