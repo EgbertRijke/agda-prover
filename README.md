@@ -69,6 +69,7 @@ act on the current goal and may leave new subgoals.
 | Deep search | `C-c C-x C-d` | `Ctrl+C Ctrl+X Ctrl+D` |
 | Apply one refinement step | `C-c C-x C-s` | `Ctrl+C Ctrl+X Ctrl+S` |
 | Cancel | `C-c C-x C-k` | `Ctrl+C Ctrl+X Ctrl+K` |
+| Reload editor mode | `C-c C-x C-q` | — |
 | Apply last verified proof | `C-c C-x C-v` | — |
 | Show last result | `M-x agdaprover-show-last-result` | — |
 | Solve current goal symbolically | `M-x agdaprover-prove-goal-symbolic` | — |
@@ -79,6 +80,12 @@ act on the current goal and may leave new subgoals.
 VS Code uses **Control** even on macOS; its commands are also available
 under **AgdaProver** in the Command Palette. Emacs has an **AgdaProver** menu.
 In VS Code, Solve is **AgdaProver: Prove Through Current Goal or All Goals**.
+
+After updating AgdaProver on disk, use `C-c C-x C-q` (or
+`M-x agdaprover-reload`) to load the updated Emacs mode without restarting.
+Finish or cancel active AgdaProver runs first. See
+[reloading the Emacs mode](docs/editor-configuration.md#reloading-the-emacs-mode)
+for first-time activation in an older session.
 
 Both editors save before searching and reject stale edits. Emacs asks before
 applying completed proofs; `agdaprover-apply-policy` controls this behavior.

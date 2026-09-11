@@ -4,6 +4,24 @@ For installation and keyboard shortcuts, see the [README](../README.md).
 Open Emacs settings with `M-x customize-group RET agdaprover RET`, or search
 for `agdaprover` in VS Code's Settings editor.
 
+## Reloading the Emacs mode
+
+After updating your local AgdaProver checkout, press `C-c C-x C-q`, run
+`M-x agdaprover-reload`, or select **Reload AgdaProver editor mode** from
+the AgdaProver menu. This reloads the mode's `.el` source from the checkout
+that supplied the mode, even if an older compiled copy exists. Settings,
+custom keybindings, open buffers, and saved search results are preserved;
+updated commands are available in every buffer where the mode is enabled.
+Finish or cancel AgdaProver runs in all buffers before reloading.
+
+If your current Emacs session predates this command, use `M-x load-file`
+and select the updated `editor/agdaprover.el` once. The shortcut is then
+available for subsequent updates.
+
+Reloading does not download updates, reload your Agda files, or switch the
+configured backend checkout. The next search starts a new backend process
+using the configured installation.
+
 ## Backend and Agda
 
 The checkout setting identifies **AgdaProver**, not the Agda project you are

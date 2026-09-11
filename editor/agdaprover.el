@@ -1011,16 +1011,65 @@ Explicit `agdaprover-max-candidates' and other resource limits remain active."
     (user-error "No AgdaProver result buffer is available"))
   (display-buffer agdaprover--last-output-buffer))
 
-(defvar agdaprover-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-x C-p") #'agdaprover-prove-goal)
-    (define-key map (kbd "C-c C-x C-d") #'agdaprover-prove-deep)
-    (define-key map (kbd "C-c C-x C-s") #'agdaprover-step-goal)
-    (define-key map (kbd "C-c C-x C-n") #'agdaprover-reserved-n)
-    (define-key map (kbd "C-c C-x C-v") #'agdaprover-apply-last-proof)
-    (define-key map (kbd "C-c C-x C-k") #'agdaprover-cancel)
-    map)
+;;;###autoload
+(defun agdaprover-reload ()
+  "Reload the installed AgdaProver editor source without restarting Emacs.
+Use the checkout from which this mode was loaded, not the configurable
+backend path.  Read the .el source even when compiled copies exist.
+Preserve settings, enabled buffers, and their last results.  Finish or
+cancel AgdaProver runs in all buffers first, including pending results.
+This command does not download updates or reload Agda source files."
+  (interactive)
+  (when-let* ((busy-buffer
+              (cl-find-if
+               (lambda (buffer)
+                 ;; A finished child can still have a pending sentinel.
+                 (buffer-local-value 'agdaprover--process buffer))
+               (buffer-list))))
+    (user-error "Finish or cancel the AgdaProver run in %s before reloading"
+                (buffer-name busy-buffer)))
+  (let ((source (expand-file-name "editor/agdaprover.el"
+                                 agdaprover--default-project-root)))
+    (unless (and (file-regular-p source) (file-readable-p source))
+      (user-error "AgdaProver editor source is missing or unreadable: %s" source))
+    ;; Do not unload the feature or toggle modes: either would discard state
+    ;; or rerun user hooks.  NOSUFFIX avoids stale byte/native-compiled copies.
+    (save-excursion
+      (load source nil t t))
+    (message "AgdaProver: reloaded editor mode from %s" source)))
+
+(defvar agdaprover-mode-map (make-sparse-keymap)
   "Keymap for `agdaprover-mode'.")
+
+(defvar agdaprover--installed-keybindings nil
+  "Default key bindings installed by the most recently loaded mode source.")
+
+(defun agdaprover--install-keybindings (bindings)
+  "Refresh default BINDINGS in place, preserving user-customized keys.
+BINDINGS is an alist from key descriptions to commands.  Updating the
+existing map also updates buffers in which the mode is already enabled."
+  (dolist (old agdaprover--installed-keybindings)
+    (when (and (not (assoc (car old) bindings))
+               (eq (lookup-key agdaprover-mode-map (kbd (car old))) (cdr old)))
+      (define-key agdaprover-mode-map (kbd (car old)) nil)))
+  (dolist (binding bindings)
+    (let* ((key (kbd (car binding)))
+           (old (assoc (car binding) agdaprover--installed-keybindings))
+           (current (lookup-key agdaprover-mode-map key)))
+      (when (numberp current)
+        (setq current (lookup-key agdaprover-mode-map (cl-subseq key 0 current))))
+      (when (if old (eq current (cdr old)) (null current))
+        (define-key agdaprover-mode-map key (cdr binding)))))
+  (setq agdaprover--installed-keybindings bindings))
+
+(agdaprover--install-keybindings
+ '(("C-c C-x C-p" . agdaprover-prove-goal)
+   ("C-c C-x C-d" . agdaprover-prove-deep)
+   ("C-c C-x C-s" . agdaprover-step-goal)
+   ("C-c C-x C-n" . agdaprover-reserved-n)
+   ("C-c C-x C-v" . agdaprover-apply-last-proof)
+   ("C-c C-x C-k" . agdaprover-cancel)
+   ("C-c C-x C-q" . agdaprover-reload)))
 
 (easy-menu-define agdaprover-mode-menu agdaprover-mode-map
   "Menu for AgdaProver commands."
@@ -1035,7 +1084,9 @@ Explicit `agdaprover-max-candidates' and other resource limits remain active."
     ["Show last result" agdaprover-show-last-result
      agdaprover--last-output-buffer]
     ["Cancel search" agdaprover-cancel
-     (process-live-p agdaprover--process)]))
+     (process-live-p agdaprover--process)]
+    "---"
+    ["Reload AgdaProver editor mode" agdaprover-reload t]))
 
 ;;;###autoload
 (define-minor-mode agdaprover-mode
