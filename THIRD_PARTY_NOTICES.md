@@ -31,6 +31,24 @@ GPL-3.0-or-later; see [LICENSE](LICENSE) and [AUTHORS.md](AUTHORS.md). This does
 not remove the upstream MIT notice above or relicense separately obtained Agda
 libraries or training corpora.
 
+## Native symbolic feature hashing
+
+The optional Haskell symbolic core links against
+[blake2 0.3.0.1](https://hackage.haskell.org/package/blake2-0.3.0.1), by
+Lennart Augustsson and its contributors, under the
+[Unlicense](licenses/blake2-Unlicense.txt), and
+[cryptohash-sha256 0.11.102.1](https://hackage.haskell.org/package/cryptohash-sha256-0.11.102.1),
+by Vincent Hanquez and Herbert Valerio Riedel, under the
+[BSD 3-clause license](licenses/cryptohash-sha256-BSD-3-Clause.txt).
+The BLAKE2 reference C implementation bundled with `blake2` is copyright
+2012 Samuel Neves and offers a choice of CC0, OpenSSL, or Apache-2.0;
+AgdaProver uses its CC0 option. These libraries provide artifact SHA-256 and
+the existing personalized BLAKE2 feature hash; AgdaProver does not modify them.
+
+These are build-time provisions for the experimental helper, not network
+dependencies during inference. Binary redistribution must also account for
+the complete linked dependency inventory, as described above.
+
 ## Agda standard library training sources
 
 The bundled OR-policy weights were trained locally on a small, reviewed subset

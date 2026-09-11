@@ -13,8 +13,26 @@ common defaults
 library
   import: defaults
   hs-source-dirs: core
-  exposed-modules: AgdaProver.Symbolic.Protocol, AgdaProver.Symbolic.SessionTypes
-  build-depends: containers >=0.6 && <0.7
+  exposed-modules:
+    AgdaProver.Symbolic.Protocol,
+    AgdaProver.Symbolic.SessionTypes,
+    AgdaProver.Symbolic.NNUE.Hash,
+    AgdaProver.Symbolic.NNUE.Model,
+    AgdaProver.Symbolic.NNUE.Sparse,
+    AgdaProver.Symbolic.NNUE.Score,
+    AgdaProver.Symbolic.NNUE.Cache,
+    AgdaProver.Symbolic.NNUE.Native,
+    AgdaProver.Symbolic.NNUE.Features,
+    AgdaProver.Symbolic.NNUE.Policy
+  build-depends:
+    containers >=0.6 && <0.7,
+    bytestring ==0.11.5.4,
+    text >=2.0 && <2.1,
+    vector >=0.13 && <0.14,
+    cryptohash-sha256 ==0.11.102.1,
+    blake2 ==0.3.0.1
+  if !os(windows)
+    build-depends: unix >=2.8 && <2.9
 
 library agda28
   import: defaults

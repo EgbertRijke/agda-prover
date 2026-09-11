@@ -13,7 +13,9 @@ scripts/build-symbolic-core
 scripts/build-symbolic-core --print-path
 ```
 
-The build requires GHC 9.6.7 and installed Agda 2.8.0/aeson 2.2.4.1 packages.
+The build requires GHC 9.6.7 and installed Agda 2.8.0/aeson 2.2.4.1 packages,
+plus `blake2-0.3.0.1` and `cryptohash-sha256-0.11.102.1` for compatible feature
+and artifact hashes. Provision these exact packages before the offline build.
 `AGDAPROVER_AGDA_PACKAGE_DB` overrides the package database location. Builds are
 offline and refuse to silently rebuild Agda. Build output stays in the ignored
 `dist-newstyle` directory. No development repository or corpus is needed.
@@ -58,7 +60,7 @@ silently changing the meaning of old checked evidence.
 
 ## Boundaries
 
-- `core/`: compiler-independent typed protocol declarations; no Agda internals.
+- `core/`: compiler-independent protocol, feature views and NNUE inference; no Agda internals.
 - `adapter/`: Agda 2.8 types, scoped snapshots, and structural codecs.
 - `app/`: process entrypoint and response/error framing.
 
@@ -79,6 +81,29 @@ Older development snapshots retain their presentation format; the runtime view
 also preserves domain-name provenance. No training, benchmark, or library-specific
 dispatch code belongs here.
 
-Action generation, NNUE execution, search, and engine selection are subsequent
-migration tasks. Current search and model bytes remain
-unchanged until those tasks are qualified.
+## Existing NNUE compatibility
+
+The Haskell library reads the existing APNNUE v1/v2/v3 models, retaining artifact
+SHA-256, role restrictions and scoped decision families. No weights are changed
+or trained. Custom model paths work offline. The feature layer preserves the
+current tokens and personalized BLAKE2 hash, including tri-state structural
+classification. Presentation features never authorize semantic operations.
+
+Immutable model-bound accumulators support full and incremental updates, with
+an exact-token LRU cache. The reference scorer uses double-precision arithmetic
+over float32 model weights. An optional, application-supplied native library
+path uses AgdaProver's existing Rust ABI3 and float32 batches. Unsupported ABI,
+missing library, explicit `AGDAPROVER_DISABLE_NATIVE=1`, or failed native scoring
+retains the reference path. The library remains loaded through borrowed calls;
+stale scorer handles fail safely.
+
+The policy router accepts complete symbolic candidate batches. It preserves
+structural priority tiers and stable tie order; symbolic opt-out, unsupported
+families and feature/scoring failures never remove candidates. Decision records
+include ordering, weights, backend, fallbacks and elapsed work, but cannot grant
+proof credit. Only the application's independent fresh validation may do that.
+See [the ranking contract](../../schemas/symbolic-ranking-v1.md).
+
+Action generation, integration with autonomous search, and engine selection
+are subsequent migration tasks. Current production search and model bytes
+remain unchanged until those tasks are qualified.
