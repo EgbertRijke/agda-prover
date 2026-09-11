@@ -144,9 +144,17 @@ class EvidencePolicyTests(unittest.TestCase):
         model.score_feature_batches.return_value = [0.0, 2.0]
         policy = EvidencePolicy(ORPolicyRouter(refinement_model=model), self.goal)
         proposals = [application("f"), application("z")]
-        self.assertEqual(policy.select(proposals).application.expression, "z x")
+        self.assertEqual(
+            policy.select(proposals, expected_type=True).application.expression, "z x"
+        )
         record = policy.router.recorder.to_list()[0]
         self.assertEqual(set(record["model_order"]), set(record["symbolic_order"]))
+        self.assertTrue(
+            all(
+                c["tag"] == "check-evidence-application"
+                for c in record["candidate_set"]
+            )
+        )
         self.assertEqual(policy.router.model_items_scored, 2)
         for scores in ([float("nan"), 1.0], [1.0], []):
             model.score_feature_batches.return_value = scores

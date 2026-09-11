@@ -96,6 +96,62 @@ class CopatternSearchTests(unittest.TestCase):
         self.assertEqual(result.status, "verified", result.diagnostics)
         self.assertTrue(result.validation["fresh_process"])
 
+    def test_indexed_corecursive_composition_reuses_fields_at_unknown_middle_type(self):
+        source = """{-# OPTIONS --guardedness --without-K #-}
+module Example where
+record Shape : Set₁ where
+  coinductive
+  field
+    Point : Set
+    Edge : Point → Point → Shape
+open Shape
+record Mapping (A B : Shape) : Set where
+  coinductive
+  field
+    object : Point A → Point B
+    arrow : {x y : Point A} → Mapping (Edge A x y)
+      (Edge B (object x) (object y))
+open Mapping
+compose : {A B C : Shape} → Mapping B C → Mapping A B → Mapping A C
+compose = {!!}
+"""
+        for text, ranker in (
+            (source, "nnue"),
+            (
+                source.replace("Shape", "Geometry")
+                .replace("Mapping", "Morphism")
+                .replace("Point", "Vertex")
+                .replace("Edge", "PathSpace")
+                .replace("object", "vertices")
+                .replace("arrow", "paths")
+                .replace("compose", "chain")
+                .replace("--guardedness", "--guardedness --no-postfix-projections"),
+                "symbolic",
+            ),
+        ):
+            with self.subTest(ranker=ranker):
+                result = self.solve(text, ranker=ranker)
+                self.assertEqual(result.status, "verified", result.diagnostics)
+                self.assertTrue(result.validation["fresh_process"])
+
+    def test_ordinary_record_composition_still_uses_supplied_fields(self):
+        source = """{-# OPTIONS --safe --without-K #-}
+module Example where
+record Hom (A B : Set) : Set where
+  field run : A → B
+open Hom
+record Box (A B : Set) : Set where
+  field get : Hom A B
+open Box
+connect : {A B C : Set} → Hom B C → Hom A B → Hom A C
+run (connect f g) x = run f (run g x)
+assemble : {A B C : Set} → Box B C → Box A B → Hom A C
+assemble = {!!}
+"""
+        result = self.solve(source)
+        self.assertEqual(result.status, "verified", result.diagnostics)
+        self.assertTrue(result.validation["fresh_process"])
+
     def test_prefix_copattern_notation_is_autonomous(self):
         source = specimen().replace(
             "--guardedness", "--guardedness --no-postfix-projections"

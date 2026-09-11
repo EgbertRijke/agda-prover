@@ -29,7 +29,7 @@ class EvidencePolicy:
         self._choices: dict[str, tuple[PolicyChoice, ...]] = {}
 
     def select(
-        self, proposals: Iterable[EvidenceApplication]
+        self, proposals: Iterable[EvidenceApplication], *, expected_type: bool = False
     ) -> EvidenceSelection | None:
         # Materialize only this actual frontier, not a beam or invented actions.
         distinct: dict[str, EvidenceApplication] = {}
@@ -43,7 +43,11 @@ class EvidencePolicy:
         candidates = tuple(
             policy_candidate(
                 family="evidence-application-v1",
-                tag="infer-evidence-application",
+                tag=(
+                    "check-evidence-application"
+                    if expected_type
+                    else "infer-evidence-application"
+                ),
                 expression=p.expression,
                 type_text=p.function.type_text,
                 symbolic_key=(p.depth, len(p.expression), p.expression),

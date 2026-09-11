@@ -79,6 +79,27 @@ guardedness, unresolved fields and unauthorized option changes still cannot yiel
 `verified`. This initial lane does not cover every existing user copattern,
 pattern-lambda/mutual definition, or change of argument patterns.
 
+## Expected-type evidence reuse
+
+Shared constructor search checks ready applications before expanding a structured
+goal. Supplied local values and authorized declarations feed the existing typed
+evidence generator; only proposals with all explicit arguments supplied and a
+matching result-head hint enter this closure lane. Agda checks each complete
+expression against the actual goal, inferring hidden indices and propagating
+assignments to dependent siblings. This works for both provisional and concrete
+targets, independently of record/coinductive construction. A syntactic head match
+is a proposal hint, never a type-equality judgment. Unknown inferred types are not
+retained as intermediate evidence, and explicit-function specialization is not
+added here.
+
+`AGDAPROVER_EXPECTED_EVIDENCE=0` disables the lane. The existing
+`evidence-application-v1` NNUE family ranks its alternatives with the distinct
+`check-evidence-application` tag; inference proposals keep their original tag.
+Scope filtering, symbolic fallback, exact-parent rejection and policy-choice
+lineage remain shared. Checks spend the current action/premise budget and count
+as `proof_checks` and `premise_queries`, not inference queries. Provisional success
+does not cut off alternatives on generator resume or bypass fresh validation.
+
 ## Editor search profiles
 
 Editor request v1 accepts an optional `search_profile`: `standard` (default)

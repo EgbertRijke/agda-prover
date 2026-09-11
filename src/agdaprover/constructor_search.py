@@ -560,6 +560,9 @@ class _ConstructorSearch:
         self._scoped_value_reuse_enabled = (
             os.environ.get("AGDAPROVER_SCOPED_VALUE_REUSE", "1") != "0"
         )
+        self._expected_evidence_enabled = (
+            os.environ.get("AGDAPROVER_EXPECTED_EVIDENCE", "1") != "0"
+        )
         self.stats = ConstructorStats(
             depth_limit=max_depth,
             contextual_evidence_enabled=self.contextual_evidence_enabled,
@@ -3373,6 +3376,115 @@ class _ConstructorSearch:
                         choice.decision_id, choice.candidate_id, outcome="invalid"
                     )
 
+    def _solve_with_expected_evidence(
+        self,
+        state: StateToken,
+        goal: GoalInfo,
+        premise_query_stop: int,
+    ) -> Iterator[ConstructorSolution]:
+        """Check ready, fully supplied applications before structural expansion.
+
+        Inference alone cannot always recover hidden indices of projections.
+        Checking against the expected type lets Agda solve those indices and
+        propagate them to sibling goals. No provisional type is retained as an
+        observation, and a yielded branch still requires final validation.
+        """
+        if (
+            not self.contextual_evidence_enabled
+            or not self._expected_evidence_enabled
+            or top_level_arrow_count(goal.target)
+            or not self._available()
+            or self._scope_premise_queries
+            >= min(premise_query_stop, self.stats.premise_query_limit)
+        ):
+            return
+        values = tuple(
+            EvidenceTerm(entry.name, entry.type)
+            for entry in goal.context
+            if entry.in_scope and entry.name
+        )
+        if not values:
+            return
+        target_head = result_head(goal.target)
+        if self._scope_catalog is not None and not any(
+            result_head(ty) == target_head and explicit_domains(ty)
+            for _name, ty in (
+                *((v.expression, v.type_text) for v in values),
+                *self._scope_catalog,
+            )
+        ):
+            return
+        actions = self._ordered_premise_actions(state, goal, shallow_only=False)
+        declarations = tuple(
+            ready_evidence_declarations(
+                goal.target, values, tuple((a.expression, a.type_text) for a in actions)
+            )
+        )
+        proposals = tuple(
+            proposal
+            for proposal in evidence_applications(
+                values,
+                declarations,
+                endpoint_terms=frozenset(),
+                relation_heads=frozenset(),
+            )
+            if result_head(proposal.function.type_text) == target_head
+            and len(explicit_domains(proposal.function.type_text))
+            == len(proposal.arguments)
+        )
+        policy = EvidencePolicy(self.policy_router, goal)
+        attempted: set[str] = set()
+        while self._available() and self._scope_premise_queries < min(
+            premise_query_stop, self.stats.premise_query_limit
+        ):
+            before_items = self.policy_router.model_items_scored
+            before_batches = self.policy_router.model_batches
+            before_elapsed = self.policy_router.model_elapsed_ms
+            before_fallbacks = self.policy_router.symbolic_fallbacks
+            try:
+                selection = policy.select(
+                    (p for p in proposals if p.expression not in attempted),
+                    expected_type=True,
+                )
+            finally:
+                self.stats.model_calls += (
+                    self.policy_router.model_items_scored - before_items
+                )
+                self.stats.model_batches += (
+                    self.policy_router.model_batches - before_batches
+                )
+                self.stats.model_elapsed_ms += (
+                    self.policy_router.model_elapsed_ms - before_elapsed
+                )
+                self.stats.symbolic_fallbacks += (
+                    self.policy_router.symbolic_fallbacks - before_fallbacks
+                )
+            if selection is None or not self._charge():
+                return
+            expression = selection.application.expression
+            attempted.add(expression)
+            self.stats.actions_generated += 1
+            choice = selection.choice
+            if choice is not None:
+                self.policy_router.recorder.mark(
+                    choice.decision_id, choice.candidate_id
+                )
+            checked = self.session.commit_proof_action(
+                state, kind="give", goal_id=goal.goal_id, expression=expression
+            )
+            self.stats.proof_checks += 1
+            self.stats.premise_queries += 1
+            self._scope_premise_queries += 1
+            if checked.accepted and checked.child_state is not None:
+                yield ConstructorSolution(
+                    checked.child_state,
+                    ProofPlan(expression, policy_choices=(choice,) if choice else ()),
+                )
+            elif choice is not None:
+                self.policy_router.recorder.mark(
+                    choice.decision_id, choice.candidate_id, outcome="invalid"
+                )
+
     def _solve_with_local_meta_values(
         self,
         state: StateToken,
@@ -3518,6 +3630,8 @@ class _ConstructorSearch:
             yield from self._solve_with_copattern_call(
                 state, goal, depth, descendants, premise_query_stop
             )
+
+        yield from self._solve_with_expected_evidence(state, goal, premise_query_stop)
 
         # Function introduction is invertible.  Asking Agda once introduces
         # the complete visible telescope, rather than one binder per search
