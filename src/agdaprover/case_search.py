@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import tempfile
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -653,12 +654,66 @@ def batched_case_prove(
     recursive_program_profile: Literal["unary-recursive", "binary-recursive"]
     | None = None,
     recursive_composition_local_first: bool = False,
+    on_statistics: Callable[[CaseBatchStats], None] | None = None,
 ) -> CaseBatchResult:
-    """Solve a finite case tree one complete coverage level at a time."""
+    """Solve a finite case tree one complete coverage level at a time.
+
+    Publish completed-work statistics once on every exit, including exceptions.
+    As for constructor search, the observer only aggregates in-memory counters;
+    it must not perform budgeted work or change exception handling.
+    """
 
     started = time.monotonic()
-    deadline = started + timeout_seconds
     stats = CaseBatchStats(depth_limit=max_depth)
+    try:
+        return _batched_case_prove(
+            source_file,
+            root_goal,
+            action_budget=action_budget,
+            timeout_seconds=timeout_seconds,
+            max_depth=max_depth,
+            focused_model=focused_model,
+            refinement_model=refinement_model,
+            policy_router=policy_router,
+            session_factory=session_factory,
+            project_configuration=project_configuration,
+            session=session,
+            initial_goals=initial_goals,
+            allow_exact_local=allow_exact_local,
+            preferred_root_position=preferred_root_position,
+            recursive_program_profile=recursive_program_profile,
+            recursive_composition_local_first=recursive_composition_local_first,
+            started=started,
+            stats=stats,
+        )
+    finally:
+        stats.elapsed_ms = (time.monotonic() - started) * 1000.0
+        if on_statistics is not None:
+            on_statistics(stats)
+
+
+def _batched_case_prove(
+    source_file: Path,
+    root_goal: GoalInfo,
+    *,
+    action_budget: int,
+    timeout_seconds: float,
+    max_depth: int | None,
+    focused_model: SparsePolicyRanker | None,
+    refinement_model: SparsePolicyRanker | None,
+    policy_router: ORPolicyRouter | None,
+    session_factory: KernelSessionFactory,
+    project_configuration: ProjectConfiguration | None,
+    session: KernelSession | None,
+    initial_goals: tuple[GoalInfo, ...] | None,
+    allow_exact_local: bool,
+    preferred_root_position: int | None,
+    recursive_program_profile: Literal["unary-recursive", "binary-recursive"] | None,
+    recursive_composition_local_first: bool,
+    started: float,
+    stats: CaseBatchStats,
+) -> CaseBatchResult:
+    deadline = started + timeout_seconds
     original_source = source_file.read_text()
     active_policy = policy_router or ORPolicyRouter(
         focused_model=focused_model,

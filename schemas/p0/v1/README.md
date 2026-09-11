@@ -9,6 +9,14 @@ Optional OR-policy traces can carry
 [validated proof-choice credit](../../proof-choice-credit-v1.md), bound to the
 final result rather than to merely accepted speculative actions.
 
+Nested case and constructor searches publish their completed-work statistics
+once on every exit, including resource and protocol exceptions. Single-goal and
+joint controllers retain these counters before polling the remaining budget;
+interruption must not erase already performed model, action or checker work.
+The optional `on_statistics` callbacks are aggregation-only: they cannot perform
+budgeted work or grant proof credit. Counter fields retain their existing units
+and schema; historical reports with missing child work are not rewritten.
+
 Editor request v1 accepts an optional `search_profile`: `standard` (default)
 or `deep`. This is a search-only option, not valid for `inspect`. Omitted
 `max_candidates` resolves to 500 or 8,000 respectively; an explicitly supplied

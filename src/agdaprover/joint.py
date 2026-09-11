@@ -1830,6 +1830,12 @@ def prove_joint_prefix(
                         ),
                     ) -> bool:
                         nonlocal saw_exhaustion
+
+                        def record_case_stats(batch_stats: CaseBatchStats) -> None:
+                            result.verifier_calls += _accumulate_case_stats(
+                                stats, batch_stats
+                            )
+
                         batched = batched_case_prove(
                             candidate_path,
                             current_goal,
@@ -1855,12 +1861,10 @@ def prove_joint_prefix(
                             recursive_composition_local_first=(
                                 recursive_composition_local_first
                             ),
+                            on_statistics=record_case_stats,
                         )
                         batch_stats = batched.stats
                         budget.account_actions(batch_stats.actions_considered)
-                        result.verifier_calls += _accumulate_case_stats(
-                            stats, batch_stats
-                        )
                         if batched.status == "resource-exhausted":
                             saw_exhaustion = True
                         if batched.patch is None:

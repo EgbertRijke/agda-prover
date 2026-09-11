@@ -14,7 +14,7 @@ from agdaprover.observability.policy_trace import (
 
 from .bridge.resources import current_process_rss
 from .budget import SearchBudget
-from .case_search import batched_case_prove
+from .case_search import CaseBatchStats, batched_case_prove
 from .constructor_search import ConstructorStats, constructor_tree_prove
 from .contracts import (
     CandidateAttempt,
@@ -342,6 +342,39 @@ def prove(
                         }
                     )
                     return True
+
+                def record_case_stats(batch_stats: CaseBatchStats) -> None:
+                    search_stats["case_batch"] = batch_stats.to_dict()
+                    result.candidates_generated += batch_stats.actions_considered
+                    result.model_calls += batch_stats.model_calls
+                    result.model_elapsed_ms += batch_stats.model_elapsed_ms
+                    batch_checks = (
+                        batch_stats.refinement_queries
+                        + batch_stats.case_queries
+                        + batch_stats.proof_checks
+                        + batch_stats.constructor_catalog_queries
+                        + batch_stats.premise_catalog_queries
+                        + batch_stats.completion_queries
+                    )
+                    result.verifier_calls += batch_checks
+                    result.cost.add(
+                        actions_generated=batch_stats.actions_generated,
+                        actions_expanded=batch_stats.actions_considered,
+                        actions_scored=batch_stats.model_calls,
+                        kernel_loads=batch_stats.kernel_loads,
+                        kernel_load_elapsed_ms=batch_stats.kernel_load_elapsed_ms,
+                        goal_inspections=batch_stats.goal_inspections,
+                        speculative_checks=batch_checks,
+                        candidate_terms_checked=batch_stats.proof_checks,
+                        refinement_checks=batch_stats.refinement_queries,
+                        case_split_checks=batch_stats.case_queries,
+                        model_batches=batch_stats.model_batches,
+                        model_items_scored=batch_stats.model_calls,
+                        generated_subgoals=batch_stats.generated_subgoals,
+                        source_bytes_materialized=batch_stats.source_bytes_materialized,
+                        source_bytes_written=batch_stats.source_bytes_written,
+                    )
+
                 batched = batched_case_prove(
                     source_file,
                     goal,
@@ -353,39 +386,9 @@ def prove(
                     policy_router=policy_router,
                     session_factory=session_factory,
                     project_configuration=task.project_configuration,
+                    on_statistics=record_case_stats,
                 )
-                batch_stats = batched.stats
-                budget.account_actions(batch_stats.actions_considered)
-                search_stats["case_batch"] = batch_stats.to_dict()
-                result.candidates_generated += batch_stats.actions_considered
-                result.model_calls += batch_stats.model_calls
-                result.model_elapsed_ms += batch_stats.model_elapsed_ms
-                batch_checks = (
-                    batch_stats.refinement_queries
-                    + batch_stats.case_queries
-                    + batch_stats.proof_checks
-                    + batch_stats.constructor_catalog_queries
-                    + batch_stats.premise_catalog_queries
-                    + batch_stats.completion_queries
-                )
-                result.verifier_calls += batch_checks
-                result.cost.add(
-                    actions_generated=batch_stats.actions_generated,
-                    actions_expanded=batch_stats.actions_considered,
-                    actions_scored=batch_stats.model_calls,
-                    kernel_loads=batch_stats.kernel_loads,
-                    kernel_load_elapsed_ms=batch_stats.kernel_load_elapsed_ms,
-                    goal_inspections=batch_stats.goal_inspections,
-                    speculative_checks=batch_checks,
-                    candidate_terms_checked=batch_stats.proof_checks,
-                    refinement_checks=batch_stats.refinement_queries,
-                    case_split_checks=batch_stats.case_queries,
-                    model_batches=batch_stats.model_batches,
-                    model_items_scored=batch_stats.model_calls,
-                    generated_subgoals=batch_stats.generated_subgoals,
-                    source_bytes_materialized=batch_stats.source_bytes_materialized,
-                    source_bytes_written=batch_stats.source_bytes_written,
-                )
+                budget.account_actions(batched.stats.actions_considered)
                 if batched.patch is not None and batched.proof_text is not None:
                     selected_policy_choices = batched.policy_choices
                     _finish_guided_candidate(
