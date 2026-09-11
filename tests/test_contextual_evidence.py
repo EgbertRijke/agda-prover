@@ -33,6 +33,7 @@ from agdaprover.reasoning.evidence import (
     EvidenceTerm,
     evidence_applications,
     family_names,
+    has_structured_builder,
     implicit_value_type,
     ready_evidence_declarations,
     structured_combinator_applications,
@@ -46,6 +47,42 @@ from agdaprover.validation import validate_candidate
 
 
 class EvidenceProposalTests(unittest.TestCase):
+    def test_builder_readiness_requires_more_than_a_shared_domain_head(self):
+        for family, builder in (("Bundle", "assemble"), ("Container", "make")):
+            with self.subTest(family=family):
+                declarations = ((builder, f"{family} A R → (A → A) → Output A"),)
+                target = f"{family} A S → Output A"
+                self.assertFalse(has_structured_builder(target, (), declarations))
+                # Scheduling uncertainty must not remove speculative proposals.
+                self.assertEqual(
+                    list(
+                        structured_combinator_applications(
+                            "Output A",
+                            (EvidenceTerm("b", f"{family} A S"),),
+                            declarations,
+                        )
+                    ),
+                    [f"{builder} b ?"],
+                )
+                self.assertTrue(
+                    has_structured_builder(f"{family} A R → Output A", (), declarations)
+                )
+                self.assertTrue(
+                    has_structured_builder(
+                        "Output A", (f"({family} A R)",), declarations
+                    )
+                )
+
+    def test_builder_readiness_does_not_guess_universe_instantiation(self):
+        declarations = (("assemble", "Universe l → (A → A) → Output A"),)
+        self.assertFalse(
+            has_structured_builder("Output A", ("Universe k",), declarations)
+        )
+        self.assertFalse(has_structured_builder("Output A", (), declarations))
+        self.assertTrue(
+            has_structured_builder("Output A", ("Universe l",), declarations)
+        )
+
     def test_hidden_only_values_remain_inputs_to_structured_consumers(self):
         for hidden in ("{x y : A}", "{x = u : A} {y = v : A}"):
             with self.subTest(hidden=hidden):

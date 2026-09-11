@@ -90,6 +90,14 @@ pattern-lambda/mutual definition, or change of argument patterns.
 
 ## Expected-type evidence reuse
 
+Joint scheduling distinguishes a plausible structured builder from a supplied
+first argument. Deferring dependency-guided case analysis requires agreement of
+the complete observed first-domain type (ignoring whitespace and enclosing
+parentheses), not merely its head. Unresolved indices or aliases may therefore
+lose that preference; they do not lose any ordinary speculative builder
+candidate. This is a conservative ordering hint, not type equality or proof
+authority. It adds no checker request, feature version or resource allowance.
+
 Shared constructor search checks ready applications before expanding a structured
 goal. Supplied local values and authorized declarations feed the existing typed
 evidence generator; only proposals with all explicit arguments supplied and a

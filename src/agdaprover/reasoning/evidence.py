@@ -168,6 +168,7 @@ def structured_combinator_applications(
     declarations: tuple[tuple[str, str], ...],
     *,
     shallow_functions: bool = False,
+    exact_first_domain: bool = False,
 ) -> Iterator[str]:
     """Specialize supplied structured builders before rebuilding their output.
 
@@ -192,6 +193,10 @@ def structured_combinator_applications(
             if not top_level_arrow_count(term.type_text) and result_head(
                 term.type_text
             ) == result_head(domains[0]):
+                if exact_first_domain and normalize_type_text(
+                    strip_outer_parentheses(term.type_text)
+                ) != normalize_type_text(strip_outer_parentheses(domains[0])):
+                    continue
                 if shallow_functions:
                     for index, domain in enumerate(domains[1:], 1):
                         groups = tuple(
@@ -315,7 +320,14 @@ def has_structured_builder(
     context_types: tuple[str, ...],
     declarations: tuple[tuple[str, str], ...],
 ) -> bool:
-    """Predict a ready builder after introducing the goal's telescope."""
+    """Conservatively predict a builder with a supplied first argument.
+
+    A shared result head admits speculative applications, but cannot justify
+    delaying dependency-guided elimination: differently indexed records and
+    universe-valued arguments often share a head. Require the complete observed
+    domain here. An alias or unresolved instantiation may lose this scheduling
+    preference, never the ordinary kernel-checked builder candidates.
+    """
     available = (*context_types, *explicit_domains(goal_type))
     return (
         next(
@@ -326,6 +338,7 @@ def has_structured_builder(
                     *declarations,
                     *(("_", ty) for ty in available if top_level_arrow_count(ty)),
                 ),
+                exact_first_domain=True,
             ),
             None,
         )
