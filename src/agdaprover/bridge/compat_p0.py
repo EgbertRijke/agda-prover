@@ -404,6 +404,15 @@ class AgdaSession:
         self._search_contexts[goal.goal_id] = goal.context
         return goal
 
+    def instantiated_goal(self, state: StateToken, *, goal_id: int) -> str | None:
+        """Read an existing Agda assignment; no candidate is submitted."""
+        try:
+            return self._session.instantiated_goal(
+                state, InteractionId(goal_id), self._budget
+            )
+        except BridgeError as error:
+            raise _p0_error(error) from error
+
     def internal_obligation_counts(self, state: StateToken) -> tuple[int, int]:
         """Return hidden open-meta and constraint counts for completion checks."""
 

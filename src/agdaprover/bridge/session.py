@@ -1099,6 +1099,49 @@ class ConformingKernelSession:
         self._active_state = state
         return tuple(result)
 
+    def instantiated_goal(
+        self,
+        state: StateToken,
+        interaction_id: InteractionId,
+        budget: BridgeBudget,
+    ) -> str | None:
+        """Observe Agda's assignment without solving or removing an interaction.
+
+        Agda 2.8's solveOne only reifies an already instantiated meta in its
+        original scope. Unlike autoOne it does not commit a proof action.
+        """
+        record = self._activate(state, budget)
+        if all(goal.interaction_id != interaction_id for goal in record.state.goals):
+            raise self._error(
+                BridgeFailure.INVALID_REQUEST,
+                "instantiated-goal-not-open",
+                "assignment target is not a registered interaction",
+            )
+        adapter = adapter_for_version(self.project.toolchain.version)
+        try:
+            _, response = self.transport.command(
+                self._source_for(state.module_id),
+                adapter.instantiated_goal(interaction_id.value),
+            )
+            diagnostics = diagnostics_from_response(
+                response, project_root=self.project.project_root
+            )
+            if error := first_error(diagnostics):
+                raise BridgeError(BridgeFailure.AGDA_REJECTION, error)
+            try:
+                return adapter.instantiated_term(response, interaction_id.value)
+            except ValueError as protocol_error:
+                raise self._error(
+                    BridgeFailure.PROTOCOL_FAILURE,
+                    "invalid-instantiated-goal-response",
+                    str(protocol_error),
+                ) from protocol_error
+        except BaseException:
+            # An interrupted or malformed observation cannot leave a trusted
+            # active marker, even though the successful command is read-only.
+            self._active_state = None
+            raise
+
     def auto_one(
         self,
         state: StateToken,

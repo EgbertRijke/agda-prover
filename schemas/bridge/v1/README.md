@@ -37,6 +37,23 @@ requests, restoration and replay remain charged; resource exhaustion propagates
 and fresh reconstruction validation is still required for completion. The raw
 Stage 1 protocol and its state/diagnostic schemas are unchanged.
 
+## Existing goal assignments
+
+The optional solver-facing `InstantiatedGoalSession.instantiated_goal(state,
+goal_id=...)` observes a term already assigned by Agda to a registered interaction.
+Agda 2.8's `Cmd_solveOne AsIs` reifies that assignment in the interaction's own
+scope; it does not run Agda Auto, propose an expression, remove the interaction,
+or commit a search transition. An explicit empty response returns `None`.
+Missing, duplicate, malformed or wrong-interaction responses are protocol errors.
+
+Immutable state/source checks, physical request quotas and existing process
+budgets apply. Failed observations invalidate the active marker before reuse.
+Assigned terms may still contain nested metas or scope blanks: this observation
+is not a complete-proof certificate. A caller must give the observed term through
+an ordinary checked action, retain unresolved obligations, and freshly validate
+any reconstructed completion. No search ordering or editor default changes;
+this is an internal Python capability, not a new serialized bridge-v1 operation.
+
 ## Process completion and resource sampling
 
 An operating-system resource sample can disappear just before a checker's exit

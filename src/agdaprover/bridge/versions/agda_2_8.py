@@ -180,6 +180,37 @@ class Agda28Adapter:
     def auto(self, interaction_id: int) -> str:
         return f'Cmd_autoOne AsIs {interaction_id} noRange ""'
 
+    def instantiated_goal(self, interaction_id: int) -> str:
+        return f'Cmd_solveOne AsIs {interaction_id} noRange ""'
+
+    def instantiated_term(
+        self, response: DecodedResponse, interaction_id: int
+    ) -> str | None:
+        """Decode only the requested interaction's existing assignment.
+
+        Agda calls this response SolveAll even for Cmd_solveOne. A missing or
+        mismatched response is a protocol error, not an uninstantiated goal.
+        """
+        events = [event.value for event in response.events if event.kind == "SolveAll"]
+        if len(events) != 1 or set(events[0]) != {"kind", "solutions"}:
+            raise ValueError("invalid instantiated-goal response")
+        solutions = events[0]["solutions"]
+        if not isinstance(solutions, list) or len(solutions) > 1:
+            raise ValueError("invalid instantiated-goal solutions")
+        if not solutions:
+            return None
+        solution = solutions[0]
+        if (
+            not isinstance(solution, dict)
+            or set(solution) != {"interactionPoint", "expression"}
+            or type(solution["interactionPoint"]) is not int
+            or solution["interactionPoint"] != interaction_id
+            or not isinstance(solution["expression"], str)
+            or not solution["expression"].strip()
+        ):
+            raise ValueError("invalid instantiated-goal identity or expression")
+        return solution["expression"]
+
     def module_contents(self, interaction_id: int, module_name: str) -> str:
         return (
             f"Cmd_show_module_contents Normalised {interaction_id} noRange "

@@ -138,6 +138,18 @@ class PreciseSearchGoalSession(Protocol):
 
 
 @runtime_checkable
+class InstantiatedGoalSession(Protocol):
+    """Observe a scoped term already assigned by Agda, without proof search.
+
+    None means the registered interaction has no observable assignment. A
+    rendering is not proof acceptance: it may still contain nested metas, and
+    callers must use ordinary checked actions and independent final validation.
+    """
+
+    def instantiated_goal(self, state: StateToken, *, goal_id: int) -> str | None: ...
+
+
+@runtime_checkable
 class TermInferenceSession(Protocol):
     """Observational type inference for bounded synthesized expressions."""
 
@@ -164,6 +176,7 @@ class KernelSessionFactory(Protocol):
 
 __all__ = [
     "CommittedProofAction",
+    "InstantiatedGoalSession",
     "InternalObligationSession",
     "KernelSession",
     "KernelSessionFactory",
