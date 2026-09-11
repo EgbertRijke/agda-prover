@@ -13,7 +13,7 @@ from pathlib import Path
 
 from ..policy import inspect_patch
 from ..resource_budget import charge_io
-from ..verifier_budget import charge_verifier_request
+from ..verifier_budget import charge_verifier_request, record_fresh_validation_start
 from .contracts import (
     BridgeBudget,
     BridgeCost,
@@ -76,6 +76,7 @@ def _run_checker(
     overlay: Path,
     budget: BridgeBudget,
     cancellation: CancellationToken,
+    validation_process: bool = True,
 ) -> _CheckerRun:
     started = time.monotonic()
     cancellation.raise_if_cancelled()
@@ -100,6 +101,8 @@ def _run_checker(
                 message=f"could not start fresh Agda validator: {error}",
             ),
         ) from error
+    if validation_process:
+        record_fresh_validation_start()
     supervisor = ResourceSupervisor(budget, cancellation)
     output = bytearray()
     timed_out = False

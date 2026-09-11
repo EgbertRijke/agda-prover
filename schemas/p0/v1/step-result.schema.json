@@ -20,7 +20,10 @@
     "action": { "type": ["object", "null"] },
     "candidates_generated": { "type": "integer", "minimum": 0 },
     "verifier_calls": { "type": "integer", "minimum": 0 },
-    "verifier_budget": { "$ref": "verifier-budget.schema.json" },
+    "verifier_budget": { "oneOf": [
+      { "$ref": "verifier-budget.schema.json" },
+      { "$ref": "verifier-budget-v2.schema.json" }
+    ] },
     "resource_budget": { "$ref": "resource-budget.schema.json" },
     "model_calls": { "type": "integer", "minimum": 0 },
     "model_elapsed_ms": { "type": "number", "minimum": 0 },

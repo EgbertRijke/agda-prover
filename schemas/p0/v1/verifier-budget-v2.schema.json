@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agdaprover.local/schemas/p0/v1/verifier-budget-v2.schema.json",
+  "title": "Physical verifier-request accounting with optional quota, version 2",
+  "type": "object",
+  "required": ["schema_version", "limit", "used", "interaction_commands", "fresh_validations", "denied_calls"],
+  "properties": {
+    "schema_version": { "const": "agdaprover.verifier-budget.v2" },
+    "limit": { "type": ["integer", "null"], "minimum": 1 },
+    "used": { "type": "integer", "minimum": 0 },
+    "interaction_commands": { "type": "integer", "minimum": 0 },
+    "fresh_validations": { "type": "integer", "minimum": 0 },
+    "denied_calls": { "type": "integer", "minimum": 0 }
+  },
+  "additionalProperties": false
+}

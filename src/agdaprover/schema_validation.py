@@ -19,7 +19,7 @@ from typing import Any, Literal
 from .contracts import EXIT_CODES, CostMetrics
 from .project_configuration import ProjectConfiguration
 from .resource_budget import RESOURCE_SCHEMA, ResourceLimits
-from .verifier_budget import VERIFIER_BUDGET_SCHEMA
+from .verifier_budget import LEGACY_VERIFIER_BUDGET_SCHEMA, VERIFIER_BUDGET_SCHEMA
 
 PROVER_SCHEMA = "agdaprover.p0.v1"
 STEP_SCHEMA = "agdaprover.step.p0.v1"
@@ -238,12 +238,18 @@ def _validate_verifier_budget(value: object, status: object) -> None:
         }
     )
     _closed(budget, allowed=fields, required=fields)
-    if budget["schema_version"] != VERIFIER_BUDGET_SCHEMA:
+    if budget["schema_version"] not in (
+        LEGACY_VERIFIER_BUDGET_SCHEMA,
+        VERIFIER_BUDGET_SCHEMA,
+    ):
         raise ValueError("unsupported verifier budget schema")
-    for field in fields - {"schema_version"}:
+    for field in fields - {"schema_version", "limit"}:
         _nonnegative_number(budget[field], f"verifier_budget.{field}", integer=True)
-    if not 0 <= budget["used"] <= budget["limit"] or budget["limit"] < 1:
-        raise ValueError("verifier budget must be positive and cannot be overdrawn")
+    limit = budget["limit"]
+    if limit is not None or budget["schema_version"] == LEGACY_VERIFIER_BUDGET_SCHEMA:
+        _nonnegative_number(limit, "verifier_budget.limit", integer=True)
+        if limit < 1 or budget["used"] > limit:
+            raise ValueError("verifier budget must be positive and cannot be overdrawn")
     if budget["used"] != budget["interaction_commands"] + budget["fresh_validations"]:
         raise ValueError("verifier budget totals disagree")
     if budget["denied_calls"] and status != "resource-exhausted":

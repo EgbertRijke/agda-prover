@@ -1511,11 +1511,6 @@ def prove_joint_prefix(
                                 "fresh joint-proof validation"
                             ),
                         )
-                        result.cost.add(
-                            fresh_validation_runs=validation.get(
-                                "fresh_validation_runs", 1
-                            )
-                        )
                         if validation["checked"]:
                             result.validation = validation
                             result.trust_report = trust_report
@@ -2756,6 +2751,7 @@ def prove_joint_prefix(
             result.diagnostics.append({"kind": "resource", "message": str(exhaustion)})
         result.resource_budget = resource_scope.ledger.report()
         result.verifier_budget = call_scope.report()
+        result.cost.fresh_validation_runs = call_scope.fresh_validation_runs
         call_scope.close()
         # Aggregate exactly once on every exit, including quota/timeouts raised
         # inside a nested search. Work already performed must not become zero

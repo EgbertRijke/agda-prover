@@ -126,13 +126,17 @@ flags on libraries configured differently. Results without a library witness
 retain the historical standalone-profile requirement. Schema acceptance is
 not a replacement for Agda checking, policy enforcement or dataset admission.
 
-## Optional physical verifier budget
+## Physical verifier accounting and optional budget
 
-An explicitly capped task adds `verifier_budget`, using
-[verifier-budget.schema.json](verifier-budget.schema.json), with schema identity
-`agdaprover.verifier-budget.v1`. Historical uncapped envelopes omit this field;
-their task identities, cost records and legacy `verifier_calls` unit are unchanged.
-Readers must not substitute that legacy aggregate for this quota's `used` value.
+Every initialized search invocation reports `verifier_budget`, using
+[verifier-budget-v2.schema.json](verifier-budget-v2.schema.json), with schema
+identity `agdaprover.verifier-budget.v2`. Its `limit` is `null` when uncapped;
+measurement does not impose a quota. Readers also accept historical capped
+[v1 reports](verifier-budget.schema.json) and historical envelopes without a
+meter. Absence means unmeasured, not zero. Task identities and the legacy
+`verifier_calls` unit are unchanged; never substitute that aggregate for `used`.
+Consumers restricted to v1 must be updated before reading new reports. Existing
+frozen results are not rewritten or retrospectively given missing measurements.
 
 `max_verifier_calls` is an optional positive integer in `TaskSpec` and search
 editor requests. Omission or `null` means no independent call cap. CLI search,
@@ -147,13 +151,28 @@ launch failures and rejected proofs consume their reserved credit. Commands
 rejected locally before dispatch, cancelled before reservation, cached observations,
 source/metadata reads, toolchain version probes and process startup handshakes do
 not. Their other resource limits still apply. Validation has no free reserve.
+The existing `fresh_validations` request unit also includes the independently
+launched Agda prefix-syntax helper. This historical quota behavior is retained;
+a parser request does not establish proof acceptance.
 
-`used = interaction_commands + fresh_validations <= limit`. `denied_calls`
+`used = interaction_commands + fresh_validations`, with `used <= limit` when
+capped. `denied_calls`
 counts refused dispatch attempts, not verifier work. Consuming the last credit
 is allowed; only a subsequent attempted request is denied. A denied run reports
 `resource-exhausted`, never `unsolved`, `verified` or `impossible`. The standalone
 validator enforces the sum, ceiling and terminal status beyond JSON Schema's
 structural checks.
+
+`cost.fresh_validation_runs` counts actual fresh proof-checker process starts,
+recorded at launch and retained on cancellation, timeout, resource exhaustion
+and rejection. Failed launches and syntax-helper launches are not validation
+runs; their reserved requests remain in the physical ledger. Policy/preflight
+rejection before dispatch counts as neither. The invocation's final cost is
+read from the shared meter, not inferred from successfully returned validation
+summaries. This includes supplemental prefix checks exactly once. A nonzero
+count is work evidence only: `verified` still requires completed fresh checking.
+It can differ from `validation.fresh_validation_runs`, which describes the
+returned validation attempt rather than all attempts made during search.
 
 All sessions in one synchronous invocation share the scope. Explicitly nested
 scopes charge enclosing quotas too; an uncapped child cannot reset its parent.

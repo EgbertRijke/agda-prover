@@ -252,7 +252,7 @@ class ProverResult:
     policy_trace: list[dict[str, Any]] = field(default_factory=list)
     diagnostics: list[dict[str, str]] = field(default_factory=list)
     schema_version: str = SCHEMA_VERSION
-    verifier_budget: dict[str, str | int] | None = None
+    verifier_budget: dict[str, str | int | None] | None = None
     resource_budget: dict[str, Any] | None = None
 
     def to_dict(self, *, include_attempts: bool = False) -> dict[str, Any]:
@@ -307,7 +307,7 @@ class StepResult:
     attempts: list[Any] = field(default_factory=list)
     diagnostics: list[dict[str, str]] = field(default_factory=list)
     schema_version: str = "agdaprover.step.p0.v1"
-    verifier_budget: dict[str, str | int] | None = None
+    verifier_budget: dict[str, str | int | None] | None = None
     resource_budget: dict[str, Any] | None = None
 
     def to_dict(self, *, include_attempts: bool = False) -> dict[str, Any]:

@@ -135,6 +135,51 @@ class P0SchemaValidationTests(unittest.TestCase):
             },
         )
 
+    def test_v2_uncapped_accounting_and_legacy_envelopes_remain_distinct(self):
+        for result_type, validator in (
+            (ProverResult, validate_prover_result),
+            (StepResult, validate_step_result),
+        ):
+            value = result_type(
+                task_id="task",
+                status="unsolved",
+                source_file="Example.agda",
+                source_hash="0" * 64,
+                ranker="symbolic",
+            ).to_dict()
+            meter = {
+                "schema_version": "agdaprover.verifier-budget.v2",
+                "limit": None,
+                "used": 3,
+                "interaction_commands": 2,
+                "fresh_validations": 1,
+                "denied_calls": 0,
+            }
+            validator({**value, "verifier_budget": meter})
+            validator({**value, "verifier_budget": {**meter, "limit": 3}})
+            for change in (
+                {"schema_version": "agdaprover.verifier-budget.v1"},
+                {"schema_version": "future"},
+                {"limit": True},
+                {"limit": 2},
+                {"limit": 0},
+                {"used": True},
+                {"used": 4},
+                {"fresh_validations": -1},
+                {"unknown": 0},
+                {"denied_calls": 1},
+            ):
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    validator({**value, "verifier_budget": {**meter, **change}})
+            # An uncapped child can be denied by an enclosing capped scope.
+            validator(
+                {
+                    **value,
+                    "status": "resource-exhausted",
+                    "verifier_budget": {**meter, "denied_calls": 1},
+                }
+            )
+
     def test_every_non_evidentiary_prover_status_round_trips(self) -> None:
         statuses = (
             "needs-clarification",

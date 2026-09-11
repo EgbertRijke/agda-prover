@@ -360,6 +360,7 @@ def propose_step(
             result.diagnostics.append({"kind": "resource", "message": str(exhaustion)})
         result.resource_budget = resource_scope.ledger.report()
         result.verifier_budget = call_scope.report()
+        result.cost.fresh_validation_runs = call_scope.fresh_validation_runs
         call_scope.close()
         result.elapsed_ms = (time.monotonic() - started) * 1000.0
     return result

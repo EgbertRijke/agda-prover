@@ -1,4 +1,4 @@
-"""Invocation-local quotas for physical verifier requests, not search actions.
+"""Invocation-local accounting and optional quotas for physical verifier requests.
 
 The bridge charges immediately before interaction writes or fresh checker
 launches. Nested scopes charge every enclosing quota atomically. Context copies
@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Literal
 
-VERIFIER_BUDGET_SCHEMA = "agdaprover.verifier-budget.v1"
+VERIFIER_BUDGET_SCHEMA = "agdaprover.verifier-budget.v2"
+LEGACY_VERIFIER_BUDGET_SCHEMA = "agdaprover.verifier-budget.v1"
 VerifierRequest = Literal["interaction", "fresh-validation"]
 
 
@@ -23,10 +24,11 @@ class VerifierCallLimitExceeded(RuntimeError):
 
 @dataclass
 class _Meter:
-    limit: int
+    limit: int | None
     interaction_commands: int = 0
     fresh_validations: int = 0
     denied_calls: int = 0
+    fresh_validation_runs: int = 0
 
     @property
     def used(self) -> int:
@@ -47,7 +49,7 @@ def charge_verifier_request(kind: VerifierRequest) -> None:
         return
     with _charge_lock:
         for index, meter in enumerate(meters):
-            if meter.used >= meter.limit:
+            if meter.limit is not None and meter.used >= meter.limit:
                 # A child's smaller allowance does not exhaust its parent;
                 # an exhausted ancestor does prevent every descendant's work.
                 for affected in meters[index:]:
@@ -63,8 +65,20 @@ def charge_verifier_request(kind: VerifierRequest) -> None:
                 meter.fresh_validations += 1
 
 
+def record_fresh_validation_start() -> None:
+    """Observe a successful launch, separately from its already reserved request.
+
+    This is called by the checker boundary, before any supervision can interrupt
+    the run. Failed launches retain their request charge but are not runs.
+    Recording work neither polls resources nor confers proof acceptance.
+    """
+    with _charge_lock:
+        for meter in _meters.get():
+            meter.fresh_validation_runs += 1
+
+
 class VerifierCallScope:
-    """Bind a task's optional cap and restore its caller even after failure."""
+    """Always observe work; bind an optional cap and restore the caller on exit."""
 
     def __init__(self) -> None:
         self._meter: _Meter | None = None
@@ -74,9 +88,7 @@ class VerifierCallScope:
         if self._token is not None:
             raise RuntimeError("verifier budget scope is already open")
         self._meter = None
-        if limit is None:
-            return  # An uncapped child must not erase an enclosing quota.
-        if type(limit) is not int or limit <= 0:
+        if limit is not None and (type(limit) is not int or limit <= 0):
             raise ValueError("max_verifier_calls must be null or a positive integer")
         self._meter = _Meter(limit)
         self._token = _meters.set((*_meters.get(), self._meter))
@@ -86,7 +98,12 @@ class VerifierCallScope:
             _meters.reset(self._token)
             self._token = None
 
-    def report(self) -> dict[str, str | int] | None:
+    @property
+    def fresh_validation_runs(self) -> int:
+        with _charge_lock:
+            return self._meter.fresh_validation_runs if self._meter is not None else 0
+
+    def report(self) -> dict[str, str | int | None] | None:
         meter = self._meter
         if meter is None:
             return None

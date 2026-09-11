@@ -516,9 +516,6 @@ def prove(
                 )
                 result.search_stats["impossibility"] = impossibility.metrics()
                 result.verifier_calls += impossibility.checker_calls
-                result.cost.add(
-                    fresh_validation_runs=impossibility.checker_calls,
-                )
                 if (
                     impossibility.status == "certified"
                     and impossibility.certificate is not None
@@ -781,6 +778,7 @@ def prove(
             result.diagnostics.append({"kind": "resource", "message": str(exhaustion)})
         result.resource_budget = resource_scope.ledger.report()
         result.verifier_budget = call_scope.report()
+        result.cost.fresh_validation_runs = call_scope.fresh_validation_runs
         call_scope.close()
         result.elapsed_ms = (time.monotonic() - started) * 1000.0
         if policy_router is not None:
@@ -842,7 +840,6 @@ def _finish_verified_candidate(
         expected_inputs=expected_inputs,
         project_configuration=project_configuration,
     )
-    result.cost.add(fresh_validation_runs=validation.get("fresh_validation_runs", 1))
     result.validation = validation
     result.trust_report = trust_report
     patch_binders = patch.get("binders")
@@ -907,7 +904,6 @@ def _finish_guided_candidate(
         expected_inputs=expected_inputs,
         project_configuration=project_configuration,
     )
-    result.cost.add(fresh_validation_runs=validation.get("fresh_validation_runs", 1))
     result.validation = validation
     result.trust_report = trust_report
     result.proof_term = proof_text

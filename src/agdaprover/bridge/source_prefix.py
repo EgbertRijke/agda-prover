@@ -61,6 +61,7 @@ def inspect_prefix(
         overlay=source_file.parent,
         budget=budget,
         cancellation=CancellationToken(),
+        validation_process=False,
     )
     if (
         source_file.read_bytes() != raw
