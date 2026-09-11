@@ -28,7 +28,7 @@ results.
 | --- | --- | --- |
 | `focused.apnnue` | Focused-branch policy | One proof-bound comparison from the project's `Ambiguous.agda` fixture |
 | `step.apnnue` | One-step refinement | 20 accepted/rejected refinement comparisons from project-owned fixtures |
-| `or-policy.apnnue` | Case selection, constructors, composed evidence and visible premises | 412 unimath proof-bound choices, continuing the earlier standard-library model |
+| `or-policy.apnnue` | Case selection, constructors, composed evidence and visible premises | 430 unimath proof-bound choices, continuing the earlier standard-library model |
 
 The focused model's positive lies on a freshly validated proof, and its negative
 branch was exhausted. One-step labels concern accepted refinements, not complete
@@ -36,7 +36,7 @@ proofs. The scoped library policy imitates observed proof-path choices;
 budget-censored alternatives are **not** labeled failures. It covers
 `case-variable`, `constructor-choice`, `evidence-application-v1` and
 `visible-premise`. The latest round contains 21 case, six constructor,
-fourteen composed-evidence and 371 premise choices. Other OR families and untrained
+nineteen composed-evidence and 384 premise choices. Other OR families and untrained
 reasoning mechanisms retain their existing symbolic behavior.
 For ordinary premises and arity-directed construction, structural priority
 groups are preserved and NNUE orders alternatives within each group. This
@@ -46,12 +46,12 @@ Training-data SHA-256 identities:
 
 - Focused: `de38b749bc8cdda3d5e888e419bb9fff2ee5db09792ed70ed25ca03397747c78`
 - One-step: `edf7d182862dca64276510c0bbaa373d915c50e91b6991951acd2d7688ef9ffa`
-- Current library OR training: `939f743c160240e623f1c25d832bc21685ed7f9477e2daca6baa10e3a680bb46`
+- Current library OR training: `bda314ea4835f1cacd254628a1d5c8adb0268409f6591ebf7dc459327a5d8c79`
 - Current library OR internal validation: `fcb6110225a209c5fc04d4832a083c00191acf88d30f7faa01b8067ab9f70665`
 
 New experience comes exclusively from agda-unimath revision
 `48a91b44e97f6c8a94b7ae3ff0fa7aaa631e9b29`, checked with Agda 2.8.0. The final
-training snapshot spans 42 source-module groups; five separate module groups
+training snapshot spans 43 source-module groups; five separate module groups
 provide twelve internal-validation choices. Shared imported foundations are
 declared. Validation never updates weights; it is not
 an untouched test set or unseen-library evaluation.
@@ -66,37 +66,37 @@ and its learning credit do not establish semantic fidelity in those cases.
 
 The lineage continues the earlier 55-choice standard-library model, trained from
 revision `810f87395c45a5dc06dc2815f69a1fbc8260e961`, through cumulative unimath
-snapshots of 46, 86, 159, 276, 375, 382, 394, 403 and now 412 choices. Earlier weights
+snapshots of 46, 86, 159, 276, 375, 382, 394, 403, 412 and now 430 choices. Earlier weights
 and attribution are retained; this round adds no standard-library examples to
 its gradients.
 Its immediate parent is
-`d17f2f0c4ef58e2799c776be606c24636c9696e87b57b8185905dfc523c8d7da`.
+`88e4bca8721b61ebac5b169b0e0f2a0c9a0635bc7fd659b9ad761f363a5ddc57`.
 Training tools and corpora are not included in AgdaProver.
 
 Current library-policy SHA-256:
-`88e4bca8721b61ebac5b169b0e0f2a0c9a0635bc7fd659b9ad761f363a5ddc57`.
+`a2072fd6c874db7ea8542cb1223400a537a07d0c2e7ba90754909ed7301c439f`.
 
 ## Measured evidence and limitations
 
-Through the actual inference router, recorded-choice agreement is 192/412 on
-training data, versus 184/412 for the parent. Internal validation falls from
-12/12 to 11/12, and its choice loss rises from 0.634832 to 0.654905. The raw
-training evaluator, without the router's structural priority groups, falls from
-11/12 to 10/12 on validation. The one-epoch candidate was specified before training;
+Through the actual inference router, recorded-choice agreement is 212/430 on
+training data, versus 200/430 for the parent. Internal validation remains
+11/12, while its choice loss rises from 0.654905 to 0.703349. The raw
+training evaluator, without the router's structural priority groups, remains
+10/12 on validation. The one-epoch candidate was specified before training;
 the parent remains the validation winner. This default publishes the retained
 experimental continuation under the prototype's mixed-results policy.
 These are reused internal samples, not an untouched evaluation or a strength-gain
 claim. Structural priority groups explain why router agreement differs from
 the unconstrained training scores.
 
-Full and incremental Python inference agree exactly on all 59,707 training
+Full and incremental Python inference agree exactly on all 64,508 training
 candidates and 56 internal-validation candidates.
 
 The six required solver checks pass with the new bundled model: Eckmann–Hilton
-in 15.40 seconds, rotating correspondence in 8.77, the natural-number semiring
-in 16.21, the list semiring in 16.77, generic recursive families in 2.09 and
-W-type destructors/fold/map in 3.27. Action and checker counts match the previous
-checkpoint on all six. These are working-capability checks, not evidence that
+in 15.26 seconds, rotating correspondence in 8.81, the natural-number semiring
+in 16.19, the list semiring in 16.65, generic recursive families in 2.18 and
+W-type destructors/fold/map in 3.34. Action and checker counts match the same
+runtime's preceding model checks on all six. These are working-capability checks, not evidence that
 the new training improves solving speed.
 
 These are small, premise-heavy samples, not a statistically established gain
@@ -106,7 +106,7 @@ checks; mixed informal benchmark results are not evidence of universal improveme
 or regression. Fresh Agda validation remains mandatory: the model only orders
 candidates. The development repository's `docs/reviews/unimath-bootcamp.md`
 records the campaign, actual search outcomes and remaining limitations;
-`docs/reviews/d0-training-import-reuse.md` records this continuation. Earlier
+`docs/reviews/e3-dependent-evidence-continuation.md` records this continuation. Earlier
 ElementaryContractibility and held-out comparisons concern earlier checkpoints,
 not these new weights.
 

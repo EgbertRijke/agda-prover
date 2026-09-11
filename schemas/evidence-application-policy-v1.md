@@ -1,10 +1,12 @@
 # Composed-evidence choices
 
-`evidence-application-v1` is a new OR decision family, separate from refining
-with a bare visible declaration. Its action is to infer one complete application
+`evidence-application-v1` is an OR decision family, separate from refining
+with a bare visible declaration. Its action proposes one complete application
 of a supplied or previously inferred function to supplied/inferred arguments in
-the exact parent state and interaction. Inference remains speculative; it grants
-neither proof acceptance nor a positive training label.
+the exact parent state and interaction. `infer-evidence-application` asks Agda
+for its type; `check-evidence-application` checks it against the current expected
+type. Both remain speculative and grant neither final proof acceptance nor a
+positive training label.
 
 Each decision offers all distinct currently generated, unattempted applications.
 The symbolic order is `(depth, expression length, expression)` as before.
@@ -35,6 +37,21 @@ is invalid; unresolved inferred metas or a resource interruption alone supply no
 proof credit.
 Fresh validation and the existing source/task/patch-bound proof-credit contract
 are still required before any selected dependency becomes positive.
+
+## Expected-type checking
+
+The expected-evidence lane offers fully supplied applications before structural
+expansion. A matching result head is only a proposal hint; the expected target
+may contain unknown indices or already be concrete. Agda checks the application
+and infers hidden parameters. Missing explicit arguments are not synthesized by
+this lane, and an unresolved inferred result is not stored as intermediate
+evidence. Rejection leaves the parent available for other alternatives.
+
+These decisions use the same family, typed candidates, structural features,
+NNUE router and branch-local proof lineage as inference decisions. The action
+tag distinguishes checking from observation without changing existing-family
+features or the model format. Work consumes the shared action/checker budgets;
+the `AGDAPROVER_EXPECTED_EVIDENCE` switch is captured when search starts.
 
 ## Implicit value observations
 
