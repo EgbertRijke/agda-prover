@@ -204,6 +204,15 @@ class ConformingKernelSession:
         self._scope_type_heads_enabled = False
         self._scope_type_family_enabled = False
         self._scope_adapter_hash: str | None = None
+        self._reuse_scoped_reads = (
+            os.environ.get("AGDAPROVER_REUSE_SCOPED_READS") == "1"
+        )
+        # One immutable observation, never a proof/state cache. The complete
+        # request payload binds exclusions, reduction mode and byte allowance.
+        self._last_scoped_read: (
+            tuple[StateToken, InteractionId, str, ScopedPremises] | None
+        ) = None
+        self.scoped_read_cache_hits = 0
         self._record_introduction_enabled = False
         self._reuse_root_overlay = (
             os.environ.get("AGDAPROVER_REUSE_ROOT_OVERLAY") == "1"
@@ -553,6 +562,7 @@ class ConformingKernelSession:
         self._project = project
         self._states.clear()
         self._active_state = None
+        self._last_scoped_read = None
         self.transport.cost.add(temporary_bytes=self._overlay_bytes)
         return replace(result, cost=BridgeCost(temporary_bytes=self._overlay_bytes))
 
@@ -1208,19 +1218,26 @@ class ConformingKernelSession:
                 "Scoped retrieval requires an open interaction",
             )
         adapter = adapter_for_version(self.project.toolchain.version)
+        payload = exclusions_payload(
+            excluded_names,
+            output_bytes=budget.output_bytes,
+            include_dependencies=self._scope_dependencies_enabled,
+            normalize_query=self._scope_query_views_enabled,
+            type_family_query=self._scope_type_family_enabled,
+            type_spine_heads=self._scope_type_heads_enabled,
+        )
+        key = state, interaction_id, payload
+        cached = self._last_scoped_read
+        if self._reuse_scoped_reads and cached is not None and cached[:3] == key:
+            # Activation above still checks the exact source/configuration,
+            # process generation, state and open goal. A hit cannot renew the
+            # caller's deadline, bypass cancellation or reset resource quotas.
+            self.transport.check_resources()
+            self.scoped_read_cache_hits += 1
+            return cached[3]
         _command, response = self.transport.command(
             self._source_for(state.module_id),
-            adapter.module_contents(
-                interaction_id.value,
-                exclusions_payload(
-                    excluded_names,
-                    output_bytes=budget.output_bytes,
-                    include_dependencies=self._scope_dependencies_enabled,
-                    normalize_query=self._scope_query_views_enabled,
-                    type_family_query=self._scope_type_family_enabled,
-                    type_spine_heads=self._scope_type_heads_enabled,
-                ),
-            ),
+            adapter.module_contents(interaction_id.value, payload),
             transactional=True,
         )
         diagnostics = diagnostics_from_response(
@@ -1253,7 +1270,7 @@ class ConformingKernelSession:
                     f"Live scope needs at least {observed} encoded bytes; "
                     f"the caller reserved {budget.output_bytes}",
                 )
-            return decode_scope(
+            scoped = decode_scope(
                 rows[0],
                 state=state,
                 goal_id=interaction_id.value,
@@ -1265,6 +1282,9 @@ class ConformingKernelSession:
                 type_family_query=self._scope_type_family_enabled,
                 type_spine_heads=self._scope_type_heads_enabled,
             )
+            if self._reuse_scoped_reads:
+                self._last_scoped_read = (*key, scoped)
+            return scoped
         except ValueError as error:
             raise self._error(
                 BridgeFailure.PROTOCOL_FAILURE,
@@ -1553,6 +1573,7 @@ class ConformingKernelSession:
         self._closed = True
         self._states.clear()
         self._active_state = None
+        self._last_scoped_read = None
         try:
             if self._transport is None:
                 resources = BridgeResourceSummary(

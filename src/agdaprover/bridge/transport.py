@@ -78,6 +78,20 @@ class AgdaJsonTransport:
             return ProcessUsage(0, 0.0, 0)
         return self.supervisor.sample(process)
 
+    def check_resources(self) -> None:
+        """Enforce the same envelope for an observation without a kernel command."""
+        process = self._process
+        if process is None or process.poll() is not None:
+            raise self._error(
+                BridgeFailure.STALE_TOKEN,
+                "cached-read-process-ended",
+                "cannot reuse an observation after the Agda process has ended",
+            )
+        self.supervisor.check(process, command_id=None)
+        self.cost.peak_rss_bytes = max(
+            self.cost.peak_rss_bytes, self.supervisor.peak_rss_bytes
+        )
+
     @property
     def buffered_bytes(self) -> int:
         return len(self._buffer)

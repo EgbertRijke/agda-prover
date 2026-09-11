@@ -51,6 +51,14 @@ proofs; unrecognized premises remain available to ordinary search. Both search
 options are experimental and off by default. Unset the variables to compare
 with the existing search order.
 
+With live retrieval enabled, `AGDAPROVER_REUSE_SCOPED_READS=1` lets joint search
+share a scoped-premise observation between its structural-readiness check and
+constructor search. Only the most recent observation is retained, and only for
+the exact state, goal, exclusions and query options. Source changes and resource
+checks still apply; this is not a proof cache. It is experimental and off by
+default. Unset the variable to restore separate catalogue queries. This option
+does not enable live retrieval or the native adapter by itself.
+
 ## Emacs checkout configuration
 
 Use the [README setup](../README.md#setting-up-your-editor) to load the mode

@@ -33,6 +33,7 @@ from .kernel.p0 import AgdaBridgeError, AgdaLoadError, AgdaSession, open_kernel_
 from .kernel.protocol import (
     KernelSessionFactory,
     ScopeDeclarationSession,
+    ScopedRetrievalSession,
     TransactionalKernelSession,
 )
 from .notation import binary_mixfix_notation, strip_outer_parentheses
@@ -189,6 +190,9 @@ class JointStats(ScopedRetrievalStats):
     budget_widening_fallbacks: int = 0
     budget_widening_enabled: bool = True
     contextual_evidence_enabled: bool = True
+    scoped_read_reuse_enabled: bool = False
+    scoped_builder_queries: int = 0
+    scoped_builder_elapsed_ms: float = 0.0
     max_dependency_depth: int = 0
     proof_relevant_nodes_observed: int = 0
     parallel_inhabitants_observed: int = 0
@@ -1076,6 +1080,8 @@ def prove_joint_prefix(
             "AGDAPROVER_CONTEXTUAL_EVIDENCE", "1"
         )
         != "0",
+        scoped_read_reuse_enabled=os.environ.get("AGDAPROVER_REUSE_SCOPED_READS")
+        == "1",
     )
     policy_router: ORPolicyRouter | None = None
     selected_policy_choices: tuple[PolicyChoice, ...] = ()
@@ -2065,12 +2071,32 @@ def prove_joint_prefix(
                         and isinstance(session, ScopeDeclarationSession)
                         and isinstance(session, TransactionalKernelSession)
                     ):
-                        declarations, queries = visible_scope_declarations(
-                            session, session.current_state(), goal
-                        )
+                        owner = _owning_declaration_name(state_source, goal)
+                        builder_scope = None
+                        if stats.scoped_read_reuse_enabled and isinstance(
+                            session, ScopedRetrievalSession
+                        ):
+                            scope_started = time.monotonic()
+                            builder_scope = session.scoped_retrieval(
+                                session.current_state(),
+                                goal_id=goal.goal_id,
+                                excluded_names=frozenset(filter(None, (owner,))),
+                            )
+                            stats.scoped_builder_elapsed_ms += (
+                                time.monotonic() - scope_started
+                            ) * 1000
+                        if builder_scope is None:
+                            declarations, queries = visible_scope_declarations(
+                                session, session.current_state(), goal
+                            )
+                        else:
+                            # Use the same visibility-qualified observation as
+                            # constructor search. Its exact-state gateway cache
+                            # can reuse this query there; a changed state cannot.
+                            declarations, queries = builder_scope.declarations(), 1
+                            stats.scoped_builder_queries += 1
                         stats.premise_catalog_queries += queries
                         result.verifier_calls += queries
-                        owner = _owning_declaration_name(state_source, goal)
                         ready_structured_builder = has_structured_builder(
                             goal.target,
                             tuple(e.type for e in goal.context if e.in_scope),
