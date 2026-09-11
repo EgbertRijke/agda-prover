@@ -94,6 +94,7 @@ from .relation_path import (
     relation_operation_shape,
     solve_relation_path,
 )
+from .resource_budget import checkpoint
 from .retrieval import (
     PROGRESSIVE_POLICY,
     TYPE_SPINE_HEAD_POLICY,
@@ -562,6 +563,9 @@ class _ConstructorSearch:
         )
         self._expected_evidence_enabled = (
             os.environ.get("AGDAPROVER_EXPECTED_EVIDENCE", "1") != "0"
+        )
+        self._scoped_evidence_sources_enabled = (
+            os.environ.get("AGDAPROVER_SCOPED_EVIDENCE_SOURCES", "1") != "0"
         )
         self.stats = ConstructorStats(
             depth_limit=max_depth,
@@ -2012,6 +2016,56 @@ class _ConstructorSearch:
                     premise_query_stop,
                 )
 
+    def _admit_evidence_sources(
+        self,
+        state: StateToken,
+        goal: GoalInfo,
+        actions: tuple[ScopePremiseAction, ...],
+    ) -> tuple[ScopePremiseAction, ...]:
+        """Keep source-directed consumers reachable within the retrieved pool.
+
+        Direct proof admission favors matching result heads. A field consumer
+        instead has a flexible result determined by a richer input, so that
+        ranking need not place it in the first direct-proof batch. Admit these
+        supplied signatures separately; the shared application generator still
+        requires matching inputs and NNUE orders its genuine alternatives.
+        Neither this view nor any observation mutates the ordinary pool/order.
+        """
+        pool = self._scoped_actions.get((state, goal.goal_id))
+        if not self._scoped_evidence_sources_enabled or pool is None:
+            return actions
+        retained = set(actions)
+        additions = []
+        for _rank, action in pool.entries:
+            checkpoint()
+            if not self._available():
+                break
+            if action in retained:
+                continue
+            domains = explicit_domains(action.type_text)
+            if domains and domains[0] in premise_structured_result_domains(
+                action.type_text
+            ):
+                retained.add(action)
+                additions.append(action)
+        if additions:
+            self.stats.record_retrieval(
+                "widenings",
+                {
+                    "schema_version": "agdaprover.evidence-source-admission.v1",
+                    "search_policy": "structured-source-evidence-v1",
+                    "scope_id": pool.ranking.scope_id,
+                    "index_id": pool.ranking.index_id,
+                    "query_id": pool.ranking.query_id,
+                    "retrieved_count": len(pool.ranking.items),
+                    "new_expressions": [a.expression for a in additions],
+                    "retained_expressions": [a.expression for a in actions],
+                    "actions_considered": self.stats.actions_considered,
+                    "action_limit": self.action_budget,
+                },
+            )
+        return (*actions, *additions)
+
     def _solve_with_contextual_evidence(
         self, state: StateToken, goal: GoalInfo, *, action_slice: int = 48
     ) -> tuple[ConstructorSolution, ...]:
@@ -2055,6 +2109,7 @@ class _ConstructorSearch:
         actions = self._ordered_premise_actions(
             state, goal, shallow_only=target is not None
         )
+        actions = self._admit_evidence_sources(state, goal, actions)
         ready_results = (
             tuple(
                 ready_evidence_declarations(

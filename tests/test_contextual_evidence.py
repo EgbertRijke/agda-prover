@@ -445,7 +445,13 @@ module _ {A : Set} {P : A → Set} (w : Source A P) (x : A) where
   goal = {!!}
 """
                         )
-                    with tempfile.TemporaryDirectory() as directory:
+                    # Exercise the inference lane itself; the independently
+                    # tested expected-type shortcut can solve supplied values
+                    # without an inference query.
+                    with (
+                        tempfile.TemporaryDirectory() as directory,
+                        patch.dict("os.environ", {"AGDAPROVER_EXPECTED_EVIDENCE": "0"}),
+                    ):
                         path = Path(directory) / "HiddenObservation.agda"
                         path.write_text(source)
                         result = prove_joint_prefix(
@@ -597,6 +603,9 @@ module _ {{l k : Level}} {{A : Set l}} (w : Observer {{l}} {{k}} A) (x y : A) wh
                     "_solve_with_structured_builders",
                     provisional_builder,
                 ),
+                # Reach the deliberately injected provisional builder rather
+                # than solving through the earlier expected-evidence shortcut.
+                patch.dict("os.environ", {"AGDAPROVER_EXPECTED_EVIDENCE": "0"}),
             ):
                 (goal,) = session.load_module(path)
                 result = constructor_tree_prove(

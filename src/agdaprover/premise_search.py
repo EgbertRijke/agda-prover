@@ -2053,7 +2053,14 @@ def premise_structured_result_domains(type_text: str) -> tuple[str, ...]:
     """
 
     result = _expression_tokens(_result_type(type_text))
-    if not result or result[0] not in _type_binder_names(type_text):
+    # The checked signature already places the result in type position. Its
+    # governing binder may be annotated through an arbitrary universe alias;
+    # recognizing its dependency must not require that alias to print as Set.
+    if (
+        not result
+        or result[0] not in _binder_names(type_text)
+        or parse_relation(_result_type(type_text)) is not None
+    ):
         return ()
     result_name = result[0]
     try:

@@ -167,10 +167,13 @@ def parse_relation(
     """
 
     text = " ".join(type_text.strip().split())
+    try:
+        if len(split_top_level_arrows(text)) != 1:
+            return None
+    except ValueError:
+        return None
     if prefix_heads:
         try:
-            if len(split_top_level_arrows(text)) != 1:
-                return None
             parts = split_top_level_application(text)
         except ValueError:
             return None

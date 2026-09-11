@@ -38,6 +38,42 @@ proof credit.
 Fresh validation and the existing source/task/patch-bound proof-credit contract
 are still required before any selected dependency becomes positive.
 
+## Source-directed admission
+
+With a live scoped retrieval pool, contextual evidence also considers supplied
+consumers whose first explicit input contains the binder governing their result
+type. This includes dependent projections without recognizing any record or
+field name. Binder annotations may use arbitrary universe aliases. Infix
+operands are not treated as result-family heads; these syntactic hints propose
+applications and do not certify a projection law or definitional equality.
+
+This view ranges over the already retrieved, authorized pool, not merely its
+first direct-proof admission batch. Direct-proof ordering favors a matching
+result head, whereas a dependent field's result becomes known only after
+applying it to its source. The ordinary pool/order and initial candidates are
+preserved. The shared generator requires supplied matching inputs and reuses
+observed intermediates; actual application alternatives reach the same NNUE
+family and remain subject to the existing inference/action/time budgets.
+No additional scope query or reference-body access is permitted.
+
+`AGDAPROVER_SCOPED_EVIDENCE_SOURCES=0` disables this additional admission view;
+the default is enabled when the live scoped pool exists. The switch is captured
+at search creation. This additional admission is inactive without that pool;
+universe-independent signature recognition also benefits legacy callers.
+Expiry/cancellation cannot create a new budget or confer acceptance.
+
+Additive diagnostic `agdaprover.evidence-source-admission.v1`, within the bounded
+retrieval-widenings records, identifies policy `structured-source-evidence-v1`,
+scope/index/query IDs, `retrieved_count`, `new_expressions`, the original
+`retained_expressions`, `actions_considered` and `action_limit`. It describes
+admission, not a new type observation or positive label. Actual typed candidate
+batches and explored choices remain in the ordinary policy trace.
+
+For both prefix and infix relation notation, a function returning a relation is
+an applicable function, not an already established relation edge. Arrows inside
+parenthesized endpoints remain allowed. This keeps function-valued observations
+available to the shared application generator.
+
 ## Expected-type checking
 
 The expected-evidence lane offers fully supplied applications before structural
