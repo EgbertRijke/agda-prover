@@ -46,5 +46,5 @@ STEP_MODEL = BundledModel(
 OR_MODEL = BundledModel(
     "or-policy.apnnue",
     "or-decision-ranking",
-    "17a7b26ec16a5e8e01a4bc7ef304c3ee9df8a5e644fb6e37670ad237a3344af2",
+    "4dcb920799ba55f1b4b99f5e80cd6ab3eb70eee26fbbccb7999de718f11d6ed6",
 )
