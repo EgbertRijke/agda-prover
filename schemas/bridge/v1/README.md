@@ -101,6 +101,27 @@ still materializes an independent environment. `root_overlay_reuses` on the
 session counts successful reuse publications; existing process/load/I/O costs
 remain charged. This is not a declaration-checkpoint API or a new v1 operation.
 
+The optional solver-facing `ProjectRevisionSession.load_project(source,
+configuration)` capability explicitly rebinds project inputs and starts a new
+epoch, even for an unchanged source path. The compatibility gateway implements
+it through the existing project reset; its ordinary `load_module` API remains
+unchanged. Compiler changes are rejected by the kernel. This is an internal
+Python capability, not an addition to the serialized bridge-v1 protocol.
+
+`AGDAPROVER_REUSE_AUXILIARY_SESSION=1` retains at most one auxiliary worker per
+case-search invocation. Lookahead and provisional clause probes remain serial
+and separate from the primary search session. Each lease must load its own
+independently prepared project configuration before queries. Probe exceptions
+discard the worker; cleanup errors cannot mask a resource refusal or
+cancellation. Legacy injected sessions without project rebinding retain their
+throwaway lifecycle. The absolute deadline and physical resource accounting
+are not renewed. Callers may remove their temporary source copies after the
+lease: the kernel owns its independently materialized overlay. With the root
+reuse flag enabled, matching imports can remain warm across these probes;
+without it, rebinding still uses ordinary overlay replacement. Fresh validation
+is outside this facility. Neither speculative results nor old state tokens
+become independently reusable proof evidence.
+
 Fresh validation never treats `--allow-unsolved-metas` or
 `--allow-incomplete-matches` as proof acceptance. Other checking waivers are
 rejected unless explicitly allowed by the policy. This applies to command,

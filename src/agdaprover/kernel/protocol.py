@@ -52,6 +52,21 @@ class KernelSession(Protocol):
 
 
 @runtime_checkable
+class ProjectRevisionSession(Protocol):
+    """Optional new-epoch loading with explicitly rebound project routing.
+
+    No state token from the previous project may be used after rebinding.
+    The kernel, not the caller, decides whether checked imports can be reused.
+    """
+
+    def load_project(
+        self,
+        source_file: Path,
+        project_configuration: ProjectConfiguration | None,
+    ) -> tuple[GoalInfo, ...]: ...
+
+
+@runtime_checkable
 class TransactionalKernelSession(Protocol):
     """Optional replayable-state capability used by structural search."""
 
@@ -153,6 +168,7 @@ __all__ = [
     "KernelSession",
     "KernelSessionFactory",
     "PreciseSearchGoalSession",
+    "ProjectRevisionSession",
     "ScopeDeclarationSession",
     "ScopedRetrievalSession",
     "TermInferenceSession",

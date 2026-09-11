@@ -37,6 +37,12 @@ old proof-state tokens, and completed proofs still receive fresh validation.
 It is off by default; unset the variable to return to ordinary overlay loading.
 This does not cache individual declarations or omit checking the revised file.
 
+Also set `AGDAPROVER_REUSE_AUXILIARY_SESSION=1` to keep a separate speculative
+worker for successive case lookahead and tentative-clause checks. Combining
+the two flags can avoid repeated library startup in those checks. Each probe
+loads a new source epoch; errors discard the worker. Final proof validation
+never uses it. Both flags are experimental and off by default.
+
 With the optional adapter, `AGDAPROVER_SCOPED_RETRIEVAL=1` enables live library
 premise retrieval. `AGDAPROVER_LOCAL_ELIMINATOR_READINESS=1` additionally tries
 generic eliminators early only when their source is recognized in the current

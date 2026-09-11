@@ -149,23 +149,35 @@ class AgdaSession:
         """Retained for API compatibility; project resolution is source-bound."""
 
     def close(self) -> None:
-        self._session.close()
+        try:
+            self._session.close()
+        except BridgeError as error:
+            raise _p0_error(error) from error
 
     def cancel(self) -> bool:
         command = self.active_command
         return bool(command is not None and self._session.cancel(command))
 
-    def _ensure_project(self, source_file: Path) -> None:
+    def _ensure_project(
+        self,
+        source_file: Path,
+        configuration: ProjectConfiguration | None,
+        *,
+        force_revision: bool = False,
+    ) -> None:
         path = source_file.resolve()
         try:
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError as error:
             raise AgdaLoadError(f"source file not found: {path}") from error
-        if self._source_file == path and self._source_sha256 == digest:
+        if (
+            not force_revision
+            and self._source_file == path
+            and self._source_sha256 == digest
+            and self._project_configuration == configuration
+        ):
             return
-        request = project_request(
-            path, self._project_configuration, executable=self.executable
-        )
+        request = project_request(path, configuration, executable=self.executable)
         try:
             if self._open_result is None:
                 self._open_result = self._session.open_project(request, self._budget)
@@ -175,11 +187,23 @@ class AgdaSession:
             raise _p0_error(error, loading=True) from error
         self._source_file = path
         self._source_sha256 = digest
+        self._project_configuration = configuration
         self._state = None
         self._search_contexts.clear()
 
     def load_module(self, source_file: Path) -> tuple[GoalInfo, ...]:
-        self._ensure_project(source_file)
+        self._ensure_project(source_file, self._project_configuration)
+        return self._load_module()
+
+    def load_project(
+        self,
+        source_file: Path,
+        project_configuration: ProjectConfiguration | None,
+    ) -> tuple[GoalInfo, ...]:
+        self._ensure_project(source_file, project_configuration, force_revision=True)
+        return self._load_module()
+
+    def _load_module(self) -> tuple[GoalInfo, ...]:
         if self._open_result is None:
             raise AgdaLoadError("project resolution produced no environment")
         try:

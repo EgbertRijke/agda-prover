@@ -28,6 +28,7 @@ from .constructor_search import (
 from .contracts import GoalInfo
 from .dependency_planner import DependencyPlan, build_dependency_plan
 from .focused import focused_prove
+from .kernel.auxiliary import AuxiliarySessions, load_kernel_project
 from .kernel.p0 import AgdaLoadError, AgdaSession, open_kernel_session
 from .kernel.protocol import (
     KernelSession,
@@ -954,7 +955,7 @@ def _batched_case_prove(
 
         Local reuse preserves more computation than a constructor-normal leaf;
         both are preferable to a successor requiring another elimination.  A
-        fresh throwaway session makes this observational and branch-safe.
+        separate speculative session keeps this observational and branch-safe.
         """
 
         lookahead_started = time.monotonic()
@@ -983,14 +984,15 @@ def _batched_case_prove(
                 materialized = lookahead_workspace.total_bytes
                 stats.source_bytes_materialized += materialized
                 stats.source_bytes_written += materialized
-                with open_kernel_session(
-                    session_factory,
+                with auxiliary_sessions.open(
                     project_configuration=lookahead_workspace.configuration,
-                    timeout_seconds=max(0.001, deadline - time.monotonic()),
-                    deadline=deadline,
                 ) as lookahead_session:
                     load_started = time.monotonic()
-                    loaded = lookahead_session.load_module(lookahead_path)
+                    loaded = load_kernel_project(
+                        lookahead_session,
+                        lookahead_path,
+                        lookahead_workspace.configuration,
+                    )
                     stats.kernel_loads += 1
                     stats.case_lookahead_loads += 1
                     stats.kernel_load_elapsed_ms += (
@@ -1117,15 +1119,16 @@ def _batched_case_prove(
                 materialized = validation_workspace.total_bytes
                 stats.source_bytes_materialized += materialized
                 stats.source_bytes_written += materialized
-                with open_kernel_session(
-                    session_factory,
+                with auxiliary_sessions.open(
                     project_configuration=validation_workspace.configuration,
-                    timeout_seconds=max(0.001, deadline - time.monotonic()),
-                    deadline=deadline,
                 ) as validation_session:
                     load_started = time.monotonic()
                     try:
-                        loaded = validation_session.load_module(validation_path)
+                        loaded = load_kernel_project(
+                            validation_session,
+                            validation_path,
+                            validation_workspace.configuration,
+                        )
                     finally:
                         stats.kernel_loads += 1
                         stats.kernel_load_elapsed_ms += (
@@ -1140,6 +1143,9 @@ def _batched_case_prove(
             return False
 
     with ExitStack() as resources:
+        auxiliary_sessions = resources.enter_context(
+            AuxiliarySessions(session_factory, deadline=deadline)
+        )
         if session is None:
             temporary = resources.enter_context(
                 tempfile.TemporaryDirectory(prefix="agdaprover-case-batch-")
