@@ -23,7 +23,8 @@ lineage emits a `training-trace` diagnostic, not a changed Agda proof result or
 partial positive publication.
 
 Coverage currently includes ordinary constructors, visible-premise refinement,
-whole-function reuse, retrieved structure builders and batched case selections.
+supplied value/whole-function reuse, retrieved structure builders and batched
+case selections.
 The [composed-evidence extension](evidence-application-policy-v1.md) also carries
 selected application dependencies through direct completion, relation paths,
 and consumers of the parent-local evidence observations. Independent builders

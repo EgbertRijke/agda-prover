@@ -555,6 +555,9 @@ class _ConstructorSearch:
         self._retrieved_builders_enabled = (
             os.environ.get("AGDAPROVER_SCOPED_BUILDERS") == "1"
         )
+        self._scoped_value_reuse_enabled = (
+            os.environ.get("AGDAPROVER_SCOPED_VALUE_REUSE", "1") != "0"
+        )
         self.stats = ConstructorStats(
             depth_limit=max_depth,
             contextual_evidence_enabled=self.contextual_evidence_enabled,
@@ -1713,6 +1716,7 @@ class _ConstructorSearch:
         *,
         retrieval_limit: int = 64,
         function_values: bool = False,
+        implicit_values: bool = False,
         shallow_only: bool = True,
     ) -> tuple[ScopePremiseAction, ...]:
         """Return the bounded symbolic tier order, optionally NNUE-tiebroken."""
@@ -1725,6 +1729,15 @@ class _ConstructorSearch:
                 action
                 for action in actions
                 if premise_function_shape_matches(goal, action)
+            )
+        elif implicit_values:
+            target_head = result_head(goal.target)
+            actions = tuple(
+                action
+                for action in actions
+                if (value_type := implicit_value_type(action.type_text)) is not None
+                and target_head
+                and result_head(value_type) == target_head
             )
         scoped = self._scoped_actions.get((state, goal.goal_id))
         retrieval_metadata = (
@@ -3164,14 +3177,21 @@ class _ConstructorSearch:
                 final_state, ProofPlan(preview, child_plans, policy_choices=choices)
             )
 
-    def _solve_with_function_values(
-        self, state: StateToken, goal: GoalInfo, premise_query_stop: int
+    def _solve_with_supplied_values(
+        self,
+        state: StateToken,
+        goal: GoalInfo,
+        premise_query_stop: int,
+        *,
+        function_values: bool,
     ) -> Iterator[ConstructorSolution]:
-        """Try checked whole functions before reconstructing their bodies.
+        """Try checked supplied values before reconstructing their structure.
 
         This uses only the opt-in live scope, the existing progressive ranking
-        and a shared branch allowance. Failed gives leave ordinary telescope
-        introduction available; no parameter assignments are guessed here.
+        and a shared branch allowance. Failed gives leave ordinary construction
+        available; no parameter assignments are guessed here. The non-function
+        lane only admits values with hidden parameters, never explicit operands
+        or instance search. Result heads are proposal hints, not type equality.
         """
         self._premise_actions(state, goal)
         pool = self._scoped_actions.get((state, goal.goal_id))
@@ -3187,7 +3207,11 @@ class _ConstructorSearch:
             if not self._available() or self._scope_premise_queries >= stop:
                 return
             actions = self._ordered_premise_actions(
-                state, goal, retrieval_limit=limit, function_values=True
+                state,
+                goal,
+                retrieval_limit=limit,
+                function_values=function_values,
+                implicit_values=not function_values,
             )
             new_actions = tuple(
                 action for action in actions if action.expression not in attempted
@@ -3196,7 +3220,11 @@ class _ConstructorSearch:
             self.stats.record_retrieval(
                 "widenings",
                 {
-                    "schema_version": "agdaprover.retrieval-function-value-widening.v1",
+                    "schema_version": (
+                        "agdaprover.retrieval-function-value-widening.v1"
+                        if function_values
+                        else "agdaprover.retrieval-value-widening.v1"
+                    ),
                     "search_policy": PROGRESSIVE_POLICY,
                     "scope_id": pool.ranking.scope_id,
                     "index_id": pool.ranking.index_id,
@@ -3231,8 +3259,16 @@ class _ConstructorSearch:
                 self._scope_premise_queries += 1
                 attempt = {
                     **action.to_dict(),
-                    "schema_version": "agdaprover.function-value-attempt.v1",
-                    "tag": "reuse-visible-function",
+                    "schema_version": (
+                        "agdaprover.function-value-attempt.v1"
+                        if function_values
+                        else "agdaprover.value-attempt.v1"
+                    ),
+                    "tag": (
+                        "reuse-visible-function"
+                        if function_values
+                        else "reuse-visible-value"
+                    ),
                     "elaboration": "agda-give",
                     "goal_target": goal.target,
                     "accepted": checked.accepted,
@@ -3365,7 +3401,9 @@ class _ConstructorSearch:
         # the complete visible telescope, rather than one binder per search
         # state or one whole-file reload per binder.
         if top_level_arrow_count(goal.target):
-            yield from self._solve_with_function_values(state, goal, premise_query_stop)
+            yield from self._solve_with_supplied_values(
+                state, goal, premise_query_stop, function_values=True
+            )
             # A provisional give may still be rejected by the outer completion
             # or recursive-plan filter. Keep introduction on generator resume.
             domains = explicit_domains(goal.target)
@@ -3514,6 +3552,20 @@ class _ConstructorSearch:
                     )
             if shallow_solved and not self.require_recursive_call:
                 return
+
+        if (
+            self.contextual_evidence_enabled
+            and self._scoped_value_reuse_enabled
+            and self._scoped_actions
+            and _INTERNAL_META.search(goal.target) is None
+        ):
+            # Retrieval has already established exact visibility. A supplied
+            # value can resolve its hidden parameters from the expected goal
+            # without constructing fields or exploring evidence compositions.
+            # Keep all later lanes when a give (or its assembled plan) fails.
+            yield from self._solve_with_supplied_values(
+                state, goal, premise_query_stop, function_values=False
+            )
 
         indexed_solved = False
         for solution in self._solve_with_indexed_evidence(

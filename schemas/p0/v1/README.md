@@ -27,6 +27,23 @@ the frontier/resource bounds and appears in principal-variation frontier counts.
 `focused_fallbacks_deferred` and `focused_fallbacks_resumed` count the continuations;
 no extra checker calls or resumed work occur on a successful fast path.
 
+With exact live-scope retrieval enabled, constructor search tries supplied values
+before structural builders and evidence composition. A candidate may have ordinary
+hidden parameters but no explicit or instance arguments; matching result heads
+only propose a checked `give`. Agda determines indices and hidden parameters from
+the goal. No new visibility, type-equality authority or proof credit is implied.
+Rejection or rejection of an assembled provisional plan retains other search lanes.
+The same checked-give implementation handles whole-function reuse, preserving its
+existing telemetry. `AGDAPROVER_SCOPED_VALUE_REUSE=0` disables only the new value lane.
+
+Bounded `agdaprover.retrieval-value-widening.v1` records carry scope/index/query
+identities, width, new expressions and the shared cumulative query allowance.
+`agdaprover.value-attempt.v1` records use `reuse-visible-value`, `agda-give`, the
+original scoped declaration type, goal, acceptance and rejection code. The
+existing visible-premise OR/NNUE candidates and proof-choice boundary are reused;
+no model feature version changes. Actions, proof checks and physical dispatch
+remain charged, and fresh validation remains independent.
+
 Editor request v1 accepts an optional `search_profile`: `standard` (default)
 or `deep`. This is a search-only option, not valid for `inspect`. Omitted
 `max_candidates` resolves to 500 or 8,000 respectively; an explicitly supplied

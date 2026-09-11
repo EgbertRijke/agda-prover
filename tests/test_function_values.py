@@ -1,4 +1,4 @@
-"""Whole-function reuse uses expected types, not record-specific templates."""
+"""Supplied value reuse uses expected types, not record-specific templates."""
 
 from __future__ import annotations
 
@@ -99,6 +99,78 @@ NATIVE = (
     "opt-in native scoped-retrieval profile is required",
 )
 class FunctionValueKernelTests(unittest.TestCase):
+    def test_implicit_value_reuse_precedes_structural_construction(self):
+        for declaration, value in (
+            (
+                "record Packet (A : Set) : Set where\n  field transform : A → A",
+                "record { transform = λ x → x }",
+            ),
+            (
+                "data Packet (A : Set) : Set where\n  pack : (A → A) → Packet A",
+                "pack (λ x → x)",
+            ),
+        ):
+            with self.subTest(declaration=declaration):
+                source = f"""{{-# OPTIONS --safe --without-K #-}}
+module FunctionValues where
+data Unit : Set where
+  unit : Unit
+{declaration}
+ready : {{A : Set}} → Packet A
+ready = {value}
+target : Packet Unit
+target = {{!!}}
+"""
+                result = self.check_source(source, "ready", direct=True)
+                self.assertEqual(result["proof_term"], "ready")
+                self.assertEqual(result["search_stats"]["generated_subgoals"], 0)
+                self.assertTrue(
+                    any(
+                        a.get("tag") == "reuse-visible-value" and a["accepted"]
+                        for a in result["search_stats"]["premise_attempts"]
+                    )
+                )
+
+    def test_wrong_indices_reject_reuse_and_keep_construction(self):
+        source = """{-# OPTIONS --safe --without-K #-}
+module FunctionValues where
+data Unit : Set where
+  unit : Unit
+data Tag : Set where
+  first second : Tag
+data Packet : Tag → Set where
+  wrong : Packet first
+  pack : Unit → Packet second
+target : Packet second
+target = {!!}
+"""
+        result = self.check_source(source, "pack", direct=True)
+        self.assertTrue(
+            any(
+                a.get("tag") == "reuse-visible-value"
+                and a["expression"] == "wrong"
+                and not a["accepted"]
+                for a in result["search_stats"]["premise_attempts"]
+            )
+        )
+
+    def test_value_reuse_opt_out_preserves_other_search_lanes(self):
+        source = """{-# OPTIONS --safe --without-K #-}
+module FunctionValues where
+data Unit : Set where
+  unit : Unit
+target : Unit
+target = {!!}
+"""
+        with patch.dict("os.environ", {"AGDAPROVER_SCOPED_VALUE_REUSE": "0"}):
+            result = self.check_source(source, "unit", direct=True)
+        self.assertFalse(
+            any(
+                a.get("tag") == "reuse-visible-value"
+                for a in result["search_stats"]["premise_attempts"]
+            )
+        )
+
     def test_retrieved_builder_specializes_a_function_parameter(self):
         source = """{-# OPTIONS --safe --without-K #-}
 module FunctionValues where
@@ -117,7 +189,13 @@ module _ {A : Set} (seed : Tag A) (B : Set) where
   target : Package seed (λ _ → B)
   target = {!!}
 """
-        with patch.dict("os.environ", {"AGDAPROVER_SCOPED_BUILDERS": "1"}):
+        with patch.dict(
+            "os.environ",
+            {
+                "AGDAPROVER_SCOPED_BUILDERS": "1",
+                "AGDAPROVER_SCOPED_VALUE_REUSE": "0",
+            },
+        ):
             stats = self.check_source(source, "build")
         attempts = [
             a
@@ -126,12 +204,15 @@ module _ {A : Set} (seed : Tag A) (B : Set) where
         ]
         self.assertTrue(
             any(
-                a["expression"].startswith("build seed (λ")
-                and a["accepted"]
-                and a["generated_subgoals"] == 0
+                a["expression"].startswith("build seed ") and a["accepted"]
                 for a in attempts
             )
         )
+        self.assertIn("build seed (λ", stats["proof_term"])
+        # Other checked lanes may now finish the builder's argument instead;
+        # require fresh completion under the combined default schedule too.
+        with patch.dict("os.environ", {"AGDAPROVER_SCOPED_BUILDERS": "1"}):
+            self.check_source(source, "build")
 
     def check_source(self, source, expected, *, control=False, direct=False):
         with (
