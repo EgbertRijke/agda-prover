@@ -14,7 +14,7 @@ decision cannot receive its parent's outcome. Batched case search carries only
 choices whose edits entered the proposed source branch, including choices from
 structural subproofs. Lookahead alternatives and abandoned trees do not qualify.
 
-The single-goal `prove` entry point marks `on-validated-proof` only after the
+Both `prove` and `prove-prefix` mark `on-validated-proof` only after the
 selected reconstruction passes fresh validation and the final resource checks
 still permit `verified`. It checks the complete selection before assigning any
 positive: every choice must have been explored, must not have been rejected or
@@ -28,10 +28,17 @@ The [composed-evidence extension](evidence-application-policy-v1.md) also carrie
 selected application dependencies through direct completion, relation paths,
 and consumers of the parent-local evidence observations. Independent builders
 that reconstruct an equivalent expression do not inherit those earlier choices.
-Not every search path carries credit yet. Joint source-queue choices and other
-opaque proof-building paths remain unlabeled; their successful result is not
-permission to mark all explored decisions positive. Singleton/omitted trace
-batches do not acquire fabricated records.
+Joint source-queue states retain branch-local choices from constructor proof
+plans, batched case proofs and direct case alternatives. Later edits and budget
+widening preserve that lineage; backtracking does not transfer it to another
+branch. Transposition keys and queue priorities do not include diagnostics:
+duplicate sources keep the first queued witness, not a union of alternatives.
+Only the terminal branch that passes fresh checking receives credit.
+
+Not every search path carries credit yet. Focused batches and other opaque
+proof-building paths remain unlabeled; their successful result is not permission
+to mark all explored decisions positive. Singleton/omitted trace batches do not
+acquire fabricated records.
 
 Unvisited, unfinished and accepted-but-unused alternatives remain
 `budget-censored`. An `invalid` label describes the particular attempted Agda
@@ -56,9 +63,12 @@ compact `,`/`:` separators. Validation must have `checked=true`,
 `fresh_process=true`, `timed_out=false` and `exit_status=0`; patch and trust
 report must be present. The trust report must also attest a fresh offline
 check with integer `checker_exit_status=0`; boolean exit codes are rejected.
+An editor prefix certificate that leaves later holes and reports a nonzero
+whole-file check is not this v1 training receipt, even when the selected prefix
+is accepted. It supplies no positive labels through this contract.
 This record binds diagnostic credit to the actual
 result. It is not an independent proof certificate: replay consumers must
 retain the source/configuration, patch and validation/trust records as well.
 
 This runtime mechanism grants no corpus licensing, retention or training
-permission. Dataset preparation and training remain outside the product.
+permission. Dataset preparation and training remain outside AgdaProver.

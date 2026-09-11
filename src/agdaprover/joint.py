@@ -11,8 +11,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from agdaprover.observability.policy_trace import PolicyTraceRecorder
-
 from .actions import RefinementCandidate
 from .artifacts import file_sha256
 from .bridge.resources import current_process_rss, temporary_workspace
@@ -38,6 +36,11 @@ from .kernel.protocol import (
     TransactionalKernelSession,
 )
 from .notation import binary_mixfix_notation, strip_outer_parentheses
+from .observability.policy_trace import (
+    PolicyChoice,
+    PolicyTraceRecorder,
+    validated_proof_evidence,
+)
 from .offline import assert_offline_configuration
 from .or_policy import ORPolicyRouter, policy_candidate
 from .presentation import (
@@ -212,6 +215,10 @@ class _State:
         compare=False,
     )
     budget_widened: bool = field(default=False, compare=False)
+    # Observational lineage belongs to this source branch, never the shared
+    # router's most recently explored alternative. It does not affect ordering
+    # or transposition identity; a duplicate keeps the first queued witness.
+    policy_choices: tuple[PolicyChoice, ...] = field(default=(), compare=False)
 
 
 @dataclass(frozen=True)
@@ -1059,6 +1066,7 @@ def prove_joint_prefix(
         != "0",
     )
     policy_router: ORPolicyRouter | None = None
+    selected_policy_choices: tuple[PolicyChoice, ...] = ()
     focused_policy = None
     call_scope = VerifierCallScope()
     resource_scope = ResourceScope(task.resources, memory_sample=current_process_rss)
@@ -1244,6 +1252,7 @@ def prove_joint_prefix(
                     estimated_goals: int,
                     steps: tuple[dict[str, object], ...],
                     *,
+                    policy_choices: tuple[PolicyChoice, ...],
                     priority_bias: int = 0,
                     widened_declarations: frozenset[str] = frozenset(),
                     budget_widened: bool = False,
@@ -1271,6 +1280,7 @@ def prove_joint_prefix(
                         steps,
                         widened_declarations,
                         budget_widened,
+                        policy_choices,
                     )
                     queue.push(next_state.priority, next_state.sequence, next_state)
                     stats.states_enqueued += 1
@@ -1355,6 +1365,7 @@ def prove_joint_prefix(
                         len(batch_edits),
                         len(target_goals) - len(batch_edits),
                         tuple(reversed(batch_edits)),
+                        policy_choices=(),
                     )
                     stats.focused_batches += 1
                     stats.focused_batch_goals += len(batch_edits)
@@ -1374,6 +1385,7 @@ def prove_joint_prefix(
                                 previous.state.depth,
                                 previous.remaining_goals,
                                 previous.state.steps,
+                                policy_choices=previous.state.policy_choices,
                                 priority_bias=8,
                                 widened_declarations=previous.state.widened_declarations,
                                 budget_widened=True,
@@ -1464,6 +1476,7 @@ def prove_joint_prefix(
                             result.patch = patch
                             result.proof_term = state.replacement
                             result.status = "verified"
+                            selected_policy_choices = state.policy_choices
                             result.diagnostics.append(
                                 {
                                     "kind": "joint-search",
@@ -1561,6 +1574,7 @@ def prove_joint_prefix(
                             state.depth,
                             len(remaining_goals),
                             state.steps,
+                            policy_choices=state.policy_choices,
                             priority_bias=8,
                             widened_declarations=(
                                 state.widened_declarations | {owning_declaration}
@@ -1658,6 +1672,7 @@ def prove_joint_prefix(
                                 state.depth + 1,
                                 len(remaining_goals) - 1,
                                 state.steps + (edit,),
+                                policy_choices=state.policy_choices,
                                 priority_bias=-6,
                                 widened_declarations=successor_widened,
                             )
@@ -1706,6 +1721,7 @@ def prove_joint_prefix(
                                     state.depth + 1,
                                     len(remaining_goals) - 1,
                                     state.steps + (observed_edit,),
+                                    policy_choices=state.policy_choices,
                                     priority_bias=-5,
                                     widened_declarations=successor_widened,
                                 )
@@ -1790,6 +1806,7 @@ def prove_joint_prefix(
                             state.depth + 1,
                             current_open - 1,
                             state.steps + (edit,),
+                            policy_choices=state.policy_choices,
                             widened_declarations=successor_widened,
                         )
 
@@ -1888,6 +1905,9 @@ def prove_joint_prefix(
                             current_state.depth + max(1, batch_stats.max_depth),
                             open_count - 1,
                             current_state.steps + (edit,),
+                            policy_choices=(
+                                current_state.policy_choices + batched.policy_choices
+                            ),
                             priority_bias=(
                                 -5
                                 if recursive_program_profile is None
@@ -2403,6 +2423,10 @@ def prove_joint_prefix(
                                 state.depth + max(1, constructor_stats.max_depth),
                                 current_open - 1,
                                 state.steps + (edit,),
+                                policy_choices=(
+                                    state.policy_choices
+                                    + solution.plan.choices_on_proof()
+                                ),
                                 priority_bias=(
                                     -4
                                     if retain_alternatives
@@ -2426,6 +2450,7 @@ def prove_joint_prefix(
                             state.depth,
                             current_open,
                             state.steps,
+                            policy_choices=state.policy_choices,
                             priority_bias=6,
                             widened_declarations=(
                                 state.widened_declarations | {owning_declaration}
@@ -2501,6 +2526,7 @@ def prove_joint_prefix(
                                     state.depth + 1,
                                     current_open - 1 + generated,
                                     state.steps + (edit,),
+                                    policy_choices=state.policy_choices,
                                     widened_declarations=successor_widened,
                                 )
                     elif (
@@ -2555,6 +2581,9 @@ def prove_joint_prefix(
                         stats.model_elapsed_ms += (
                             policy_router.model_elapsed_ms - before_elapsed
                         )
+                        case_choices = policy_router.snapshot_choices(
+                            "case-variable", goal
+                        )
                         for action in case_actions:
                             if (
                                 remaining_goal_actions() <= 0
@@ -2562,7 +2591,11 @@ def prove_joint_prefix(
                             ):
                                 saw_exhaustion = True
                                 break
-                            policy_router.mark("case-variable", action.expression)
+                            choice = case_choices.get(action.expression)
+                            if choice is not None:
+                                policy_router.recorder.mark(
+                                    choice.decision_id, choice.candidate_id
+                                )
                             stats.actions_considered += 1
                             checked_case = session.check_case_split(
                                 goal.goal_id, action.expression
@@ -2570,11 +2603,12 @@ def prove_joint_prefix(
                             result.verifier_calls += 1
                             stats.case_queries += 1
                             if not checked_case.accepted:
-                                policy_router.mark(
-                                    "case-variable",
-                                    action.expression,
-                                    outcome="invalid",
-                                )
+                                if choice is not None:
+                                    policy_router.recorder.mark(
+                                        choice.decision_id,
+                                        choice.candidate_id,
+                                        outcome="invalid",
+                                    )
                                 continue
                             try:
                                 edit = reconstruct_case_split(
@@ -2599,6 +2633,9 @@ def prove_joint_prefix(
                                 state.depth + 1,
                                 current_open - 1 + len(checked_case.clauses),
                                 state.steps + (edit,),
+                                policy_choices=(
+                                    state.policy_choices + ((choice,) if choice else ())
+                                ),
                                 widened_declarations=successor_widened,
                             )
 
@@ -2686,6 +2723,25 @@ def prove_joint_prefix(
         result.elapsed_ms = stats.elapsed_ms
         result.search_stats = stats.to_dict()
         if policy_router is not None:
+            if result.status == "verified" and selected_policy_choices:
+                evidence = validated_proof_evidence(
+                    task_id=result.task_id,
+                    source_sha256=result.source_hash,
+                    patch=result.patch,
+                    validation=result.validation,
+                    trust_report=result.trust_report,
+                )
+                if evidence is not None:
+                    try:
+                        policy_router.recorder.mark_validated_proof(
+                            selected_policy_choices, evidence=evidence
+                        )
+                    except ValueError as error:
+                        # Trace corruption cannot change Agda acceptance or
+                        # grant partial credit to an otherwise checked branch.
+                        result.diagnostics.append(
+                            {"kind": "training-trace", "message": str(error)}
+                        )
             result.policy_trace.extend(policy_router.recorder.to_list())
             result.search_stats["or_policy"] = policy_router.metrics()
     return result

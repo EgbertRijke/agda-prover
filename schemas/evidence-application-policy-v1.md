@@ -35,6 +35,9 @@ is invalid; unresolved inferred metas or a resource interruption remain censored
 Fresh validation and the existing source/task/patch-bound proof-credit contract
 are still required before any selected dependency becomes positive.
 
-This instruments contextual evidence, not every opaque proof builder or the
-joint queue. Uninstrumented decisions must not be credited retrospectively from
-overall success. Training and collection stay outside the product.
+The joint queue preserves this lineage when a selected constructor proof plan
+uses contextual evidence, as specified by the
+[proof-choice credit contract](proof-choice-credit-v1.md). This does not instrument
+every opaque proof builder: uninstrumented decisions must not be credited
+retrospectively from overall success. Training and collection stay outside
+AgdaProver.
