@@ -1891,9 +1891,13 @@ def _batched_case_prove(
                         ),
                         None,
                     )
+                    copattern_call = (
+                        CopatternCallSpec(root_name, copattern_prefix)
+                        if root_name is not None and copattern_prefix is not None
+                        else None
+                    )
                     if (
-                        copattern_prefix is not None
-                        and root_name is not None
+                        copattern_call is not None
                         and isinstance(active_session, TransactionalKernelSession)
                         and available()
                     ):
@@ -1904,10 +1908,13 @@ def _batched_case_prove(
                             recursive_spec=None,
                             allow_wrapping=False,
                             preferred_arity=None,
-                            case_alternatives_remain=False,
-                            copattern_spec=CopatternCallSpec(
-                                root_name, copattern_prefix
+                            # Result projection does not remove the clause's
+                            # arguments. Give their elimination lane a turn
+                            # before construction consumes the whole allowance.
+                            case_alternatives_remain=any(
+                                entry.in_scope and entry.name for entry in goal.context
                             ),
+                            copattern_spec=copattern_call,
                         )
                         if structural.solutions:
                             chosen = structural.solutions[0]
@@ -5423,6 +5430,7 @@ def _batched_case_prove(
                             ),
                             preferred_arity=preferred_constructor_arity,
                             case_alternatives_remain=bool(case_actions),
+                            copattern_spec=copattern_call,
                         )
                         if structural.solutions:
                             stats.structural_leaf_closures += 1
@@ -5610,8 +5618,14 @@ def _batched_case_prove(
                         # tree and try applications/projections/construction
                         # in this leaf instead of restarting at the root.
                         if (
-                            case_split_seen
-                            and not structural_attempted
+                            (case_split_seen or copattern_prefix is not None)
+                            and (
+                                not structural_attempted
+                                # Copattern construction received only a
+                                # slice while these now-rejected alternatives
+                                # remained. Retry with the shared remainder.
+                                or (copattern_call is not None and bool(case_actions))
+                            )
                             and not unresolved_program_dependencies
                             and isinstance(active_session, TransactionalKernelSession)
                             and available()
@@ -5629,6 +5643,7 @@ def _batched_case_prove(
                                 ),
                                 preferred_arity=preferred_constructor_arity,
                                 case_alternatives_remain=False,
+                                copattern_spec=copattern_call,
                             )
                             if structural.solutions:
                                 stats.structural_leaf_closures += 1

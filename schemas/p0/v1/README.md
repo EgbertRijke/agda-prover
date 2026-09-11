@@ -71,6 +71,15 @@ their own arguments. Supplied local functions can instantiate unknown argument
 domains before lambda introduction, using the same checked reuse as other local
 values. No type, field or benchmark name determines applicability.
 
+Result projection does not remove the clause's local arguments. When named
+arguments remain, the initial copattern-construction attempt uses the existing
+finite construction slice, leaving argument-elimination proposals a turn. Their
+admissibility is still decided by Agda, not by the presence of a name. If all
+case proposals are rejected, construction may use the shared remaining allowance
+with the same kernel-generated owner provenance. This fallback neither renews
+resources nor exposes the owner as an ordinary premise. Subsequent argument
+pattern changes do not manufacture new copattern provenance.
+
 The existing `recursive-call` policy boundary carries `refine-copattern-owner`
 candidates with `subject-origin=kernel-copattern-clause`; symbolic ordering remains
 available. Bounded `agdaprover.copattern-call.v1` diagnostic rows in

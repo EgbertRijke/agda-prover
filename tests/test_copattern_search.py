@@ -10,6 +10,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agdaprover.case_search import _is_result_projection
+from agdaprover.constructor_search import (
+    ConstructorResult,
+    ConstructorStats,
+    constructor_tree_prove,
+)
 from agdaprover.contracts import TaskSpec
 from agdaprover.joint import prove_joint_prefix
 
@@ -90,6 +95,89 @@ class CopatternSearchTests(unittest.TestCase):
         self.assertEqual(result.status, "resource-exhausted")
         self.assertEqual(result.search_stats["result_split_queries"], 0)
         self.assertEqual(result.search_stats["copattern_clauses_generated"], 0)
+
+    def test_result_projection_preserves_dependent_argument_elimination(self):
+        for family, constructor, ranker in (
+            ("Cell", "point", "nnue"),
+            ("Witness", "here", "symbolic"),
+        ):
+            with self.subTest(family=family, ranker=ranker):
+                source = f"""{{-# OPTIONS --safe --without-K #-}}
+module Example where
+open import Agda.Primitive using (Level)
+data {family} {{l : Level}} {{A : Set l}} (x : A) : A → Set l where
+  {constructor} : {family} x x
+record Shape : Set₁ where
+  field
+    Carrier : Set
+open Shape
+record Map (C D : Shape) : Set where
+  field
+    apply : Carrier C → Carrier D
+open Map
+identity : (C : Shape) → Map C C
+identity C .apply x = x
+cell-map : (C D : Shape) → {family} C D → Map C D
+cell-map = {{!!}}
+"""
+                result = self.solve(source, ranker=ranker)
+                self.assertEqual(result.status, "verified", result.diagnostics)
+                self.assertTrue(result.validation["fresh_process"])
+                self.assertGreater(
+                    result.search_stats["copattern_clauses_generated"], 0
+                )
+                self.assertGreater(
+                    result.search_stats["case_queries"],
+                    result.search_stats["result_split_queries"],
+                )
+                self.assertIn(constructor, result.patch["replacement"])
+
+    def test_rejected_argument_splits_preserve_corecursive_construction(self):
+        calls = []
+        root_lhs = []
+
+        def initial_projections_only(parent, generated):
+            if not root_lhs:
+                root_lhs.append(parent)
+            return parent == root_lhs[0] and _is_result_projection(parent, generated)
+
+        def defer_first_slice(*args, **kwargs):
+            if kwargs.get("copattern_call") is not None:
+                calls.append(kwargs)
+                if kwargs["action_budget"] <= calls[0]["action_budget"]:
+                    # Refuse before touching the kernel, preserving the parent
+                    # state just as an exhausted construction slice must.
+                    stats = ConstructorStats()
+                    kwargs["on_statistics"](stats)
+                    return ConstructorResult(
+                        "resource-exhausted", (), stats, "test slice refusal"
+                    )
+            return constructor_tree_prove(*args, **kwargs)
+
+        with (
+            patch("agdaprover.case_search.constructor_tree_prove", defer_first_slice),
+            # Characterize rejection of further projection edits as well as
+            # Agda's real rejection of the abstract argument splits.
+            patch(
+                "agdaprover.case_search._is_result_projection", initial_projections_only
+            ),
+        ):
+            result = self.solve(specimen())
+        self.assertEqual(
+            result.status,
+            "verified",
+            (result.diagnostics, [c["action_budget"] for c in calls]),
+        )
+        self.assertTrue(result.validation["fresh_process"])
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertEqual(calls[0]["copattern_call"], calls[1]["copattern_call"])
+        self.assertTrue(
+            any(c["action_budget"] > calls[0]["action_budget"] for c in calls[1:])
+        )
+        self.assertGreater(
+            result.search_stats["case_queries"],
+            result.search_stats["result_split_queries"],
+        )
 
     def test_function_valued_copattern_field_can_recurse_after_introduction(self):
         result = self.solve(specimen(function_field=True))
