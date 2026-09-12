@@ -195,15 +195,25 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
       compatible Nothing _ = True
       compatible _ Nothing = True
       compatible (Just wanted) (Just offered) = wanted == offered
-      applications expected scope expression infos = go expression infos
+      applications expected scope expression infos = do
+        inferred <- go False False expression infos
+        -- Hiding is an inference preference, not a restriction on supplying
+        -- an operand. Keep the original inference-first spine, then expose
+        -- hidden/instance operands as native interaction holes as well. This
+        -- is linear in the telescope, not a powerset of omission patterns.
+        supplied <- if any (notVisible . fst) infos
+          then go True False expression infos else pure []
+        pure $ inferred ++ supplied
        where
-        go _ [] = pure []
-        go function ((info, result):rest) = do
-          operand <- if getHiding info == NotHidden then freshHole scope
+        go _ _ _ [] = pure []
+        go supplyHidden hiddenSeen function ((info, result):rest) = do
+          operand <- if visible info || supplyHidden then freshHole scope
             else Construction.omittedField (getHiding info)
           let applied = A.app function [Arg info $ unnamed operand]
-          suffix <- go applied rest
-          pure $ if getHiding info == NotHidden && compatible expected result
+              withHidden = hiddenSeen || notVisible info
+              include = if supplyHidden then withHidden else visible info
+          suffix <- go supplyHidden withHidden applied rest
+          pure $ if include && compatible expected result
             then applied:suffix else suffix
   -- Unification in a sibling can solve a meta without retiring its source
   -- interaction. Use Agda's own scoped solution (including its permutation)
@@ -435,8 +445,9 @@ clauseProposals stats limits models mode native emit namespace excluded target =
         Datatype{} -> Just False
         _ -> Just True
       I.El _ I.Sort{} -> pure $ Just False
+      I.El _ I.Var{} -> pure $ Just False
       _ -> pure $ Just True
-  -- A rigid datatype/sort result has no fields or trailing arguments. Asking
+  -- A rigid datatype, sort or local type has no fields or trailing arguments. Asking
   -- make_case to expose the already-generated helper's hidden parameters only
   -- wraps the same obligation again. Explicit user commands remain available.
   pure $ [(ClauseExecution.UserAction Clause.splitResult, []) | resultAvailable /= Just False] ++ refinements

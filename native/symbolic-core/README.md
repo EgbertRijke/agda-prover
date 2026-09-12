@@ -373,6 +373,19 @@ warrant discarding an application. Hidden arguments and dependent indices are st
 inferred by Agda when the proposal is checked. This avoids queuing provably
 unrelated heads without replacing conversion with textual type comparisons.
 
+Hidden and instance operands are not limited to inference-only applications.
+The primitive catalogue retains those original forms and also offers prefixes
+with supplied interaction holes, including hidden operands after explicit ones.
+The two native spines grow linearly with the telescope; no omission-pattern
+powerset is generated. Agda still instantiates dependent types in the same
+branch, and unresolved hidden metas never qualify as a closed proof.
+
+Autonomous result splitting omits rigid local-type leaves as well as known
+datatype/sort leaves: these have no fields or trailing function arguments to
+expose. It does not repeatedly wrap them in empty local helpers. Dependent
+variable elimination, function/record result splitting and explicit user
+commands remain available.
+
 Native constructor closures introduce the expected telescope and finish with a
 visible constructor that has no fields. They retain binder hiding and native
 identities; Agda, not the generator, decides whether result indices match.
