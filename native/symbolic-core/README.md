@@ -196,6 +196,12 @@ subgoals inherit that selection; unselected original goals stay in the same
 coupled state without being scheduled. Candidate replies report both the
 selection and all remaining obligations. Selected candidates need source
 reconstruction and independent validation, not a whole-file closure claim.
+When no source goals remain, explicit selection requires the same zero-meta,
+zero-constraint closure as an unselected whole run. An implicit metavariable is
+not a completed proof merely because its source interaction has disappeared.
+Rejected source exports report their status, pending counts and kernel detail,
+not a second serialized copy of every proof tree. The diagnostic text uses the
+existing presentation allowance; proof structures and search are not truncated.
 
 The Python bridge exposes a supervised resident connection for these coarse
 requests. One prepared overlay, process and resource/output envelope cover all

@@ -6,8 +6,37 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from ..bridge.contracts import MAX_DIAGNOSTIC_BYTES
 from ..bridge.symbolic import SymbolicProtocolError
 from ..contracts import ProverResult, StepResult
+
+
+def reconstruction_failure(outcome: dict[str, Any]) -> str:
+    """Describe a rejected export without serializing its proof payload again."""
+    fields = ["native source export"]
+    for key in ("status", "reason"):
+        value = outcome.get(key)
+        if isinstance(value, str):
+            fields.append(value[:MAX_DIAGNOSTIC_BYTES])
+    pending = outcome.get("pending")
+    if isinstance(pending, dict):
+        goals = pending.get("goals")
+        if isinstance(goals, list):
+            fields.append(f"open goals={len(goals)}")
+        for key in ("metas", "constraints"):
+            value = pending.get(key)
+            if type(value) is int and value >= 0:
+                fields.append(f"{key}={value}")
+    detail = outcome.get("detail")
+    if isinstance(detail, str):
+        fields.append(detail[:MAX_DIAGNOSTIC_BYTES])
+    # This existing presentation limit never truncates proof terms or search.
+    message = "; ".join(fields).encode("utf-8")
+    if len(message) > MAX_DIAGNOSTIC_BYTES:
+        suffix = b" [diagnostic truncated]"
+        message = message[: MAX_DIAGNOSTIC_BYTES - len(suffix)]
+        return message.decode("utf-8", errors="ignore") + suffix.decode()
+    return message.decode("utf-8")
 
 
 @dataclass

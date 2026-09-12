@@ -116,10 +116,11 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
             selectedPending = maybe ordered (\chosen -> filter (`Set.member` chosen) ordered) selected
         if maybe False (/= S.stateKey state) stepParent then pure $ A.Candidate state
         else if null selectedPending then
-          -- Partial selection is only a candidate relative to remaining source
-          -- holes, never apparent global closure. Export/fresh validation must
-          -- reject any unresolved selected proof or unsupported dependency.
-          pure $ if selected /= Nothing ||
+          -- Partial selection is only a candidate relative to *remaining*
+          -- source holes, never apparent global closure. Selecting every
+          -- source goal explicitly must not hide an unsolved implicit meta.
+          -- Export/fresh validation still checks partial dependencies.
+          pure $ if not (null ordered) ||
               (pendingMetas obligations == 0 && pendingConstraints obligations == 0)
             then A.Candidate state else A.Stuck
         else require (plan config state obligations { pendingGoals = selectedPending }) >>= \case

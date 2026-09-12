@@ -42,7 +42,7 @@ from ..validation import (
 )
 from ..verifier_budget import VerifierCallLimitExceeded, VerifierCallScope
 from .native_models import load_native_models
-from .native_receipts import NativeReceipts
+from .native_receipts import NativeReceipts, reconstruction_failure
 from .native_refutation import (
     CERTIFICATE_SCHEMA,
     FILENAME,
@@ -437,7 +437,10 @@ class NativeProofEngine:
                         "accepted-partial",
                     }:
                         result.diagnostics.append(
-                            {"kind": "reconstruction", "message": str(exported)}
+                            {
+                                "kind": "reconstruction",
+                                "message": reconstruction_failure(exported),
+                            }
                         )
                         continue
                     entries = exported.get("entries", [])
