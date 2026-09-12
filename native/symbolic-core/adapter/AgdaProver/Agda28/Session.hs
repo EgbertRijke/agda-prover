@@ -151,9 +151,12 @@ termProposalChoices (TermProposal _ _ choices _) = choices
 -- Preserve checked-source abstract syntax as well as internal evidence. Agda's
 -- display reifier may use postfix projections: display syntax is not a draft
 -- to send straight back to checkExpr without scope elaboration.
-data Allocation = Allocation NameId InteractionId
-data Draft = TextDraft DraftExpression | NativeDraft A.Expr Allocation
-data DraftAction = DraftAction InteractionId Draft
+-- A replay recipe must not retain a suspended lens read of the entire TCState.
+-- Force the small allocation watermark when sealing the recipe, not only when
+-- it is replayed: its source checkpoint may be evicted long before then.
+data Allocation = Allocation !NameId !InteractionId
+data Draft = TextDraft DraftExpression | NativeDraft A.Expr !Allocation
+data DraftAction = DraftAction !InteractionId !Draft
 -- Agda's A.Expr equality deliberately ignores some scope/presentation fields.
 -- Do not use it (or a rendered/hashed type) as an exact application witness.
 -- An issued identity seals the original proposal's full native draft/allocation.
@@ -163,7 +166,9 @@ data ApplicationKey = ApplicationKey StateKey InteractionId ActionIdentity
   deriving (Eq, Ord)
 data Branch = Branch
   { branchState :: Maybe TCState, branchTrail :: Maybe (Integer, DraftAction)
-  , branchOrigins :: Map.Map InteractionId (Maybe Recursion.Owner)
+  -- Building this map consults the previous Owner. Leaving it suspended keeps
+  -- that owner's pre-eviction snapshot map alive through an unrelated recipe.
+  , branchOrigins :: !(Map.Map InteractionId (Maybe Recursion.Owner))
   , branchApplication :: Maybe ApplicationKey }
 type role Owner nominal
 data Owner s = Owner
@@ -694,7 +699,7 @@ check session owner parent initial (DraftAction point expression) isReplay = do
           kind | not (null $ pendingGoals obligations) = AcceptedPartial
                | pendingMetas obligations > 0 || pendingConstraints obligations > 0 = AcceptedBlocked
                | otherwise = ApparentlyClosed
-      pure (next, Right $ Transition ref kind obligations $
+      draft `seq` pure (next, Right $ Transition ref kind obligations $
         CheckedEvidence ref abstract term target telescope)
 
 expectedWarning :: TCWarning -> Bool
@@ -832,8 +837,18 @@ replay session ref = do
   if ownerClosed owner then pure (Left ClosedSession) else
     request session rootRef $ \current _ -> case trail current (keyBranch key) [] of
       Left failure -> pure (current, Left failure)
-      Right (ancestor, state, actions) ->
-        go current (StateRef key { keyBranch = ancestor }) state actions
+      Right (ancestor, state, actions) -> do
+        (rebuilt, result) <- go current (StateRef key { keyBranch = ancestor }) state actions
+        -- Replay publishes only its final handle. Intermediate checkpoints
+        -- have no caller lease; keep their recipes for ancestry, not their
+        -- resident TCStates. Never touch a pre-existing caller-owned handle.
+        let published = either (const Nothing) (Just . keyBranch . stateKey) result
+            unpublished = [number | number <- [ownerNext current .. ownerNext rebuilt - 1],
+              Just number /= published]
+            retired = foldr (\number branches -> Map.adjust
+              (\branch -> branch { branchState = Nothing }) number branches)
+              (ownerBranches rebuilt) unpublished
+        pure (rebuilt { ownerBranches = retired }, result)
  where
   trail owner number actions = case Map.lookup number (ownerBranches owner) of
     Nothing -> Left UnknownState

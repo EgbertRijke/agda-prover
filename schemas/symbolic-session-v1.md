@@ -224,7 +224,12 @@ counts: retain the last snapshot and receipt and mark final work unknown.
 Input frames default to 16 MiB. `AGDAPROVER_SYMBOLIC_FRAME_BYTES` changes this
 transport envelope. Oversized/unterminated frames close the connection; no
 unbounded work queue is created. Native snapshot/trail residency is caller-
-managed through eviction and process budgets for now. This envelope does not
+managed through eviction and process budgets for now. Replay publishes only
+its final handle and retires the resident snapshots of internal intermediate
+steps, including on ordinary replay failure. Their native recipes remain for
+later replay. Pre-existing caller-owned handles are never retired implicitly.
+Replay recipes strictly capture their small allocation watermarks rather than
+lazy projections that would retain evicted checking states. This envelope does not
 impose a mathematical proof-size or search-depth limit.
 
 Runtime sessions fix the loaded options/toolchain and pin the exact bytes and

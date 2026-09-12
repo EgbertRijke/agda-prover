@@ -76,6 +76,9 @@ exact source bytes around each native operation; it claims no whole-search
 speedup yet. Cancellation restores the parent without resetting work counters.
 An evicted branch can be replayed, but replay issues new keys rather than
 silently changing the meaning of old checked evidence.
+Only the final replay handle is published. Internal intermediate checkpoints
+release their resident checking state while preserving the replay recipe;
+existing caller-owned snapshots still require explicit eviction.
 
 `make-clause` delegates ordered variable batches, hidden/instance binder exposure,
 result splitting and ellipsis expansion to Agda. It retains native clauses and
