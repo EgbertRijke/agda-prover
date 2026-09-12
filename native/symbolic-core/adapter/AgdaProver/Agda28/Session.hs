@@ -10,7 +10,7 @@ module AgdaProver.Agda28.Session
   ( Session, StateRef, GoalRef, CheckedEvidence, Transition
   , withSession, stateKey, restoreReference, restoreGoalReference, goalState, goalId
   , inspect, pending, tryExpression
-  , solveEvidence
+  , solveEvidence, solveHelper
   , ClauseProposal, makeClauses, clauseView, applyClause
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
@@ -359,7 +359,25 @@ solveEvidence :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
               -> (Value -> IO ())
               -> IO (Search.SearchStats, Either Failure
                    (Search.SearchStatus, Maybe (Transition s), [(T.Text,T.Text)]))
-solveEvidence session goal limits models mode native enableFocused excluded emit = do
+solveEvidence session goal limits models mode native enableFocused excluded emit =
+  runGoalSearch session goal $ \stats namespace point origin validate target ->
+    Search.run stats limits models mode native enableFocused emit namespace excluded point origin validate target
+
+solveHelper :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
+            -> Policy.RankingMode -> Maybe (NativeScorer n) -> ObservationMode -> DraftExpression
+            -> (Value -> IO ())
+            -> IO (Search.SearchStats, Either Failure
+                 (Search.SearchStatus, Maybe (Transition s), [(T.Text,T.Text)]))
+solveHelper session goal limits models mode native view expression emit =
+  runGoalSearch session goal $ \stats namespace point _ validate target ->
+    Search.runHelper stats limits models mode native emit namespace point view expression validate target
+
+runGoalSearch :: Session s -> GoalRef s
+              -> (IORef Search.SearchStats -> String -> InteractionId -> Maybe Recursion.Owner
+                  -> (A.Expr -> TCM ()) -> I.Type -> TCM Search.Result)
+              -> IO (Search.SearchStats, Either Failure
+                   (Search.SearchStatus, Maybe (Transition s), [(T.Text,T.Text)]))
+runGoalSearch session goal search = do
   stats <- newIORef Search.emptyStats
   outcome <- request session (goalState goal) $ \owner state -> do
     ledger <- work session
@@ -379,7 +397,7 @@ solveEvidence session goal limits models mode native enableFocused excluded emit
               changed <- Set.difference <$> useTC stTCWarnings <*> pure warnings
               let bad = filter (not . expectedWarning) (Set.toAscList changed)
               unless (null bad) $ genericError $ unlines $ map tcWarningString bad
-        Right <$> Search.run stats limits models mode native enableFocused emit namespace excluded point origin validate target
+        Right <$> search stats namespace point origin validate target
     case searched >>= id of
       Left failure -> pure (owner, Left failure)
       Right (Search.Result status Nothing selected) -> pure (owner, Right (status, Nothing, selected))
@@ -390,7 +408,9 @@ solveEvidence session goal limits models mode native enableFocused excluded emit
   observed <- readIORef stats
   charge (sessionWork session) $ \w -> w
     { checkingAttempts = checkingAttempts w + Search.workUnits observed
-    , rejectedChecks = rejectedChecks w + Search.rejectedQueries observed }
+    , rejectedChecks = rejectedChecks w + Search.rejectedQueries observed
+    , helperQueries = helperQueries w + Search.helperInferenceQueries observed
+    , clauseQueries = clauseQueries w + Search.helperClauseQueries observed }
   pure (observed, outcome)
 
 check :: Session s -> Owner -> StateRef s -> TCState -> DraftAction -> Bool

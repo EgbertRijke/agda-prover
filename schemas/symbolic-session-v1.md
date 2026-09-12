@@ -54,6 +54,7 @@ Each operation permits only its listed additional fields:
 | `make-clause` | `state`, `goal_id`, `action` | Parent-bound native clause proposal, not a child state |
 | `apply-clause` | `state`, `goal_id`, `action` | Checked native helper/clause child, evidence view and dependent obligations |
 | `infer-helper` | `state`, `goal_id`, `mode`, `application` | Parent-bound native helper signature, not a proof transition |
+| `solve-helper` | `state`, `goal_id`, `mode`, `application`, `limits`, `ranker`, `model_path`, `native_path` | Finite native helper search with the ordinary provisional candidate/cost result |
 | `solve-evidence` | `state`, `goal_id`, `limits`, `ranker`, `model_path`, `native_path`, `exclude_names`; optional `focused_model_path`, `focused_search` | Search status, provisional child/evidence, cumulative search cost, selected policy choices |
 | `evict` | `state` | Drop child snapshot; preserve replay ancestry |
 | `replay` | `state` | Rechecked state key (resident states are returned unchanged) |
@@ -200,6 +201,31 @@ Success and failure charge `checking_attempts` and `helper_queries`, not
 `accepted_checks`; invalid state/goal and kernel failures retain the ordinary
 session failure semantics. Finite helper construction and autonomous use are
 separate operations, not implied by successful type inference.
+
+### Finite helper construction
+
+`solve-helper` uses the inferred native signature to generate the existing finite
+fragment: split one explicit operand of a one-constructor datatype or inductive
+record, then return one available explicit argument or constructor field. The
+supplied application's native spine determines helper inputs; a returned
+function does not become extra input to split. Agda generates the clauses, checks
+their dependent indices and coverage, and enforces relevance and without-K.
+Coinductive splitting, multi-constructor coverage and arbitrary helper-body
+synthesis are outside this operation. Ordinary evidence search remains separate.
+
+Generated clauses and signatures remain native syntax. Speculative definitions
+are rolled back; allocation high-water marks protect retained names. Complete
+proposals pass through the existing evidence-application NNUE decision family
+and the same original-parent transition/checking boundary as `solve-evidence`.
+The model/native-path options have the same role and artifact checks, and
+`limits` uses the same work-unit contract. Preparation queries, scaffold checks,
+clause generation and candidate checks are all charged; helper counters are
+subsets of inference/checker work, not extra uncharged work or proof credit.
+
+Its result has the same search status, provisional candidate, cost and selected
+choice fields as `solve-evidence`. A candidate is not freshly verified by this
+native operation. Choosing which application to generalize in a larger run is
+an agenda responsibility; `solve-helper` does not invent that task input.
 
 ## Evidence operation
 

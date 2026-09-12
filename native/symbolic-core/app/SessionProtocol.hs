@@ -35,6 +35,8 @@ data Operation = Pending StateKey | Observe StateKey InteractionId P.Observation
   | MakeClause StateKey InteractionId ClauseAction
   | ApplyClause StateKey InteractionId ClauseAction
   | InferHelper StateKey InteractionId P.ObservationMode DraftExpression
+  | SolveHelper StateKey InteractionId Search.SearchLimits Policy.RankingMode (Maybe FilePath) (Maybe FilePath)
+      P.ObservationMode DraftExpression
   | Cost | Cancel | Close
 data Request = Request Integer Operation
 data Active = Active Integer ThreadId (MVar ())
@@ -81,6 +83,15 @@ parseRequest = withObject "session request" $ \o -> do
     "apply-clause" -> do
       fields ["state", "goal_id", "action"]
       ApplyClause <$> o .: "state" <*> goal <*> o .: "action"
+    "solve-helper" -> do
+      fields ["state", "goal_id", "limits", "ranker", "model_path", "native_path", "mode", "application"]
+      mode <- o .: "ranker" >>= \case
+        ("nnue" :: String) -> pure Policy.Learned
+        "symbolic" -> pure Policy.Symbolic
+        _ -> fail "unknown ranker"
+      view <- o .: "mode" >>= maybe (fail "unknown observation mode") pure . P.parseMode
+      SolveHelper <$> o .: "state" <*> goal <*> o .: "limits" <*> pure mode
+        <*> o .: "model_path" <*> o .: "native_path" <*> pure view <*> (DraftExpression <$> o .: "application")
     "solve-evidence" -> do
       fields $ ["state", "goal_id", "limits", "ranker", "model_path", "native_path", "exclude_names"]
         ++ filter (`KM.member` o) ["focused_model_path", "focused_search"]
@@ -209,13 +220,23 @@ perform session emit operation = case operation of
   Give key goal expression -> resolvedGoal key goal $ \ref -> do
     answer <- S.tryExpression session ref expression
     checkedResult answer
-  SolveEvidence key goal limits mode modelPath focusedPath nativePath enableFocused excluded -> resolvedGoal key goal $ \ref -> do
+  SolveEvidence key goal limits mode modelPath focusedPath nativePath enableFocused excluded ->
+    solve key goal limits mode modelPath focusedPath nativePath enableFocused excluded Nothing
+  SolveHelper key goal limits mode modelPath nativePath view expression ->
+    solve key goal limits mode modelPath Nothing nativePath False [] (Just (view, expression))
+  Evict key -> resolved key $ \ref -> result (const $ object ["status" .= ("evicted" :: String)]) <$> S.evict session ref
+  Replay key -> resolved key $ \ref -> result (\state -> object ["state" .= S.stateKey state]) <$> S.replay session ref
+  _ -> pure $ failureView (KernelFailure "control-dispatched-as-work")
+ where
+  solve key goal limits mode modelPath focusedPath nativePath enableFocused excluded helper = resolvedGoal key goal $ \ref -> do
     loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
     focused <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.FocusedBranch)) focusedPath
     case ((++) <$> loaded <*> focused) >>= Policy.models of
       Left reason -> pure $ failureView $ KernelFailure ("model-configuration:" ++ reason)
       Right models -> withNativeScorer nativePath $ \native -> do
-        (stats, answer) <- S.solveEvidence session ref limits models mode native enableFocused excluded emit
+        (stats, answer) <- case helper of
+          Nothing -> S.solveEvidence session ref limits models mode native enableFocused excluded emit
+          Just (view, expression) -> S.solveHelper session ref limits models mode native view expression emit
         case answer of
           Left failure -> pure $ object ["search_cost" .= stats, "failure" .= failureView failure]
           Right (status, candidate, selected) -> do
@@ -229,10 +250,6 @@ perform session emit operation = case operation of
               "model_id" .= either (const Nothing) (fmap Model.modelId . safeHead) loaded,
               "focused_model_id" .= either (const Nothing) (fmap Model.modelId . safeHead) focused,
               "proof_authority" .= False]
-  Evict key -> resolved key $ \ref -> result (const $ object ["status" .= ("evicted" :: String)]) <$> S.evict session ref
-  Replay key -> resolved key $ \ref -> result (\state -> object ["state" .= S.stateKey state]) <$> S.replay session ref
-  _ -> pure $ failureView (KernelFailure "control-dispatched-as-work")
- where
   resolved key action = either (pure . failureView) action (S.restoreReference session key)
   resolvedGoal key goal action = either (pure . failureView) action (S.restoreGoalReference session key goal)
   result encodeResult = either failureView encodeResult

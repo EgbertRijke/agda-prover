@@ -37,6 +37,7 @@ data SearchStats = SearchStats
   , focusedNodes :: !Integer, focusedCacheHits :: !Integer, focusedCycles :: !Integer
   , focusedCandidates :: !Integer
   , recordObservationQueries :: !Integer, projectedSeeds :: !Integer
+  , helperInferenceQueries :: !Integer, helperClauseQueries :: !Integer, helperProposals :: !Integer
   , searchNodes :: !Integer, depthIterations :: !Integer, currentDepth :: !Int
   , modelItems :: !Integer, modelNanoseconds :: !Integer, policyDecisions :: !Integer
   , workExhausted :: !Bool }
@@ -53,6 +54,7 @@ emptyStats = SearchStats
   , focusedObservationQueries = 0, focusedActions = 0
   , focusedNodes = 0, focusedCacheHits = 0, focusedCycles = 0, focusedCandidates = 0
   , recordObservationQueries = 0, projectedSeeds = 0
+  , helperInferenceQueries = 0, helperClauseQueries = 0, helperProposals = 0
   , searchNodes = 0, depthIterations = 0, currentDepth = 0
   , modelItems = 0, modelNanoseconds = 0, policyDecisions = 0
   , workExhausted = False }
@@ -75,6 +77,8 @@ instance ToJSON SearchStats where
     ,"focused_candidates" .= focusedCandidates s
     ,"record_observation_queries" .= recordObservationQueries s
     ,"projected_seeds" .= projectedSeeds s
+    ,"helper_inference_queries" .= helperInferenceQueries s
+    ,"helper_clause_queries" .= helperClauseQueries s, "helper_proposals" .= helperProposals s
     ,"depth_iterations" .= depthIterations s, "current_depth" .= currentDepth s
     ,"model_items_scored" .= modelItems s, "model_elapsed_ns" .= modelNanoseconds s
     ,"policy_decisions" .= policyDecisions s, "work_exhausted" .= workExhausted s]

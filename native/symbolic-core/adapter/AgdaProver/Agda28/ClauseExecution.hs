@@ -1,7 +1,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.ClauseExecution (PreparationStep (..), prepare, registerDraft) where
+module AgdaProver.Agda28.ClauseExecution (PreparationStep (..), prepare, registerDraft, patternLocals) where
 
 import Control.Monad (forM, void, when)
 import Data.List (elemIndex)

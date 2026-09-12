@@ -82,6 +82,12 @@ abstraction over compound arguments and the five observation modes. It retains
 the native signature in a parent-branded snapshot and returns Agda's rendering
 for inspection. It neither installs a helper nor claims a proof.
 
+`solve-helper` additionally searches the finite one-constructor/available-value
+helper fragment for a supplied application. Clauses come from Agda, candidates
+use the existing NNUE and checked-transition boundary, and complete results
+still require independent fresh validation. Autonomous invocation within larger
+search remains agenda work; no general helper-invention capability is claimed.
+
 ## Boundaries
 
 - `core/`: compiler-independent protocol, feature views and NNUE inference; no Agda internals.

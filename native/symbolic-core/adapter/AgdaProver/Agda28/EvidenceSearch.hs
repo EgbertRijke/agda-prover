@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.EvidenceSearch (run, Result (..)) where
+module AgdaProver.Agda28.EvidenceSearch (run, runHelper, Result (..)) where
 
 import Control.Monad (forM)
 import Control.Monad.Except (catchError, runExceptT, throwError)
@@ -47,11 +47,14 @@ import AgdaProver.Agda28.Construction qualified as Construction
 import AgdaProver.Agda28.Recursion qualified as Recursion
 import AgdaProver.Agda28.Scheduling qualified as Scheduling
 import AgdaProver.Agda28.Focused qualified as NativeFocused
+import AgdaProver.Agda28.HelperConstruction qualified as Helper
 import AgdaProver.Symbolic.Focused qualified as Focused
 import AgdaProver.Symbolic.Classification qualified as Classification
 import AgdaProver.Symbolic.NNUE.Features qualified as F
 import AgdaProver.Symbolic.NNUE.Native (NativeScorer)
 import AgdaProver.Symbolic.NNUE.Policy qualified as P
+import AgdaProver.Symbolic.Protocol (ObservationMode)
+import AgdaProver.Symbolic.SessionTypes (DraftExpression)
 
 -- This module is private to the versioned adapter. Drafts remain Agda abstract
 -- syntax; checked values/types remain Agda internal syntax under the live TCM.
@@ -98,6 +101,40 @@ run stats limits models mode native enableFocused emit namespace excluded point 
           Nothing | not widened -> pure $ Result FragmentExhausted Nothing []
           Nothing -> iterateDepth (depth + 1)
   iterateDepth 0
+
+-- Finite typed helper proposals use the same policy/checking boundary as
+-- ordinary evidence. Scheduling which application to generalize belongs to
+-- the agenda; the caller supplies that scoped task input here.
+runHelper :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode -> Maybe (NativeScorer s)
+          -> (Value -> IO ()) -> String -> InteractionId -> ObservationMode -> DraftExpression
+          -> (A.Expr -> TCM ()) -> I.Type -> TCM Result
+runHelper stats limits models mode native emit namespace point view application validate target = do
+  pruned <- liftIO $ newIORef False
+  let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
+      allow step = charge runtime $ \s -> case step of
+        Helper.InferSignature -> s { inferenceQueries = inferenceQueries s + 1,
+          helperInferenceQueries = helperInferenceQueries s + 1 }
+        Helper.InspectSignature -> s { inferenceQueries = inferenceQueries s + 1 }
+        Helper.CheckScaffold -> s { checkerQueries = checkerQueries s + 1 }
+        Helper.GenerateClauses -> s { checkerQueries = checkerQueries s + 1,
+          helperClauseQueries = helperClauseQueries s + 1 }
+      rejected = modify runtime $ \s -> s { rejectedQueries = rejectedQueries s + 1 }
+  proposals <- Helper.generate allow rejected point view application
+  let expressions = maybe [] id proposals
+  modify runtime $ \s -> s { helperProposals = helperProposals s + fromIntegral (length expressions) }
+  seeds <- mapM (describe runtime "helper") expressions
+  ranked <- rankDescribed runtime Classification.unknownClassification target seeds
+  found <- choices runtime
+    [queryCheck runtime expression target $ \term -> do
+      closed <- instantiateFull term
+      if not (noMetas closed) then pure Nothing else do
+        allowed <- charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }
+        if not allowed then pure Nothing else validate expression >> pure (Just (expression, picked))
+    | (Seed expression _ _, picked) <- ranked]
+  exhausted <- stopped runtime
+  pure $ case found of
+    Just (expression, picked) -> Result FoundCandidate (Just expression) picked
+    Nothing -> Result (if exhausted then WorkExhausted else FragmentExhausted) Nothing []
 
 modify :: Runtime s -> (SearchStats -> SearchStats) -> TCM ()
 modify (Runtime _ ref _ _ _ _ _ _ _) f = liftIO $ atomicModifyIORef' ref $ \s -> (f s, ())
@@ -210,7 +247,7 @@ describe runtime origin expression = do
   pure $ Seed expression origin (maybe "unknown" id info)
 
 rankSeeds :: Runtime s -> Classification.Classification -> I.Type -> [A.Expr] -> TCM [(Seed, [(T.Text, T.Text)])]
-rankSeeds runtime@(Runtime _ ref _ models mode native emit namespace _) classification target globals = do
+rankSeeds runtime classification target globals = do
   context <- getContext
   let locals = map (A.Var . ctxEntryName) context
       visibleFields = Set.fromList [name | A.Proj _ (I.AmbQ names) <- globals, name <- toList names]
@@ -240,6 +277,12 @@ rankSeeds runtime@(Runtime _ ref _ models mode native emit namespace _) classifi
     [("local", expression) | expression <- locals]
     ++ [("projected-field", expression) | expression <- recordSeeds]
     ++ [("visible", expression) | expression <- globals, expression `notElem` locals]
+  rankDescribed runtime classification target seeds
+
+rankDescribed :: Runtime s -> Classification.Classification -> I.Type -> [Seed]
+              -> TCM [(Seed, [(T.Text, T.Text)])]
+rankDescribed _ _ _ [] = pure []
+rankDescribed runtime@(Runtime _ ref _ models mode native emit namespace _) classification target seeds = do
   targetText <- T.pack . prettyShow <$> prettyTCM target
   stats <- liftIO $ readIORef ref
   let ordinal = policyDecisions stats
