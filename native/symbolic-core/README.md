@@ -324,9 +324,10 @@ and application continuations without dropping either. Evidence-policy traces
 include the same classification supplied to the unchanged feature encoder.
 
 Primitive application proposals retain Agda's inferred telescope and compare
-only rigid result shapes: functions, universes, and actual datatype/record
-identities. A stuck family, variable or meta remains unknown and never warrants
-discarding an application. Hidden arguments and dependent indices are still
+only rigid result shapes: functions, universes, actual datatype/record identities,
+and fixed parameters of the current goal. Parameters introduced while inspecting
+a function's telescope, stuck definitions and metas remain unknown and never
+warrant discarding an application. Hidden arguments and dependent indices are still
 inferred by Agda when the proposal is checked. This avoids queuing provably
 unrelated heads without replacing conversion with textual type comparisons.
 

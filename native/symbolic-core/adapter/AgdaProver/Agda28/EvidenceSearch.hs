@@ -71,10 +71,11 @@ data Runtime s = Runtime SearchLimits (IORef SearchStats) (IORef Bool)
 data Seed = Seed A.Expr String String
 data GlobalInventory = GlobalInventory [A.Expr] (Set.Set QName) (Maybe Recursion.CallContext)
 
--- Only rigid type heads can witness a mismatch. A stuck definition, variable
--- or meta is unknown, not an incompatible family. Argument/index conversion
--- and universe comparison remain Agda's responsibility.
-data ExpectedShape = FunctionShape | SortShape | FamilyShape QName deriving Eq
+-- Only rigid type heads can witness a mismatch. A stuck definition, newly
+-- introduced telescope variable or meta is unknown. LocalShape identifies a
+-- binder in the original goal context, never a printed name. Argument/index
+-- conversion and universe comparison remain Agda's responsibility.
+data ExpectedShape = FunctionShape | SortShape | FamilyShape QName | LocalShape Int deriving Eq
 
 run :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode -> Maybe (NativeScorer s)
     -> Bool -> (Value -> IO ()) -> String -> [String] -> InteractionId -> Maybe Recursion.Owner
@@ -156,6 +157,7 @@ primitiveProposals :: IORef SearchStats -> SearchLimits -> P.Models -> P.Ranking
                    -> TCM [(A.Expr, [(T.Text, T.Text)])]
 primitiveProposals stats limits models mode native emit namespace excluded owner target = do
   pruned <- liftIO $ newIORef False
+  originalSize <- getContextSize
   let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
       freshHole scope = do
         point <- registerInteractionPoint False noRange Nothing
@@ -168,6 +170,14 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
             pure (if visible domain then Just FunctionShape else result,
               (getArgInfo domain, result):rest)
           I.El _ (I.Sort _) -> pure (Just SortShape, [])
+          I.El _ (I.Var index _) -> do
+            -- Parameters from the original goal are rigid, but variables
+            -- introduced while inspecting a function's telescope can be
+            -- instantiated by its application. Account for actual context
+            -- extension: Agda's NoAbs does not introduce a new binder.
+            introduced <- subtract originalSize <$> getContextSize
+            pure (if index >= introduced
+              then Just $ LocalShape (index - introduced) else Nothing, [])
           I.El _ (I.Def name _) -> getConstInfo name >>= \definition -> pure
             (case theDef definition of
               Datatype{} -> Just $ FamilyShape name
