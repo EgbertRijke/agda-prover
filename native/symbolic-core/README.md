@@ -342,6 +342,10 @@ disables that cross-goal scheduling without changing the resource envelope.
 Source assignments inferred by Agda are retrieved through its solved-goal
 operation, then checked and recorded as ordinary reconstructible moves. No
 interaction is silently removed or accepted on the strength of a meta count.
+Partially inferred values retain their native structure, with missing values
+reintroduced as explicit, fresh interaction holes through Agda's elaboration
+view. They never carry anonymous meta identities into source reconstruction;
+checking the proposal in its original branch preserves coupled constraints.
 
 The agenda's optional `progress_ordering` uses spent cost plus sixteen units
 per remaining selected interaction. This soft estimate lets a completed prefix

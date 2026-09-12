@@ -163,6 +163,9 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
       freshHole scope = do
         freshPoint <- registerInteractionPoint False noRange Nothing
         pure $ A.QuestionMark (Info.emptyMetaInfo { Info.metaScope = scope }) freshPoint
+      explicitHole info = do
+        freshPoint <- registerInteractionPoint False noRange Nothing
+        pure $ A.QuestionMark (info { Info.metaNumber = Nothing, Info.metaRange = noRange }) freshPoint
       signature ty = do
         allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
         if not allowed then pure (Nothing, []) else reduce ty >>= \case
@@ -211,12 +214,19 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
         InstV{} -> do
           arguments <- getContextArgs
           value <- instantiateFull $ I.MetaV meta $ map I.Apply arguments
-          -- Agda's False flag excludes only a meta at the root. A lambda or
-          -- record containing unresolved metas is not yet a reconstructible
-          -- assignment: retiring its interaction would hide those obligations.
-          if not (noMetas value) then pure Nothing else do
-            solutions <- Basic.getSolvedInteractionPoints False AsIs
-            pure $ lookup point [(p, expression) | (p, _, expression) <- solutions]
+          -- Retain Agda's inferred structure, but never its anonymous meta
+          -- identities in a replayable draft. Its elaboration presentation
+          -- exposes missing values as holes; each occurrence gets a fresh
+          -- interaction so normal checking records explicit obligations.
+          solutions <- locallyTC ePrintMetasBare (const $ not $ noMetas value) $
+            Basic.getSolvedInteractionPoints False AsIs
+          case lookup point [(p, expression) | (p, _, expression) <- solutions] of
+            Nothing -> pure Nothing
+            Just expression | noMetas value -> pure $ Just expression
+            Just expression -> Just <$> traverseExpr (\case
+              A.QuestionMark info _ -> explicitHole info
+              A.Underscore info -> explicitHole info
+              part -> pure part) expression
         _ -> pure Nothing
   let assignedProposals = maybe [] (\expression -> [(expression, [])]) assigned
   (forbiddenHere, _) <- excludedGlobals excluded
