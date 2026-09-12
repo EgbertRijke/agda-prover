@@ -23,6 +23,7 @@ from .contracts import (
     DiagnosticPhase,
 )
 from .overlay import library_arguments
+from .process_io import write_process_input
 from .resources import (
     CancellationToken,
     OwnedProcess,
@@ -262,30 +263,13 @@ class AgdaJsonTransport:
         wire: bytes,
         command_id: CommandId,
     ) -> int:
-        if process.stdin is None:
-            raise BrokenPipeError("Agda input pipe is closed")
-        descriptor = process.stdin.fileno()
-        written = 0
-        while written < len(wire):
-            self.supervisor.check(process, command_id=command_id)
-            remaining = self.budget.deadline - time.monotonic()
-            if remaining <= 0:
-                raise self._error(
-                    BridgeFailure.TIMEOUT,
-                    "agda-input-timeout",
-                    "timed out writing an Agda interaction command",
-                    command_id,
-                )
-            _, ready, _ = select.select([], [descriptor], [], min(0.05, remaining))
-            if not ready:
-                continue
-            amount = os.write(descriptor, wire[written : written + 65_536])
-            if amount <= 0:
-                raise BrokenPipeError("Agda input pipe accepted no bytes")
-            written += amount
-            self.cost.add(bytes_written=amount)
-            charge_io(amount)
-        return written
+        return write_process_input(
+            process,
+            wire,
+            self.supervisor,
+            command_id=command_id,
+            wrote=lambda amount: self.cost.add(bytes_written=amount),
+        )
 
     def _prompt_position(self) -> int:
         if self._buffer.startswith(PROMPT):

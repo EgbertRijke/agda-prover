@@ -152,6 +152,12 @@ run. Versioned progress events use the current request ID. The caller still
 supervises process resources and freshly validates reconstructed source.
 See the session schema for exact fields and revision/cancellation semantics.
 
+The Python bridge exposes a supervised resident connection for these coarse
+requests. One prepared overlay, process and resource/output envelope cover all
+slices; resuming does not reset them. The existing single evidence operation
+uses this same transport. Symbolic choices remain native, and user-facing
+engine selection and full interactive workflow wiring are still pending.
+
 - `core/`: compiler-independent protocol, feature views and NNUE inference; no Agda internals.
 - `adapter/`: Agda 2.8 types, scoped snapshots, and structural codecs.
 - `app/`: process entrypoint and response/error framing.
