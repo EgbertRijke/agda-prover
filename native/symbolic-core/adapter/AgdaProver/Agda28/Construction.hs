@@ -3,26 +3,36 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.Construction
   ( recordPlan, recordExpression, projectedEvidence, omittedField, absurdLambda, eliminateEmpty
-  , constructorClosures ) where
+  , constructorClosures, constructionScaffold ) where
 
 import Control.Monad (filterM)
+import Control.Monad.Except (catchError)
+import Data.Maybe (catMaybes)
 import Data.List.NonEmpty (NonEmpty (..))
+import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 
 import Agda.Syntax.Abstract qualified as A
 import Agda.Syntax.Abstract.Name (QName)
+import Agda.Syntax.Abstract.Views (traverseExpr)
 import Agda.Syntax.Common
 import Agda.Syntax.Concrete (FieldAssignment' (..))
 import Agda.Syntax.Concrete.Name qualified as C
 import Agda.Syntax.Info (LetInfo (..), exprNoRange)
 import Agda.Syntax.Info qualified as Info
 import Agda.Syntax.Internal qualified as I
+import Agda.Syntax.Internal.MetaVars (noMetas)
 import Agda.Syntax.Position (noRange)
 import Agda.Syntax.Scope.Base (isNameInScope)
 import Agda.Syntax.Translation.InternalToAbstract (reify)
+import Agda.Interaction.BasicOps (give_)
+import Agda.Interaction.Base (UseForce (WithoutForce))
 import Agda.TypeChecking.Monad
+import Agda.TypeChecking.Constraints (noConstraints)
+import Agda.TypeChecking.Conversion (compareType)
 import Agda.TypeChecking.Records (isRecordType, recordFieldNames)
-import Agda.TypeChecking.Reduce (reduce)
+import Agda.TypeChecking.Reduce (instantiateFull, reduce)
+import Agda.TypeChecking.Rules.Term (checkExpr, inferExpr')
 import Agda.TypeChecking.Substitute (apply, absApp, raise)
 import Agda.Utils.Null (empty)
 
@@ -56,6 +66,127 @@ constructorClosures charge forbidden target = charge >>= \allowed ->
         (filter availableName constructors)
       pure [A.Con $ I.AmbQ (name :| []) | name <- names]
     _ -> pure []
+
+-- Expose a finite introduction tree, closing uniquely matching local leaves.
+-- Nondecreasing repeated families and genuine choices remain explicit goals;
+-- the ordinary agenda retains all alternatives. Each hole is created in its
+-- native dependent context, and the finished draft is still kernel-checked.
+-- This is not used by the cheap later-goal constructor-closure probe.
+constructionScaffold :: TCM Bool -> TCM Bool -> Set.Set QName -> I.Type -> TCM (Maybe A.Expr)
+constructionScaffold inspect charge forbidden target = do
+  (expression, introduced) <- build Map.empty target
+  pure $ if introduced then Just expression else Nothing
+ where
+  hole ty = do
+    scope <- getScope
+    point <- registerInteractionPoint False noRange Nothing
+    let expression = A.QuestionMark (Info.emptyMetaInfo { Info.metaScope = scope }) point
+    value <- check expression ty
+    pure (expression, value)
+  build seen ty = do
+    allowed <- inspect
+    if not allowed then genericError "native-construction-allowance-spent" else reduce ty >>= \case
+      I.El _ (I.Pi domain body) -> do
+        let hint = if I.absName body `elem` ["", "_"] then "x" else I.absName body
+        withFreshName noRange hint $ \name -> do
+          (expression, _) <- addContext (name, domain) $
+            build seen (absApp (raise 1 body) $ I.Var 0 [])
+          pure (A.Lam exprNoRange
+            (A.mkDomainFree $ Arg (getArgInfo domain) $ unnamed $ A.mkBinder_ name) expression, True)
+      normalHead@(I.El _ (I.Def family _))
+        | let size = I.termSize $ I.unEl normalHead
+        , maybe True (size <) (Map.lookup family seen) -> do
+        definition <- getConstInfo family
+        let next = Map.insert family size seen
+        case theDef definition of
+          RecordDefn record | _recInduction record /= Just CoInductive ->
+            recordPlan forbidden ty >>= \case
+              Just (names, telescope) -> do
+                assignments <- fields next names telescope
+                pure (recordExpression assignments, True)
+              Nothing -> unresolved ty
+          Datatype { dataCons = names } -> do
+            scope <- getScope
+            compatible <- filterM (\name -> localTCState $
+              (prepare name ty >> pure True) `catchError` (\_ -> pure False))
+              [name | name <- names, isNameInScope name scope, not $ Set.member name forbidden]
+            case compatible of
+              [name] -> do
+                (expression, holes) <- prepare name ty
+                completed <- fill next expression holes Map.empty
+                pure (completed, True)
+              _ -> unresolved ty
+          _ -> unresolved ty
+      _ -> unresolved ty
+  unresolved ty = do
+    locals <- if not (noMetas ty) then pure [] else do
+      context <- getContext
+      fmap catMaybes $ mapM (\entry -> localTCState $
+        (do allowed <- charge
+            if not allowed then pure Nothing else do
+              let expression = A.Var $ ctxEntryName entry
+              value <- noConstraints $ dontAssignMetas $ checkExpr expression ty
+              pure $ if noMetas value then Just expression else Nothing)
+        `catchError` (\_ -> pure Nothing)) context
+    case locals of
+      [expression] -> pure (expression, True)
+      _ -> do
+        (expression, _) <- hole ty
+        pure (expression, False)
+  checked seen ty = do
+    (expression, _) <- build seen ty
+    value <- check expression ty
+    pure (expression, value)
+  prepare name ty = do
+    let headExpression = A.Con $ I.AmbQ (name :| [])
+    available <- inspect
+    if not available then genericError "native-construction-allowance-spent" else do
+      -- Infer the actual application head, including constructor parameters.
+      -- A parameter-stripped constructor type is not the telescope accepted
+      -- by an abstract application with explicit hidden field operands.
+      (_, constructorType) <- inferExpr' DontExpandLast headExpression
+      (expression, holes, resultType) <- skeleton headExpression constructorType []
+      allowed <- charge
+      if not allowed then genericError "native-construction-allowance-spent" else
+        compareType CmpLeq resultType ty
+      _ <- check expression ty
+      pure (expression, holes)
+  check expression ty = do
+    allowed <- charge
+    if not allowed then genericError "native-construction-allowance-spent"
+      else checkExpr expression ty
+  skeleton expression ty holes = reduce ty >>= \case
+    I.El _ (I.Pi domain body) -> do
+      (operand, value) <- hole (I.unDom domain)
+      case operand of
+        A.QuestionMark _ point -> skeleton
+          (A.app expression [Arg (getArgInfo domain) $ unnamed operand]) (absApp body value)
+          (holes ++ [(point, value, getHiding domain)])
+        _ -> genericError "native-constructor-hole-unavailable"
+    _ -> pure (expression, holes, ty)
+  fill _ expression [] completed = traverseExpr (\case
+    old@(A.QuestionMark _ point) -> pure $ Map.findWithDefault old point completed
+    old -> pure old) expression
+  fill seen expression ((point, value, visibility):rest) completed = do
+    resolved <- instantiateFull value
+    if noMetas resolved then do
+      supplied <- reify resolved
+      fill seen expression rest (Map.insert point supplied completed)
+    else if visibility /= NotHidden then fill seen expression rest completed
+    else do
+      ty <- getMetaTypeInContext =<< lookupInteractionId point
+      (supplied, _) <- build seen =<< instantiateFull ty
+      allowed <- charge
+      if not allowed then genericError "native-construction-allowance-spent" else do
+        _ <- give_ False WithoutForce point Nothing supplied
+        fill seen expression rest (Map.insert point supplied completed)
+  fields _ [] I.EmptyTel = pure []
+  fields seen (name:names) (I.ExtendTel domain body) = do
+    (expression, value) <- if visible domain then checked seen (I.unDom domain)
+      else hole (I.unDom domain)
+    rest <- fields seen names (absApp body value)
+    pure $ (name, expression):rest
+  fields _ _ _ = genericError "native-record-telescope-mismatch"
 
 -- The telescope comes from Agda, already instantiated with this record's
 -- parameters. Search substitutes checked field values into it, never names or

@@ -17,7 +17,7 @@ module AgdaProver.Agda28.Session
   , Refutation.Kind (..)
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
-  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, proposeTerms, proposeConstructors, applyTerm
+  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, proposeTerms, proposeStructures, proposeConstructors, applyTerm
   , ClauseMove, clauseMoveGoal, clauseMoveIsBatch, applyClauseMove, ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
@@ -549,6 +549,11 @@ proposeTerms :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
              -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
              -> IO (Search.SearchStats, Either Failure (TermProposals s))
 proposeTerms = proposeTermsUsing Search.primitiveProposals
+
+proposeStructures :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
+                  -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
+                  -> IO (Search.SearchStats, Either Failure (TermProposals s))
+proposeStructures = proposeTermsUsing Search.structuralProposals
 
 proposeConstructors :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
                     -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())

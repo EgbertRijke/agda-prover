@@ -190,9 +190,19 @@ advance native count run@(Run session settings initial baseline metrics owner tr
       Left failure -> pure $ Left failure
       Right goal -> do
         budget <- moveAllowance
-        (termCost, terms) <- S.proposeTerms session goal budget (models settings)
+        (termCost, atomicTerms) <- S.proposeTerms session goal budget (models settings)
           (ranking settings) native (excluded settings) trace
         recordSearch termCost
+        terms <- case atomicTerms of
+          Right (S.CompleteTerms originals) | evidenceMacro settings -> do
+            compoundBudget <- moveAllowance
+            (compoundCost, structures) <- S.proposeStructures session goal compoundBudget (models settings)
+              (ranking settings) native (excluded settings) trace
+            recordSearch compoundCost
+            pure $ case structures of
+              Right (S.CompleteTerms additions) -> Right $ S.CompleteTerms $ additions ++ originals
+              other -> other
+          other -> pure other
         case terms of
           Left failure -> pure $ Left failure
           Right S.CensoredTerms{} -> pure $ Right N.PlanningCensored

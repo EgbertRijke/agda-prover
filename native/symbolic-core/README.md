@@ -289,6 +289,25 @@ The native draft retains generated helpers; replay never depends on a temporary
 checker-generated helper name. At source handoff, Agda's relative expression
 layout is anchored at the hole, including multiline typed lets.
 
+Whole-search construction can additionally expose a finite introduction tree
+in one compound action. Agda checks constructor compatibility against the
+expected indices using the complete inferred application telescope, including
+hidden parameters. A sole surviving constructor, dependent record fields and
+function binders can be expanded together; a uniquely matching, meta-free local
+can close a leaf. Genuine choices stay as explicit dependent goals. Repeated
+families expand only when their native type structure decreases, so recursive
+or growing families do not cause unbounded scaffold generation. This is a
+proposal termination guard, not an assertion about Agda termination or logical
+impossibility. Original alternatives remain available.
+
+The compound construction uses the session's usual state-bound proposal,
+checking, budget, exclusion and replay contracts. Its individual observations
+and checks count toward work, even though it is one agenda action. It is
+disabled with the existing `evidence_macro=false` scheduling switch and never
+runs as part of `start-step`; one-step editing still exposes its children.
+Constructor-headed applications and record literals also share the existing
+construction-priority tier, with model order retained within that tier.
+
 Recursive calls use the enclosing source definition and Agda's checked clause
 patterns. The current mutual group is never ordinary evidence. Dedicated calls
 can use direct descendants, function-valued children and reconstructed wrappers;

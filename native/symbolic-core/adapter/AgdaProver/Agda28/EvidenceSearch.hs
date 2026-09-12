@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.EvidenceSearch (run, runHelper, primitiveProposals, constructorProposals, clauseProposals, Result (..)) where
+module AgdaProver.Agda28.EvidenceSearch (run, runHelper, primitiveProposals, structuralProposals, constructorProposals, clauseProposals, Result (..)) where
 
 import Control.Monad (forM)
 import Control.Monad.Except (catchError, runExceptT, throwError)
@@ -21,7 +21,7 @@ import Data.Text qualified as T
 
 import Agda.Syntax.Abstract qualified as A
 import Agda.Syntax.Abstract.Name (QName)
-import Agda.Syntax.Abstract.Views (traverseExpr)
+import Agda.Syntax.Abstract.Views (AppView' (..), appView, traverseExpr)
 import Agda.Syntax.Common
 import Agda.Syntax.Common.Pretty (prettyShow)
 import Agda.Syntax.Concrete.Name qualified as C
@@ -281,8 +281,17 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
     _ -> pure []
   let constructed = [(expression, []) | expression <- closures,
         expression `notElem` map fst heads] ++ introduction ++ record
+      constructorHead expression = case appView expression of
+        Application A.Con{} _ -> True
+        _ -> False
+      -- Constructor-headed applications are introductions just as record
+      -- literals are. Keep their model order within the construction tier;
+      -- otherwise a datatype's constructor fields are scheduled as arbitrary
+      -- eliminations, while the equivalent record fields get precedence.
+      constructorHeads = [item | item@(expression, _) <- heads, constructorHead expression]
+      eliminationHeads = [item | item@(expression, _) <- heads, not $ constructorHead expression]
       ordered = if Classification.constructionFirst classification
-        then [(0, item) | item <- constructed] ++ [(1, item) | item <- heads]
+        then [(0, item) | item <- constructed ++ constructorHeads] ++ [(1, item) | item <- eliminationHeads]
         else [(0, item) | item <- heads] ++ [(1, item) | item <- constructed]
   if not (P.hasDomain models P.Refinements) || mode == P.Symbolic
     then pure $ assignedProposals ++ map snd ordered else do
@@ -298,6 +307,31 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
           pure $ F.refinementTokens goal tag (local >>= (`lookup` localTypes))
     (assignedProposals ++) <$> rankCompatible runtime P.Refinements goal
       [(tier, features expression, item) | (tier, item@(expression, _)) <- ordered]
+
+-- Compound introductions are a whole-search operation, separate from the
+-- ordinary one-step catalogue and the cheap later-goal closure probe.
+structuralProposals :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
+                    -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> [String]
+                    -> Maybe Recursion.Owner -> InteractionId -> I.Type
+                    -> TCM [(A.Expr, [(T.Text, T.Text)])]
+structuralProposals stats limits models mode native emit namespace excluded owner point target = do
+  pruned <- liftIO $ newIORef False
+  let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
+  (forbiddenHere, _) <- excludedGlobals excluded
+  inherited <- maybe (pure Set.empty) Recursion.ownerGroup owner
+  proposal <- attempt runtime $ do
+    allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+    if not allowed then pure Nothing else do
+      variable <- lookupLocalMeta =<< lookupInteractionId point
+      case mvInstantiation variable of
+        -- The ordinary catalogue already preserves Agda's assigned structure.
+        -- Do not offer a new construction in front of that exact assignment.
+        InstV{} -> pure Nothing
+        _ -> Construction.constructionScaffold
+          (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
+          (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 })
+          (Set.union forbiddenHere inherited) target
+  pure [(expression, []) | expression <- maybe [] pure proposal]
 
 -- A cheap target-directed slice for other selected joint obligations. It does
 -- not enumerate their premise catalogues or perform a hidden whole-goal search.
