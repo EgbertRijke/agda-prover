@@ -22,6 +22,7 @@ import AgdaProver.Symbolic.SessionTypes
 
 data Move s
   = Evidence (S.GoalRef s)
+  | Term (S.TermProposal s)
   | Clause (S.GoalRef s) ClauseAction
   | Helper (S.GoalRef s) ObservationMode DraftExpression
 
@@ -73,10 +74,15 @@ step session config queue = runExceptT (A.step hooks queue) >>= \case
     -- printed goals and equal endpoint types never authorize state merging.
     , A.sameState = \a b -> pure $ S.stateKey a == S.stateKey b }
   execute state move = do
-    let goal = case move of Evidence g -> g; Clause g _ -> g; Helper g _ _ -> g
+    let goal = case move of
+          Evidence g -> g
+          Term proposal -> S.termProposalGoal proposal
+          Clause g _ -> g
+          Helper g _ _ -> g
     if S.stateKey (S.goalState goal) /= S.stateKey state
       then throwError $ SessionFailure $ KernelFailure "agenda-move-parent-mismatch"
       else case move of
+        Term proposal -> liftIO (S.applyTerm session proposal) >>= transition
         Clause _ action -> liftIO (S.applyClause session goal action) >>= transition
         Evidence _ -> search $ S.solveEvidence session goal (moveLimits config)
           (models config) (ranking config) (scorer config) (focused config)

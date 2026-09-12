@@ -112,6 +112,14 @@ suspension is still pending. Planners supply moves through the typed adapter
 API; autonomous generation, source export and workflow qualification remain
 migration work. Neither layer confers proof acceptance.
 
+`proposeTerms`/`applyTerm` provide native one-move evidence, application prefixes,
+lambdas and record literals through the Haskell session API. Application arity
+comes from Agda's telescope and is not capped at ten arguments. Explicit operand
+holes and inferred hidden parameters remain coupled in the checked child;
+partial applications retain their structure. Catalogue censorship is a distinct
+typed result, not an empty completed search. Existing NNUE head ranking and
+shared structural ordering apply. Autonomous controller wiring is still pending.
+
 - `core/`: compiler-independent protocol, feature views and NNUE inference; no Agda internals.
 - `adapter/`: Agda 2.8 types, scoped snapshots, and structural codecs.
 - `app/`: process entrypoint and response/error framing.

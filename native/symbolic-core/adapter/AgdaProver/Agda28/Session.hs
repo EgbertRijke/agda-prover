@@ -13,6 +13,7 @@ module AgdaProver.Agda28.Session
   , solveEvidence, solveHelper
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal
+  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, proposeTerms, applyTerm
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
   , evict, replay, close, cancel, work, evidenceView
@@ -96,6 +97,17 @@ data ClauseProposal s = ClauseProposal (GoalRef s) Clauses.ClauseSnapshot TCStat
 
 type role HelperProposal nominal
 data HelperProposal s = HelperProposal (GoalRef s) Helpers.Snapshot TCState
+
+type role TermProposal nominal
+data TermProposal s = TermProposal (GoalRef s) Draft [(T.Text, T.Text)]
+
+data TermProposals s = CompleteTerms [TermProposal s] | CensoredTerms [TermProposal s]
+
+termProposalGoal :: TermProposal s -> GoalRef s
+termProposalGoal (TermProposal goal _ _) = goal
+
+termProposalChoices :: TermProposal s -> [(T.Text, T.Text)]
+termProposalChoices (TermProposal _ _ choices) = choices
 
 -- Preserve checked-source abstract syntax as well as internal evidence. Agda's
 -- display reifier may use postfix projections: display syntax is not a draft
@@ -373,6 +385,34 @@ solveHelper :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
 solveHelper session goal limits models mode native view expression emit =
   runGoalSearch session goal $ \stats namespace point _ validate target ->
     Search.runHelper stats limits models mode native emit namespace point view expression validate target
+
+proposeTerms :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
+             -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
+             -> IO (Search.SearchStats, Either Failure (TermProposals s))
+proposeTerms session goal limits models mode native excluded emit = do
+  stats <- newIORef Search.emptyStats
+  outcome <- request session (goalState goal) $ \owner state -> do
+    ledger <- work session
+    let point = goalId goal
+        namespace = show (stateKey $ goalState goal) ++ ":moves:" ++ show (requests ledger)
+        origin = Map.lookup (keyBranch $ stateKey $ goalState goal) (ownerBranches owner)
+          >>= Map.findWithDefault Nothing point . branchOrigins
+    (result, allocation) <- kernel session state $ do
+      exists <- elem point <$> openInteractionPoints
+      if not exists then pure $ Left UnknownGoal else withInteractionId point $ do
+        target <- getMetaTypeInContext =<< lookupInteractionId point
+        Right <$> Search.primitiveProposals stats limits models mode native emit namespace excluded origin target
+    pure (owner, fmap (map $ \(expression, selected) -> TermProposal goal
+      (nativeDraft expression allocation) selected) $ result >>= id)
+  observed <- readIORef stats
+  charge (sessionWork session) $ \w -> w
+    { checkingAttempts = checkingAttempts w + Search.workUnits observed
+    , rejectedChecks = rejectedChecks w + Search.rejectedQueries observed }
+  pure (observed, (if Search.workExhausted observed then CensoredTerms else CompleteTerms) <$> outcome)
+
+applyTerm :: Session s -> TermProposal s -> IO (Either Failure (Transition s))
+applyTerm session (TermProposal goal draft _) = request session (goalState goal) $ \owner state ->
+  check session owner (goalState goal) state (DraftAction (goalId goal) draft) False
 
 runGoalSearch :: Session s -> GoalRef s
               -> (IORef Search.SearchStats -> String -> InteractionId -> Maybe Recursion.Owner

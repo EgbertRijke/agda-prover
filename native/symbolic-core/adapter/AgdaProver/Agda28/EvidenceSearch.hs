@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.EvidenceSearch (run, runHelper, Result (..)) where
+module AgdaProver.Agda28.EvidenceSearch (run, runHelper, primitiveProposals, Result (..)) where
 
 import Control.Monad (forM)
 import Control.Monad.Except (catchError, runExceptT, throwError)
@@ -135,6 +135,83 @@ runHelper stats limits models mode native emit namespace point view application 
   pure $ case found of
     Just (expression, picked) -> Result FoundCandidate (Just expression) picked
     Nothing -> Result (if exhausted then WorkExhausted else FragmentExhausted) Nothing []
+
+-- One-move forms of the existing generators. Agda infers the telescope;
+-- native holes retain dependencies for the shared agenda instead of recursing
+-- through every operand before other actions get a turn. No arity cap and no
+-- printed type matching. Rechecking each proposal owns all meta assignments.
+primitiveProposals :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
+                   -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> [String]
+                   -> Maybe Recursion.Owner -> I.Type
+                   -> TCM [(A.Expr, [(T.Text, T.Text)])]
+primitiveProposals stats limits models mode native emit namespace excluded owner target = do
+  pruned <- liftIO $ newIORef False
+  let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
+      freshHole scope = do
+        point <- registerInteractionPoint False noRange Nothing
+        pure $ A.QuestionMark (Info.emptyMetaInfo { Info.metaScope = scope }) point
+      signature ty = do
+        allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+        if not allowed then pure [] else reduce ty >>= \case
+          I.El _ (I.Pi domain body) -> (getArgInfo domain :) <$>
+            underAbstraction domain body signature
+          _ -> pure []
+      applications scope expression infos = go expression infos
+       where
+        go _ [] = pure []
+        go function (info:rest) = do
+          operand <- if getHiding info == NotHidden then freshHole scope
+            else Construction.omittedField (getHiding info)
+          let applied = A.app function [Arg info $ unnamed operand]
+          suffix <- go applied rest
+          pure $ if getHiding info == NotHidden then applied:suffix else suffix
+  (forbiddenHere, _) <- excludedGlobals excluded
+  inherited <- maybe (pure Set.empty) Recursion.ownerGroup owner
+  let forbidden = Set.union forbiddenHere inherited
+  globals <- visibleGlobals forbidden
+  classified <- attempt runtime $ do
+    allowed <- charge runtime $ \s -> s
+      { inferenceQueries = inferenceQueries s + 1, classificationQueries = classificationQueries s + 1 }
+    let constructors = Set.fromList [name | A.Con (I.AmbQ names) <- globals, name <- toList names]
+    if allowed then Just <$> Scheduling.classify forbidden constructors Nothing target else pure Nothing
+  let classification = maybe Classification.unknownClassification id classified
+  ranked <- rankSeeds runtime classification target globals
+  scope <- getScope
+  heads <- fmap concat $ forM ranked $ \(Seed expression _ _, picked) -> do
+    observed <- localTCState $ attempt runtime $
+      queryInferWith DontExpandLast runtime expression $ \(_, ty) -> Just <$> signature ty
+    variants <- applications scope expression $ maybe [] id observed
+    modify runtime $ \s -> s { applicationProposals = applicationProposals s + fromIntegral (length variants) }
+    pure [(variant, picked) | variant <- expression:variants]
+  construction <- localTCState $ do
+    allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+    if allowed then Construction.recordPlan forbidden target else pure Nothing
+  record <- case construction of
+    Nothing -> pure []
+    Just (names, telescope) -> do
+      let fields :: [C.Name] -> I.Telescope -> TCM [(C.Name, A.Expr)]
+          fields [] I.EmptyTel = pure []
+          fields (name:rest) (I.ExtendTel domain body) = do
+            if visible domain then do
+              hole <- freshHole scope
+              restFields <- fields rest (I.unAbs body)
+              pure $ (name, hole):restFields
+            else fields rest (I.unAbs body)
+          fields _ _ = genericError "native-record-telescope-mismatch"
+      assignments <- fields names telescope
+      modify runtime $ \s -> s { recordProposals = recordProposals s + 1 }
+      pure [(Construction.recordExpression assignments, [])]
+  introduction <- reduce target >>= \case
+    I.El _ (I.Pi domain body) ->
+      let hint = if I.absName body `elem` ["", "_"] then "x" else I.absName body in
+      withFreshName noRange hint $ \name -> do
+        let inner = setScopeLocals ((A.nameConcrete name, LocalVar name LambdaBound []) : _scopeLocals scope) scope
+        hole <- freshHole inner
+        modify runtime $ \s -> s { lambdaProposals = lambdaProposals s + 1 }
+        pure [(A.Lam exprNoRange (A.mkDomainFree $ Arg (getArgInfo domain) $ unnamed $ A.mkBinder_ name) hole, [])]
+    _ -> pure []
+  pure $ if Classification.constructionFirst classification
+    then introduction ++ record ++ heads else heads ++ introduction ++ record
 
 modify :: Runtime s -> (SearchStats -> SearchStats) -> TCM ()
 modify (Runtime _ ref _ _ _ _ _ _ _) f = liftIO $ atomicModifyIORef' ref $ \s -> (f s, ())
