@@ -36,9 +36,18 @@ from ..project import choose_goal, choose_goal_prefix, require_agda_source_file
 from ..ranking.bundled import FOCUSED_MODEL, OR_MODEL
 from ..reconstruction import reconstruct_native_batch
 from ..resource_budget import ResourceLimitError, ResourceScope
-from ..validation import ValidationError, validate_reconstruction
+from ..validation import (
+    ValidationError,
+    validate_reconstruction,
+    validate_standalone_module,
+)
 from ..verifier_budget import VerifierCallLimitExceeded, VerifierCallScope
 from .native_receipts import NativeReceipts
+from .native_refutation import (
+    CERTIFICATE_SCHEMA,
+    FILENAME,
+    replay_source,
+)
 
 
 @dataclass(frozen=True)
@@ -279,6 +288,60 @@ class NativeProofEngine:
                         "cancelled",
                     }:
                         raise ResourceLimitError(f"native search {outcome['reason']}")
+                    if status == "refutation-candidate":
+                        proposal = outcome.get("refutation")
+                        if not isinstance(proposal, dict):
+                            raise SymbolicProtocolError(
+                                "invalid native refutation response"
+                            )
+                        certificate_source = replay_source(proposal, goal.goal_id)
+                        result.search_stats["refutation"] = {
+                            "status": proposal["status"],
+                            "assignments_checked": proposal["assignments_checked"],
+                        }
+                        validation, trust = validate_standalone_module(
+                            certificate_source,
+                            filename=FILENAME,
+                            agda_executable=str(project.toolchain.executable),
+                            timeout_seconds=budget.require_time(
+                                "fresh native refutation validation"
+                            ),
+                            policy_profile="native-implication-refutation-v1",
+                        )
+                        inputs.assert_current(deadline=budget.deadline)
+                        result.validation, result.trust_report = validation, trust
+                        if validation["checked"]:
+                            result.impossibility_certificate = {
+                                "schema_version": CERTIFICATE_SCHEMA,
+                                "method": "agda-checked-implication-refutation",
+                                "source_sha256": result.source_hash,
+                                "task_id": result.task_id,
+                                "native_executable_sha256": binary_hash,
+                                "proposal": proposal,
+                                "generated_module_sha256": hashlib.sha256(
+                                    certificate_source.encode()
+                                ).hexdigest(),
+                                "agda_binary_sha256": trust["agda_binary_hash"],
+                                "agda_version": trust["agda_version"],
+                                "checker_output_sha256": validation[
+                                    "checker_output_sha256"
+                                ],
+                            }
+                            result.status = "impossible"
+                            break
+                        if validation["timed_out"]:
+                            raise ResourceLimitError(
+                                "fresh native refutation validation timed out"
+                            )
+                        result.diagnostics.append(
+                            {
+                                "kind": "refutation-rejection",
+                                "message": validation.get(
+                                    "diagnostic", "fresh checker rejected refutation"
+                                ),
+                            }
+                        )
+                        continue
                     if status in {"unsolved", "resource-exhausted"}:
                         result.status = status
                         break
@@ -387,6 +450,7 @@ class NativeProofEngine:
             if exhaustion is not None:
                 result.status = "resource-exhausted"
                 result.proof_term = result.patch = None
+                result.impossibility_certificate = None
                 if result.search_stats is not None:
                     result.search_stats.pop("validated_native_choices", None)
                 result.diagnostics.append(

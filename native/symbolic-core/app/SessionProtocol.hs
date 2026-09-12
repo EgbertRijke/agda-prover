@@ -47,6 +47,7 @@ data Operation = Pending StateKey | Observe StateKey InteractionId P.Observation
   | AdvanceSearch Run.Key Natural Search.SearchLimits (Maybe (Maybe Integer))
   | RunCost Run.Key | DiscardSearch Run.Key
   | InferHelper StateKey InteractionId P.ObservationMode DraftExpression
+  | ProposeRefutation StateKey InteractionId (Maybe Integer)
   | SolveHelper StateKey InteractionId Search.SearchLimits Policy.RankingMode (Maybe FilePath) (Maybe FilePath)
       P.ObservationMode DraftExpression
   | Cost | Cancel | Close
@@ -107,6 +108,11 @@ parseRequest = withObject "session request" $ \o -> do
     "give" -> do
       fields ["state", "goal_id", "expression"]
       Give <$> o .: "state" <*> goal <*> (DraftExpression <$> o .: "expression")
+    "propose-refutation" -> do
+      fields ["state", "goal_id", "work_units"]
+      limit <- o .:? "work_units"
+      unless (maybe True (> (0 :: Integer)) limit) $ fail "refutation work must be positive or null"
+      ProposeRefutation <$> o .: "state" <*> goal <*> pure limit
     "make-clause" -> do
       fields ["state", "goal_id", "action"]
       MakeClause <$> o .: "state" <*> goal <*> o .: "action"
@@ -283,6 +289,8 @@ perform session runs emit emitRun operation = case operation of
   DiscardSearch key -> Run.discard runs key
   Pending key -> resolved key $ \ref -> result toJSON <$> S.pending session ref
   Observe key goal mode -> resolvedGoal key goal $ \ref -> result id <$> S.inspect session ref mode
+  ProposeRefutation key goal limit -> resolvedGoal key goal $ \ref ->
+    result S.refutationView <$> S.proposeRefutation session ref limit
   MakeClause key goal action -> resolvedGoal key goal $ \ref ->
     result S.clauseView <$> S.makeClauses session ref action
   InferHelper key goal mode expression -> resolvedGoal key goal $ \ref ->

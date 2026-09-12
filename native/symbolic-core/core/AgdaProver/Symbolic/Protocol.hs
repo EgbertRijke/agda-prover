@@ -36,12 +36,13 @@ capabilities = object
   , "session_operations" .=
       (["pending", "observe", "give", "make-clause", "apply-clause", "reconstruct-goal", "reconstruct-goals", "export-goals",
         "start-search", "advance-search", "search-cost", "discard-search", "infer-helper", "solve-helper",
-        "solve-evidence", "evict", "replay", "cost", "cancel", "close"] :: [String])
+        "solve-evidence", "propose-refutation", "evict", "replay", "cost", "cancel", "close"] :: [String])
   , "observation_modes" .= map modeName [minBound .. maxBound]
   , "search_available" .= True
   , "search_fragments" .=
       (["evidence-application-v1", "structural-construction-v1", "structural-recursion-v1",
-        "copattern-evidence-v1", "focused-implication-v1", "typed-algebra-v1"] :: [String])
+        "copattern-evidence-v1", "focused-implication-v1", "typed-algebra-v1",
+        "certified-abstract-implication-v1"] :: [String])
   , "production_default" .= False
   , "proof_authority" .= False
   ]

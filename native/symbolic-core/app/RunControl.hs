@@ -81,6 +81,8 @@ advance (Store session identity store) key@(Key nonce epoch number revision) qua
                object (["status" .= (status :: String), "run" .= nextKey,
                  "cost" .= measured, "goal_ids" .= chosen, "proof_authority" .= False] ++ extra))
         case outcome of
+          G.Refutation proposal next -> pure $ retained next "refutation-candidate"
+            ["refutation" .= S.refutationView proposal]
           G.Candidate state next -> S.pending session state >>= \case
             Left failure -> pure $ retained next "failed" ["failure" .= failureView failure]
             Right pending -> pure $ retained next "candidate"

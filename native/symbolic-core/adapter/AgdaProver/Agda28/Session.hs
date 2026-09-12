@@ -11,7 +11,8 @@ module AgdaProver.Agda28.Session
   , withSession, stateKey, restoreReference, restoreGoalReference, goalState, goalId
   , Configuration, pinConfiguration, pinRuntimeConfiguration, withSessionConfiguration
   , inspect, pending, tryExpression
-  , solveEvidence, solveHelper
+  , solveEvidence, solveHelper, RefutationProposal, proposeRefutation, refutationView, refutationKind
+  , Refutation.Kind (..)
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
   , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, proposeTerms, applyTerm
@@ -68,6 +69,7 @@ import AgdaProver.Agda28.ClauseExecution qualified as ClauseExecution
 import AgdaProver.Agda28.Recursion qualified as Recursion
 import AgdaProver.Agda28.DraftAssembly qualified as Assembly
 import AgdaProver.Agda28.Source qualified as Source
+import AgdaProver.Agda28.Refutation qualified as Refutation
 import AgdaProver.Symbolic.Clause (ClauseAction)
 import AgdaProver.Symbolic.Evidence qualified as Search
 import AgdaProver.Symbolic.NNUE.Native (NativeScorer)
@@ -105,6 +107,16 @@ data ClauseProposal s = ClauseProposal (GoalRef s) Clauses.ClauseSnapshot TCStat
 
 type role HelperProposal nominal
 data HelperProposal s = HelperProposal (GoalRef s) Helpers.Snapshot TCState
+
+type role RefutationProposal nominal
+data RefutationProposal s = RefutationProposal (GoalRef s) Refutation.Snapshot
+
+refutationKind :: RefutationProposal s -> Refutation.Kind
+refutationKind (RefutationProposal _ snapshot) = Refutation.kind snapshot
+
+refutationView :: RefutationProposal s -> Value
+refutationView (RefutationProposal goal snapshot) = object $
+  ("parent" .= stateKey (goalState goal)) : Refutation.viewFields (goalId goal) snapshot
 
 type role TermProposal nominal
 data TermProposal s = TermProposal (GoalRef s) Draft [(T.Text, T.Text)]
@@ -340,6 +352,32 @@ inspect session goal mode = request session (goalState goal) $ \owner state -> d
     if not exists then pure $ Left UnknownGoal else do
       snapshot <- observeGoal point mode
       pure $ either (Left . KernelFailure) Right (encodeGoal snapshot)
+  pure (owner, result >>= id)
+
+-- Negative certificates are only proposed for an original source obligation,
+-- never an assigned prefix, a case branch or a speculative helper. The command
+-- is read-only and its allowance includes both observation and valuations.
+proposeRefutation :: Session s -> GoalRef s -> Maybe Integer -> IO (Either Failure (RefutationProposal s))
+proposeRefutation session goal limit = request session (goalState goal) $ \owner state -> do
+  used <- newIORef (0 :: Integer)
+  let step update = liftIO $ do
+        allowed <- atomicModifyIORef' used $ \n ->
+          if maybe False (n >=) limit then (n, False) else (n+1, True)
+        if allowed then charge (sessionWork session) update >> pure True else pure False
+      query = step $ \w -> w { checkingAttempts = checkingAttempts w + 1,
+        refutationQueries = refutationQueries w + 1 }
+      assignment = step $ \w -> w { symbolicActions = symbolicActions w + 1,
+        refutationAssignments = refutationAssignments w + 1 }
+  (result, _) <- kernel session state $ do
+    exists <- elem (goalId goal) <$> openInteractionPoints
+    if not exists then pure $ Left UnknownGoal
+    else if keyBranch (stateKey $ goalState goal) /= 0
+      then pure $ Left $ KernelRejected "refutation-requires-original-source-state"
+      else do
+        snapshot <- Refutation.propose query assignment (goalId goal)
+        liftIO $ charge (sessionWork session) $ \w -> w
+          { refutationCandidates = refutationCandidates w + if Refutation.kind snapshot == Refutation.Candidate then 1 else 0 }
+        pure $ Right $ RefutationProposal goal snapshot
   pure (owner, result >>= id)
 
 tryExpression :: Session s -> GoalRef s -> DraftExpression

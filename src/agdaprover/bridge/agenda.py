@@ -82,7 +82,24 @@ def search_agenda(
                     "native agenda changed its selection or models"
                 )
             status = current.get("status")
+            refutation = current.get("refutation")
+            if refutation is not None and (
+                not isinstance(refutation, dict)
+                or len(goal_ids) != 1
+                or refutation.get("parent") != connection.root_state
+                or refutation.get("goal_id") != goal_ids[0]
+            ):
+                raise SymbolicProtocolError(
+                    "native refutation changed its source owner"
+                )
             if status == "paused" and current.get("reason") == "slice-ended":
+                continue
+            if status == "refutation-candidate":
+                if refutation is None:
+                    raise SymbolicProtocolError(
+                        "native refutation candidate is missing"
+                    )
+                yield reply
                 continue
             if status == "candidate":
                 exported = connection.request(

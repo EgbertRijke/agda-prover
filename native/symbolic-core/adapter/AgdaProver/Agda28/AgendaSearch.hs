@@ -34,10 +34,10 @@ data Metrics = Metrics
   { schedulerSteps :: !Integer, modelItems :: !Integer, modelNanoseconds :: !Integer
   , generatedMoves :: !Integer, attemptedMoves :: !Integer, acceptedMoves :: !Integer }
 data Run s = Run (S.Session s) Settings (N.Queue s) Integer
-  (IORef Metrics) (MVar ()) (Value -> IO ()) (S.Transition s -> IO ())
+  (IORef Metrics) (MVar ()) (Value -> IO ()) (S.Transition s -> IO ()) (Maybe (S.GoalRef s, Natural))
 data PauseReason = SliceEnded | AllowanceSpent | ActionsSpent | CancelledByCaller deriving (Eq, Show)
 data Result s = Paused PauseReason (Run s) | Candidate (S.StateRef s) (Run s)
-  | Exhausted | Failed Failure (Run s)
+  | Refutation (S.RefutationProposal s) (Run s) | Exhausted | Failed Failure (Run s)
 
 -- The initial pending query checks the source epoch. The controller never
 -- accepts a malformed/stale wire key on the strength of its numeric branch ID.
@@ -59,25 +59,30 @@ beginSelection selection session state settings trace accepted = S.pending sessi
     owner <- newMVar ()
     let queue = maybe (N.start state)
           (\points -> N.startSelected state (map interactionId $ NE.toList points) (pendingGoals pending)) selection
-    pure $ Right $ Run session settings queue baseline metrics owner trace accepted
+        selected = maybe (pendingGoals pending) (map interactionId . NE.toList) selection
+        refutationGoal = case selected of
+          [point] | keyBranch (S.stateKey state) == 0 -> either (const Nothing) (\goal -> Just (goal, initialMacroWork settings)) $
+            S.restoreGoalReference session (S.stateKey state) (fromIntegral point)
+          _ -> Nothing
+    pure $ Right $ Run session settings queue baseline metrics owner trace accepted refutationGoal
 
 -- Raising an allowance never resets accumulated work or restores spent budget.
 withLimits :: E.SearchLimits -> Run s -> Run s
-withLimits allowance (Run session settings queue baseline metrics owner trace accepted) =
-  Run session settings { limits = allowance } queue baseline metrics owner trace accepted
+withLimits allowance (Run session settings queue baseline metrics owner trace accepted refutationGoal) =
+  Run session settings { limits = allowance } queue baseline metrics owner trace accepted refutationGoal
 
 withActionLimit :: Maybe Integer -> Run s -> Run s
-withActionLimit limit (Run session settings queue baseline metrics owner trace accepted) =
-  Run session settings { actionLimit = limit } queue baseline metrics owner trace accepted
+withActionLimit limit (Run session settings queue baseline metrics owner trace accepted refutationGoal) =
+  Run session settings { actionLimit = limit } queue baseline metrics owner trace accepted refutationGoal
 
 -- A resumed protocol request has a new response channel/request ID. Do not
 -- retain the callback of the request that originally created this frontier.
 withObservers :: (Value -> IO ()) -> (S.Transition s -> IO ()) -> Run s -> Run s
-withObservers trace accepted (Run session settings queue baseline metrics owner _ _) =
-  Run session settings queue baseline metrics owner trace accepted
+withObservers trace accepted (Run session settings queue baseline metrics owner _ _ refutationGoal) =
+  Run session settings queue baseline metrics owner trace accepted refutationGoal
 
 cost :: Run s -> IO Value
-cost (Run session settings _ baseline metrics _ _ _) = do
+cost (Run session settings _ baseline metrics _ _ _ _) = do
   physical <- S.work session
   measured <- readIORef metrics
   let steps = schedulerSteps measured
@@ -93,11 +98,23 @@ cost (Run session settings _ baseline metrics _ _ _) = do
 -- evidence attempt remains atomic: its censored retry is explicitly charged
 -- again. No pause claims to checkpoint the interior of an Agda checker call.
 advance :: Maybe (NativeScorer n) -> Natural -> Run s -> IO (Result s)
-advance native count run@(Run session settings initial baseline metrics owner trace accepted) =
-  withMVar owner $ \_ -> go count initial
+advance native count run@(Run session settings initial baseline metrics owner trace accepted refutationGoal) =
+  withMVar owner $ \_ -> if count == 0 then pure $ Paused SliceEnded run else
+    case refutationGoal of
+      Nothing -> go Nothing count initial
+      Just (original, slice) -> allowance >>= \left ->
+        if left == Just 0 then pure $ Paused AllowanceSpent run else do
+          let available = maybe (toInteger slice) (min $ toInteger slice) left
+          S.proposeRefutation session original (Just $ max 1 available) >>= \case
+            Left Cancelled -> pure $ Paused CancelledByCaller run
+            Left failure -> pure $ Failed failure run
+            Right proposal -> case S.refutationKind proposal of
+              S.Candidate -> pure $ Refutation proposal $ saved Nothing initial
+              S.Censored -> go (Just (original, 2 * max 1 slice)) count initial
+              _ -> go Nothing count initial
  where
-  saved queue = case run of
-    Run s cfg _ base meter lock emit accept -> Run s cfg queue base meter lock emit accept
+  saved refutation queue = case run of
+    Run s cfg _ base meter lock emit accept _ -> Run s cfg queue base meter lock emit accept refutation
   allowance = do
     physical <- S.work session
     steps <- schedulerSteps <$> readIORef metrics
@@ -146,8 +163,8 @@ advance native count run@(Run session settings initial baseline metrics owner tr
                   ++ [A.Proposal (N.Clause goal action) (structuralDelay settings) | (action, _) <- clauseMoves]
                   ++ [A.Proposal (N.SlicedEvidence goal $ initialMacroWork settings)
                         (macroDelay settings) | evidenceMacro settings]
-  go 0 queue = pure $ Paused SliceEnded $ saved queue
-  go remaining queue = do
+  go refutation 0 queue = pure $ Paused SliceEnded $ saved refutation queue
+  go refutation remaining queue = do
     budget <- moveAllowance
     let config = N.Config budget (models settings) (ranking settings) native
           (focused settings) (excluded settings) planner
@@ -155,16 +172,20 @@ advance native count run@(Run session settings initial baseline metrics owner tr
             modifyIORef' metrics (\m -> m { schedulerSteps = schedulerSteps m + 1 }) >> pure True)
           chargeAction recordEvent trace recordSearch accepted
     N.step session config queue >>= \case
-      N.Progress next -> go (remaining-1) next
-      N.Candidate state next -> pure $ Candidate state $ saved next
-      N.Exhausted -> pure Exhausted
-      N.Paused next -> pure $ Paused AllowanceSpent $ saved next
+      N.Progress next -> go refutation (remaining-1) next
+      N.Candidate state next -> pure $ Candidate state $ saved refutation next
+      -- A censored refutation task remains available even when the positive
+      -- queue is empty. Its next larger slice is a scheduling continuation.
+      N.Exhausted -> pure $ case refutation of
+        Nothing -> Exhausted
+        Just _ -> Paused SliceEnded $ saved refutation queue
+      N.Paused next -> pure $ Paused AllowanceSpent $ saved refutation next
       N.Interrupted reason next -> pure $ case reason of
-        N.PlanningAllowanceExhausted -> Paused AllowanceSpent $ saved next
-        N.ActionAllowanceExhausted -> Paused ActionsSpent $ saved next
-        N.MoveAllowanceExhausted{} -> Paused AllowanceSpent $ saved next
-        N.SessionFailure Cancelled -> Paused CancelledByCaller $ saved next
-        N.SessionFailure failure -> Failed failure $ saved next
+        N.PlanningAllowanceExhausted -> Paused AllowanceSpent $ saved refutation next
+        N.ActionAllowanceExhausted -> Paused ActionsSpent $ saved refutation next
+        N.MoveAllowanceExhausted{} -> Paused AllowanceSpent $ saved refutation next
+        N.SessionFailure Cancelled -> Paused CancelledByCaller $ saved refutation next
+        N.SessionFailure failure -> Failed failure $ saved refutation next
 
 nativeWork :: Work -> Integer
 nativeWork ledger = checkingAttempts ledger + symbolicActions ledger

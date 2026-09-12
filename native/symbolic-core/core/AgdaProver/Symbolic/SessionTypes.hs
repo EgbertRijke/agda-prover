@@ -76,6 +76,7 @@ failureName ReplayRejected{} = "replay-rejected"
 data Work = Work
   { requests :: !Integer, checkingAttempts :: !Integer, replayedActions :: !Integer
   , symbolicActions :: !Integer
+  , refutationQueries :: !Integer, refutationAssignments :: !Integer, refutationCandidates :: !Integer
   , clauseQueries :: !Integer, helperQueries :: !Integer
   , acceptedChecks :: !Integer, rejectedChecks :: !Integer, cancelledRequests :: !Integer
   , inputBytesRead :: !Integer, elapsedNanoseconds :: !Integer, cpuPicoseconds :: !Integer
@@ -85,6 +86,7 @@ emptyWork :: Work
 emptyWork = Work
   { requests = 0, checkingAttempts = 0, replayedActions = 0, clauseQueries = 0, helperQueries = 0
   , symbolicActions = 0
+  , refutationQueries = 0, refutationAssignments = 0, refutationCandidates = 0
   , acceptedChecks = 0, rejectedChecks = 0, cancelledRequests = 0
   , inputBytesRead = 0, elapsedNanoseconds = 0, cpuPicoseconds = 0 }
 
@@ -92,6 +94,9 @@ instance ToJSON Work where
   toJSON w = object
     ["requests" .= requests w, "checking_attempts" .= checkingAttempts w,
      "symbolic_actions" .= symbolicActions w,
+     "refutation_queries" .= refutationQueries w,
+     "refutation_assignments" .= refutationAssignments w,
+     "refutation_candidates" .= refutationCandidates w,
      "clause_queries" .= clauseQueries w,
      "helper_queries" .= helperQueries w,
      "replayed_actions" .= replayedActions w, "accepted_checks" .= acceptedChecks w,

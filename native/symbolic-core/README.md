@@ -325,6 +325,13 @@ single and prefix candidates share immutable project preparation, source export,
 resource supervision and the ordinary fresh validator. A rejected candidate
 resumes the retained native frontier, not a new search or a Python fallback.
 
+For the existing closed abstract-implication fragment, the native agenda can
+also propose a [refutation certificate](../../schemas/native-refutation-v1.md).
+A small, widening side slice prevents general proof search from delaying this
+finite check indefinitely. Only exact recipe replay and fresh safe Agda checking
+can return `impossible`; the file stays unchanged. Censorship and failure to
+find a proof never suffice. This does not broaden the supported logical fragment.
+
 For this controller, `task.max_candidates` limits native move attempts (including
 the standard/deep frontend numeric presets). An independent engine `work_units`
 limit optionally bounds scheduler steps, native checking attempts and in-memory

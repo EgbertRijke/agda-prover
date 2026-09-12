@@ -78,6 +78,7 @@ Each operation permits only its listed additional fields:
 | `infer-helper` | `state`, `goal_id`, `mode`, `application` | Parent-bound native helper signature, not a proof transition |
 | `solve-helper` | `state`, `goal_id`, `mode`, `application`, `limits`, `ranker`, `model_path`, `native_path` | Finite native helper search with the ordinary provisional candidate/cost result |
 | `solve-evidence` | `state`, `goal_id`, `limits`, `ranker`, `model_path`, `native_path`, `exclude_names`; optional `focused_model_path`, `focused_search` | Search status, provisional child/evidence, cumulative search cost, selected policy choices |
+| `propose-refutation` | `state`, `goal_id`, `work_units` | Source-bound negative recipe for the existing abstract implication fragment; no proof authority |
 | `evict` | `state` | Drop child snapshot; preserve replay ancestry |
 | `replay` | `state` | Rechecked state key (resident states are returned unchanged) |
 | `cost` | none | Current cumulative native-operation counters |
@@ -85,6 +86,11 @@ Each operation permits only its listed additional fields:
 | `close` | none | Cancel any active request, then close the session |
 
 Goal IDs must fit Agda's nonnegative machine-sized interaction identifier.
+The [native refutation contract](native-refutation-v1.md) defines its scoped
+fragment, recipe, work accounting and fresh acceptance. The agenda may return
+`refutation-candidate` with the negative proposal and a retained run revision;
+rejection resumes ordinary search. It never calls finite search exhaustion
+`impossible` on its own.
 Modes have the five observation-v1 meanings. `expression` is untrusted Agda
 syntax; Agda parses, scopes and checks it with ordinary non-forced `give`
 semantics. The returned evidence retains the internal term, type, telescope,
