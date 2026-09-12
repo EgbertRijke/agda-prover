@@ -552,8 +552,13 @@ proposeTerms session goal limits models mode native excluded emit = do
       if not exists then pure $ Left UnknownGoal else withInteractionId point $ do
         target <- getMetaTypeInContext =<< lookupInteractionId point
         Right <$> Search.primitiveProposals stats limits models mode native emit namespace excluded origin target
-    pure (owner, fmap (zipWith (\ordinal (expression, selected) -> TermProposal goal
-      (nativeDraft expression allocation) selected (IssuedAction (requests ledger) ordinal)) [0..]) $ result >>= id)
+    -- The queue deliberately leaves many proposal payloads unevaluated. Seal
+    -- their small allocation watermark now: mapping nativeDraft lazily over
+    -- the catalogue would retain the entire speculative TCState until the
+    -- last alternative is tried or discarded.
+    let watermark = Allocation (allocation ^. stFreshNameId) (allocation ^. stFreshInteractionId)
+    watermark `seq` pure (owner, fmap (zipWith (\ordinal (expression, selected) -> TermProposal goal
+      (NativeDraft expression watermark) selected (IssuedAction (requests ledger) ordinal)) [0..]) $ result >>= id)
   observed <- readIORef stats
   recordSearchWork session observed
   pure (observed, (if Search.workExhausted observed then CensoredTerms else CompleteTerms) <$> outcome)

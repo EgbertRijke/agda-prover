@@ -79,6 +79,9 @@ silently changing the meaning of old checked evidence.
 Only the final replay handle is published. Internal intermediate checkpoints
 release their resident checking state while preserving the replay recipe;
 existing caller-owned snapshots still require explicit eviction.
+Replay recipes and queued primitive proposals eagerly seal their small
+name/interaction allocation watermarks; unused alternatives must not retain a
+whole speculative checking state through a suspended watermark projection.
 
 `make-clause` delegates ordered variable batches, hidden/instance binder exposure,
 result splitting and ellipsis expansion to Agda. It retains native clauses and
