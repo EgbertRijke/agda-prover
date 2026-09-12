@@ -43,9 +43,9 @@ instance ToJSON Key where
 newStore :: S.Session s -> S.StateRef s -> IO (Store s)
 newStore session root = Store session (S.stateKey root) <$> newMVar (0, Map.empty)
 
-start :: Store s -> S.StateRef s -> G.Settings -> Maybe FilePath -> Maybe (NonEmpty InteractionId) -> IO Value
-start (Store session identity store) root settings nativePath selection = modifyMVar store $ \(serial, entries) ->
-  G.beginSelection selection session root settings (const $ pure ()) (const $ pure ()) >>= \case
+start :: Bool -> Store s -> S.StateRef s -> G.Settings -> Maybe FilePath -> Maybe (NonEmpty InteractionId) -> IO Value
+start oneMove (Store session identity store) root settings nativePath selection = modifyMVar store $ \(serial, entries) ->
+  (if oneMove then G.beginStep else G.beginSelection) selection session root settings (const $ pure ()) (const $ pure ()) >>= \case
     Left failure -> pure ((serial, entries), failureView failure)
     Right run -> do
       measured <- G.cost run

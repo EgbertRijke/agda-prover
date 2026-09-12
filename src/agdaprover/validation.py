@@ -32,6 +32,7 @@ from .presentation import apply_source_edit
 from .project_configuration import ProjectConfiguration
 from .resource_budget import ResourceLimitError, charge_io
 from .source_files import agda_source_suffix
+from .verifier_budget import fresh_interaction_validation
 
 FORBIDDEN_CANDIDATE_FRAGMENTS = (
     "postulate",
@@ -492,7 +493,7 @@ def validate_partial_reconstruction(
             timeout_seconds=_remaining(deadline, "partial reconstruction overlay"),
         )
         try:
-            with AgdaSession(
+            with fresh_interaction_validation(), AgdaSession(
                 timeout_seconds=_remaining(deadline, "partial reconstruction load"),
                 deadline=deadline,
                 project_configuration=workspace.configuration,

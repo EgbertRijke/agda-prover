@@ -322,6 +322,11 @@ class StepResult:
     schema_version: str = "agdaprover.step.p0.v1"
     verifier_budget: dict[str, str | int | None] | None = None
     resource_budget: dict[str, Any] | None = None
+    # Native steps share the coarse search ledger and role-pinned policies.
+    # These optional fields do not alter the historical Python action contract.
+    action_model_id: str | None = None
+    search_stats: dict[str, Any] | None = None
+    policy_trace: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self, *, include_attempts: bool = False) -> dict[str, Any]:
         allowed = {
@@ -362,6 +367,9 @@ class StepResult:
             value["resource_budget"] = self.resource_budget
         if include_attempts:
             value["attempts"] = [attempt.to_dict() for attempt in self.attempts]
+        if self.search_stats is not None:
+            value["search_stats"] = self.search_stats
+            value["action_model_id"] = self.action_model_id
         return value
 
 

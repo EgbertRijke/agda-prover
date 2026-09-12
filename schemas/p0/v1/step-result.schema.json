@@ -10,6 +10,9 @@
     "toolchain_id", "policy_profile", "cost", "diagnostics"
   ],
   "properties": {
+    "engine_selection": { "$ref": "engine-selection.schema.json" },
+    "action_model_id": { "type": ["string", "null"] },
+    "search_stats": { "type": ["object", "null"] },
     "schema_version": { "const": "agdaprover.step.p0.v1" },
     "task_id": { "type": "string", "minLength": 1 },
     "status": { "enum": ["accepted-step", "unsolved", "resource-exhausted", "invalid-task", "toolchain-error", "internal-error"] },

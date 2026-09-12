@@ -277,6 +277,20 @@ def reconstruct_hole_completion(
 def reconstruct_native_completion(
     source: str, goal: GoalInfo, presentation: dict[str, Any]
 ) -> dict[str, Any]:
+    """Reconstruct a native completion, rejecting unfinished proof holes."""
+    return _reconstruct_native(source, goal, presentation, partial=False)
+
+
+def reconstruct_native_step(
+    source: str, goal: GoalInfo, presentation: dict[str, Any]
+) -> dict[str, Any]:
+    """Anchor an unfinished checked action, never a completed-proof assertion."""
+    return _reconstruct_native(source, goal, presentation, partial=True)
+
+
+def _reconstruct_native(
+    source: str, goal: GoalInfo, presentation: dict[str, Any], *, partial: bool
+) -> dict[str, Any]:
     """Anchor Agda's native expression/clause export at its original source.
 
     The native renderer owns binder exposure. This is lexical patch assembly,
@@ -297,6 +311,16 @@ def reconstruct_native_completion(
     if not isinstance(body, str) or not body.strip():
         raise ValueError("native source has no body")
     if presentation.get("kind") == "expression":
+        if partial:
+            return _source_edit(
+                source,
+                start_offset=hole_start,
+                end_offset=hole_end,
+                replacement=f"({body})",
+                style="term",
+                binders=(),
+                body=f"({body})",
+            )
         return reconstruct_hole_completion(source, goal, body, native_layout=True)
     if presentation.get("kind") != "clause":
         raise ValueError("unsupported native source kind")
@@ -328,7 +352,7 @@ def reconstruct_native_completion(
         or set(tokens).intersection({"λ", "let", "in", "record", ":", "where"})
     ):
         raise ValueError("native clause requires exactly one whole-clause hole")
-    if re.search(r"\{![\s\S]*?!\}|(?<![\w?])\?(?![\w?])", body):
+    if not partial and re.search(r"\{![\s\S]*?!\}|(?<![\w?])\?(?![\w?])", body):
         raise ValueError("native clause retains a proof hole")
     lines = body.rstrip().splitlines()
     anchored = bool(indentation) and all(

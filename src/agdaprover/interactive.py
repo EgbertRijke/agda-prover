@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TextIO
 
+from .application.selection import EngineSelection, select_engine
 from .contracts import TaskSpec
 from .principal_variation import load_principal_variation
 from .project_configuration import ProjectConfiguration
@@ -393,7 +394,9 @@ def launch_interactive_run(
     variation_path: Path,
     result_path: Path,
     policy: InteractivePolicy = DEFAULT_INTERACTIVE_POLICY,
+    engine_selection: EngineSelection | None = None,
 ) -> InteractiveRunController:
+    selection = engine_selection if engine_selection is not None else select_engine()
     source_file = task.source_file.resolve()
     source_hash = _source_sha256(source_file)
     run_id = hashlib.sha256(
@@ -414,6 +417,7 @@ def launch_interactive_run(
         str(task.max_term_size),
         "--ranker",
         task.ranker,
+        *selection.worker_arguments(),
     ]
     if task.goal_id is not None:
         argv.extend(("--goal", str(task.goal_id)))

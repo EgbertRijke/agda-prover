@@ -4,7 +4,7 @@
 -- Coupled native moves beneath single/joint scheduling. The planner supplies
 -- alternatives; it never supplies a replacement typechecker or proof authority.
 module AgdaProver.Agda28.AgendaExecution
-  ( Move (..), Planning (..), Config (..), Queue, Outcome (..), Interruption (..), start, startSelected, frontier, step ) where
+  ( Move (..), Planning (..), Config (..), Queue, Outcome (..), Interruption (..), start, startSelected, startOneMove, frontier, step ) where
 
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
@@ -45,7 +45,7 @@ data Config s n = Config
 -- Retain the branch's AND order separately from Agda's interaction identifiers.
 -- A refinement replaces one obligation with fresh identifiers, which Agda
 -- appends after unrelated source goals. Those identifiers are not priorities.
-data SearchState s = SearchState (S.StateRef s) (Maybe (Set.Set Int)) [Int]
+data SearchState s = SearchState (S.StateRef s) (Maybe (Set.Set Int)) [Int] (Maybe StateKey)
 data Continuation s = RetryEvidence (SearchState s) (S.GoalRef s) Natural
 type Queue s = A.Agenda (SearchState s) (Move s) (Continuation s)
 
@@ -60,16 +60,23 @@ data Outcome s
   | Paused (Queue s) | Interrupted Interruption (Queue s) | Exhausted
 
 start :: S.StateRef s -> Queue s
-start state = A.start $ SearchState state Nothing []
+start state = A.start $ SearchState state Nothing [] Nothing
 
 startSelected :: S.StateRef s -> [Int] -> [Int] -> Queue s
 startSelected state selected allGoals = A.start $
-  SearchState state (Just $ Set.fromList selected) allGoals
+  SearchState state (Just $ Set.fromList selected) allGoals Nothing
+
+-- A step proposes one checked transition from the original parent. Its open
+-- descendants are deliberately not solved. Rejected source handoffs can resume
+-- the same root alternatives; neither a fresh search nor Python planning occurs.
+startOneMove :: S.StateRef s -> Int -> [Int] -> Queue s
+startOneMove state selected allGoals = A.start $
+  SearchState state (Just $ Set.singleton selected) allGoals (Just $ S.stateKey state)
 
 frontier :: Queue s -> (Int, Maybe (S.StateRef s, Natural, Natural))
 frontier queue = (A.pending queue, fmap unwrap $ A.principal queue)
  where
-  unwrap (SearchState state _ _, priority, depth) = (state, priority, depth)
+  unwrap (SearchState state _ _ _, priority, depth) = (state, priority, depth)
 
 step :: S.Session s -> Config s n -> Queue s -> IO (Outcome s)
 step session config queue = runExceptT (A.step hooks queue) >>= \case
@@ -83,13 +90,14 @@ step session config queue = runExceptT (A.step hooks queue) >>= \case
   hooks = A.Hooks
     { A.charge = liftIO $ chargeStep config
     , A.observe = liftIO . observe config
-    , A.inspect = \(SearchState state selected order) -> do
+    , A.inspect = \(SearchState state selected order stepParent) -> do
         obligations <- require $ S.pending session state
         let live = Set.fromList $ pendingGoals obligations
             ordered = filter (`Set.member` live) order ++
               filter (`notElem` order) (pendingGoals obligations)
             selectedPending = maybe ordered (\chosen -> filter (`Set.member` chosen) ordered) selected
-        if null selectedPending then
+        if maybe False (/= S.stateKey state) stepParent then pure $ A.Candidate state
+        else if null selectedPending then
           -- Partial selection is only a candidate relative to remaining source
           -- holes, never apparent global closure. Export/fresh validation must
           -- reject any unresolved selected proof or unsupported dependency.
@@ -103,9 +111,9 @@ step session config queue = runExceptT (A.step hooks queue) >>= \case
     , A.resume = \(RetryEvidence state goal allowance) -> execute state $ SlicedEvidence goal allowance
     -- Identical issued keys witness the same immutable branch only. Equal
     -- printed goals and equal endpoint types never authorize state merging.
-    , A.sameState = \(SearchState a sa oa) (SearchState b sb ob) ->
-        pure $ S.stateKey a == S.stateKey b && sa == sb && oa == ob }
-  execute current@(SearchState state selected _) move = do
+    , A.sameState = \(SearchState a sa oa pa) (SearchState b sb ob pb) ->
+        pure $ S.stateKey a == S.stateKey b && sa == sb && oa == ob && pa == pb }
+  execute current@(SearchState state selected _ _) move = do
     allowed <- liftIO $ chargeMove config
     if not allowed then throwError ActionAllowanceExhausted else pure ()
     let goal = case move of
@@ -146,7 +154,7 @@ step session config queue = runExceptT (A.step hooks queue) >>= \case
       Right (E.FragmentExhausted, Nothing, _) -> pure A.Declined
       Right (E.FoundCandidate, Just next, _) -> transition current $ Right next
       _ -> throwError $ SessionFailure $ KernelFailure "agenda-inconsistent-search-result"
-  transition (SearchState parent selected previousOrder) = \case
+  transition (SearchState parent selected previousOrder stepParent) = \case
     Left failure -> declined failure
     Right next -> do
       -- The all-goal entry point is lazy about its initial pending query. Read
@@ -162,7 +170,7 @@ step session config queue = runExceptT (A.step hooks queue) >>= \case
           order = children ++ filter (`Set.member` after) before
           chosen = fmap (\active -> Set.union (Set.intersection active after)
             (Set.difference after previousGoals)) selected
-      pure $ A.Advanced $ SearchState (S.transitionState next) chosen order
+      pure $ A.Advanced $ SearchState (S.transitionState next) chosen order stepParent
   declined = \case
     KernelRejected{} -> pure A.Declined
     KernelBlocked{} -> pure A.Declined

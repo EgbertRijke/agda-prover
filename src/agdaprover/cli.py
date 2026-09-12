@@ -13,8 +13,13 @@ from types import FrameType
 from typing import Any, Literal, cast
 
 from .application import (
-    default_application,
     inspect_source,
+)
+from .application.selection import (
+    EngineConfigurationError,
+    EngineSelection,
+    add_engine_options,
+    select_engine,
 )
 from .contracts import EXIT_CODES, Status, TaskSpec
 from .editor_api import EditorRequest, error_envelope, event_envelope, response_envelope
@@ -176,6 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
         "source", type=Path, metavar="SOURCE", help="an .agda or .lagda.md source file"
     )
     add_search_options(prove_parser)
+    add_engine_options(prove_parser)
     prove_parser.add_argument(
         "--trace", type=Path, help="write candidate attempts as JSON"
     )
@@ -191,6 +197,7 @@ def build_parser() -> argparse.ArgumentParser:
         "source", type=Path, metavar="SOURCE", help="an .agda or .lagda.md source file"
     )
     add_search_options(prove_prefix, joint_selection=True)
+    add_engine_options(prove_prefix)
     prove_prefix.add_argument(
         "--trace", type=Path, help="write joint source-state statistics as JSON"
     )
@@ -206,6 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
         "source", type=Path, metavar="SOURCE", help="an .agda or .lagda.md source file"
     )
     add_search_options(interactive, joint_selection=True)
+    add_engine_options(interactive)
 
     step = subparsers.add_parser(
         "step", help="suggest one Agda-accepted refinement action"
@@ -214,6 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
         "source", type=Path, metavar="SOURCE", help="an .agda or .lagda.md source file"
     )
     add_search_options(step)
+    add_engine_options(step)
     step.add_argument("--trace", type=Path, help="write action attempts as JSON")
 
     doctor = subparsers.add_parser("doctor", help="audit the local runtime")
@@ -223,14 +232,15 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="fail if a runtime module imports a network-capable client",
     )
-    subparsers.add_parser(
+    editor = subparsers.add_parser(
         "editor-api",
         help="serve one versioned editor request from standard input",
     )
+    add_engine_options(editor)
     return parser
 
 
-def _editor_api() -> tuple[int, dict[str, Any]]:
+def _editor_api(launch: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     try:
         raw = sys.stdin.read(1_048_577)
         if len(raw.encode("utf-8")) > 1_048_576:
@@ -240,6 +250,8 @@ def _editor_api() -> tuple[int, dict[str, Any]]:
             raise ValueError("editor request must be one JSON object")
         request = EditorRequest.from_dict(value)
         arguments = Namespace(**request.to_namespace_values())
+        arguments.engine = launch.engine
+        arguments.symbolic_core = launch.symbolic_core
         if request.operation == "test-entries":
 
             def publish(event: str, payload: dict[str, Any]) -> None:
@@ -250,7 +262,8 @@ def _editor_api() -> tuple[int, dict[str, Any]]:
                     flush=True,
                 )
 
-            outcome = default_application.test_entries(
+            selection = _engine(arguments)
+            outcome = selection.application().test_entries(
                 task_from_arguments(
                     arguments, arguments.source, arguments.ranker, arguments.model
                 ),
@@ -259,7 +272,7 @@ def _editor_api() -> tuple[int, dict[str, Any]]:
             return outcome.exit_code, response_envelope(
                 request,
                 exit_code=outcome.exit_code,
-                result=outcome.payload,
+                result=outcome.payload | {"engine_selection": selection.report()},
             )
         handlers = {
             "inspect": _inspect,
@@ -316,8 +329,15 @@ def _inspect(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     return outcome.exit_code, outcome.payload
 
 
+def _engine(arguments: argparse.Namespace) -> EngineSelection:
+    return select_engine(
+        getattr(arguments, "engine", None), getattr(arguments, "symbolic_core", None)
+    )
+
+
 def _prove(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
-    result = default_application.prove(
+    selection = _engine(arguments)
+    result = selection.application().prove(
         task_from_arguments(
             arguments, arguments.source, arguments.ranker, arguments.model
         )
@@ -326,20 +346,26 @@ def _prove(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         arguments.trace.parent.mkdir(parents=True, exist_ok=True)
         arguments.trace.write_text(
             json.dumps(
-                result.to_dict(include_attempts=True), indent=2, ensure_ascii=False
+                result.to_dict(include_attempts=True)
+                | {"engine_selection": selection.report()},
+                indent=2,
+                ensure_ascii=False,
             )
             + "\n"
         )
-    return EXIT_CODES[result.status], result.to_dict()
+    return EXIT_CODES[result.status], result.to_dict() | {
+        "engine_selection": selection.report()
+    }
 
 
 def _prove_prefix(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
-    result = default_application.prove_prefix(
+    selection = _engine(arguments)
+    result = selection.application().prove_prefix(
         task_from_arguments(
             arguments, arguments.source, arguments.ranker, arguments.model
         )
     )
-    output = result.to_dict()
+    output = result.to_dict() | {"engine_selection": selection.report()}
     if arguments.trace:
         arguments.trace.parent.mkdir(parents=True, exist_ok=True)
         arguments.trace.write_text(
@@ -349,7 +375,8 @@ def _prove_prefix(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
 
 
 def _step(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
-    result = default_application.step(
+    selection = _engine(arguments)
+    result = selection.application().step(
         task_from_arguments(
             arguments, arguments.source, arguments.ranker, arguments.model
         )
@@ -358,7 +385,10 @@ def _step(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         arguments.trace.parent.mkdir(parents=True, exist_ok=True)
         arguments.trace.write_text(
             json.dumps(
-                result.to_dict(include_attempts=True), indent=2, ensure_ascii=False
+                result.to_dict(include_attempts=True)
+                | {"engine_selection": selection.report()},
+                indent=2,
+                ensure_ascii=False,
             )
             + "\n"
         )
@@ -367,7 +397,7 @@ def _step(arguments: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         if result.status == "accepted-step"
         else EXIT_CODES[cast(Status, result.status)]
     )
-    return exit_code, result.to_dict()
+    return exit_code, result.to_dict() | {"engine_selection": selection.report()}
 
 
 def _interactive(arguments: argparse.Namespace) -> int:
@@ -380,6 +410,7 @@ def _interactive(arguments: argparse.Namespace) -> int:
             task,
             variation_path=root / "principal-variation.json",
             result_path=root / "result.json",
+            engine_selection=_engine(arguments),
         )
         return serve_interactive(controller, sys.stdin, sys.stdout)
 
@@ -425,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "doctor":
             exit_code, output = _doctor(arguments)
         elif arguments.command == "editor-api":
-            exit_code, output = _editor_api()
+            exit_code, output = _editor_api(arguments)
         else:
             parser.error(f"unknown command: {arguments.command}")
     except KeyboardInterrupt:
@@ -434,6 +465,13 @@ def main(argv: list[str] | None = None) -> int:
             "status": "cancelled",
         }
         exit_code = 130
+    except EngineConfigurationError as error:
+        output = {
+            "schema_version": "agdaprover.engine-error.v1",
+            "status": "invalid-task",
+            "diagnostics": [{"kind": "configuration", "message": str(error)}],
+        }
+        exit_code = EXIT_CODES["invalid-task"]
     finally:
         for handled, previous in previous_handlers.items():
             signal.signal(handled, previous)

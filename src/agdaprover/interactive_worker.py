@@ -8,7 +8,7 @@ import os
 import signal
 from pathlib import Path
 
-from .application import default_application
+from .application.selection import add_engine_options, select_engine
 from .contracts import TaskSpec
 from .principal_variation import AtomicPrincipalVariationPublisher
 from .project_configuration import ProjectConfiguration
@@ -26,6 +26,7 @@ def _write_result(path: Path, value: dict[str, object]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
+    add_engine_options(parser)
     parser.add_argument("source", type=Path)
     parser.add_argument("--variation-file", type=Path, required=True)
     parser.add_argument("--result-file", type=Path, required=True)
@@ -79,7 +80,8 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGTERM, stop_at_safe_boundary)
     try:
-        result = default_application.prove_prefix(
+        selection = select_engine(arguments.engine, arguments.symbolic_core)
+        result = selection.application().prove_prefix(
             task,
             progress_observer=AtomicPrincipalVariationPublisher(
                 arguments.variation_file
@@ -87,7 +89,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     except KeyboardInterrupt:
         return 130
-    _write_result(arguments.result_file, result.to_dict())
+    _write_result(
+        arguments.result_file,
+        result.to_dict() | {"engine_selection": selection.report()},
+    )
     return 0
 
 

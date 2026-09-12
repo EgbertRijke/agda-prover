@@ -12,6 +12,7 @@
     "impossibility_certificate", "search_stats", "diagnostics"
   ],
   "properties": {
+    "engine_selection": { "$ref": "engine-selection.schema.json" },
     "schema_version": { "const": "agdaprover.p0.v1" },
     "task_id": { "type": "string", "minLength": 1 },
     "status": {

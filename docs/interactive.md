@@ -32,6 +32,34 @@ modify your file automatically. Closing standard input stops an unfinished run.
 Ordinary search has no implicit wall-time deadline; explicit resource limits
 and finite search allowances still apply.
 
+## Experimental Haskell search
+
+The default engine remains Python while native search is being qualified.
+To try a locally installed native symbolic executable:
+
+```sh
+agda-prover interactive MyFile.agda --engine haskell --symbolic-core /absolute/path/agdaprover-symbolic
+agda-prover step MyFile.agda --engine haskell --symbolic-core /absolute/path/agdaprover-symbolic
+```
+
+The same selection works with `prove`, `prove-prefix` and `editor-api`.
+`AGDAPROVER_ENGINE` and `AGDAPROVER_SYMBOLIC_CORE` supply launch defaults;
+explicit command-line settings take precedence. `auto` currently selects
+Python. An explicit native request never falls back after a failed search,
+and no compiler or download is started to find the executable.
+
+Native interactive search uses the same pause/resume/stop and accept-goal
+messages above. Its between-slice previews are provisional and can change;
+each offered goal still needs independent fresh validation when accepted.
+Native `step` returns one checked transition, leaving any child goals open,
+and fresh-loads its proposed source edit. It is not a theorem-completion claim.
+
+Native search currently requires Agda 2.8.0, uses the bundled focused/OR NNUE
+roles, and supports `--ranker symbolic`. Explicit legacy `--max-depth`,
+one-step model overrides, and `--action-model` are not yet qualified; unsupported
+configurations fail rather than being silently ignored. Use `--engine python`
+for the established configuration surface until native qualification finishes.
+
 ## Deep search
 
 For larger files or harder goals:

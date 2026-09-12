@@ -8,6 +8,8 @@ explicitly. This module owns no processes, search policy, or acceptance decision
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from threading import Lock
@@ -37,6 +39,28 @@ class _Meter:
 
 _meters: ContextVar[tuple[_Meter, ...]] = ContextVar("verifier_budgets", default=())
 _charge_lock = Lock()
+_interaction_validation: ContextVar[bool] = ContextVar(
+    "interaction_validation", default=False
+)
+
+
+@contextmanager
+def fresh_interaction_validation() -> Iterator[None]:
+    """Identify fresh partial validation without pretending a process launched.
+
+    Its interaction commands already reserve verifier calls. The transport
+    records successful starts, including those whose subsequent checking fails.
+    """
+    token = _interaction_validation.set(True)
+    try:
+        yield
+    finally:
+        _interaction_validation.reset(token)
+
+
+def record_interaction_process_start() -> None:
+    if _interaction_validation.get():
+        record_fresh_validation_start()
 
 
 def charge_verifier_request(kind: VerifierRequest) -> None:

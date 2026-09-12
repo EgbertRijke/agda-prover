@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from ..resource_budget import ResourceLimitError, charge_io
-from ..verifier_budget import charge_verifier_request
+from ..verifier_budget import charge_verifier_request, record_interaction_process_start
 from .contracts import (
     BridgeBudget,
     BridgeCost,
@@ -134,6 +134,7 @@ class AgdaJsonTransport:
                 f"could not start Agda interaction process: {error}",
             ) from error
         self._process = process
+        record_interaction_process_start()
         self.process_generation += 1
         self.cost.add(
             process_starts=1,

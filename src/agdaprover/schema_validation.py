@@ -55,6 +55,7 @@ _PROVER_FIELDS = frozenset(
         "impossibility_certificate",
         "search_stats",
         "policy_trace",
+        "engine_selection",
         "diagnostics",
     }
 )
@@ -81,6 +82,9 @@ _STEP_FIELDS = frozenset(
         "cost",
         "attempts",
         "diagnostics",
+        "engine_selection",
+        "action_model_id",
+        "search_stats",
     }
 )
 _COMMON_REQUIRED = frozenset(
@@ -179,6 +183,17 @@ def _validate_common(value: Mapping[str, Any], schema: str) -> None:
         _validate_verifier_budget(value["verifier_budget"], value["status"])
     if "resource_budget" in value:
         _validate_resource_budget(value["resource_budget"], value["status"])
+    if "engine_selection" in value:
+        selection = _mapping(value["engine_selection"], "engine selection")
+        fields = frozenset({"schema_version", "requested", "actual", "reason"})
+        _closed(selection, allowed=fields, required=fields)
+        if (
+            selection["schema_version"] != "agdaprover.engine-selection.v1"
+            or selection["requested"] not in ("auto", "haskell", "python")
+            or selection["actual"] not in ("haskell", "python")
+        ):
+            raise ValueError("unsupported engine selection")
+        _optional_string(selection["reason"], "engine selection reason")
 
 
 def _validate_resource_budget(value: object, status: object) -> None:
@@ -480,6 +495,9 @@ def validate_step_result(value: object) -> Mapping[str, Any]:
         raise ValueError(f"unsupported step status: {result['status']!r}")
     if result["action"] is not None:
         _mapping(result["action"], "action")
+    _optional_string(result.get("action_model_id"), "action_model_id")
+    if result.get("search_stats") is not None:
+        _mapping(result["search_stats"], "search_stats")
     if "attempts" in result:
         if not isinstance(result["attempts"], list):
             raise ValueError("attempts must be a list")

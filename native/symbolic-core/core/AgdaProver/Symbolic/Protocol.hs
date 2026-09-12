@@ -35,7 +35,7 @@ capabilities = object
   , "operations" .= (["capabilities", "observe-goal", "resident-session"] :: [String])
   , "session_operations" .=
       (["pending", "observe", "dependencies", "give", "make-clause", "apply-clause", "reconstruct-goal", "reconstruct-goals", "export-goals",
-        "start-search", "advance-search", "search-cost", "discard-search", "infer-helper", "solve-helper",
+        "start-search", "start-step", "advance-search", "search-cost", "discard-search", "infer-helper", "solve-helper",
         "solve-evidence", "propose-refutation", "evict", "replay", "cost", "cancel", "close"] :: [String])
   , "observation_modes" .= map modeName [minBound .. maxBound]
   , "transition_reuse_policies" .= (["exact", "disabled"] :: [String])

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agdaprover.local/schemas/p0/v1/engine-selection.schema.json",
+  "title": "AgdaProver pre-search engine selection",
+  "type": "object",
+  "required": ["schema_version", "requested", "actual", "reason"],
+  "properties": {
+    "schema_version": {"const": "agdaprover.engine-selection.v1"},
+    "requested": {"enum": ["auto", "haskell", "python"]},
+    "actual": {"enum": ["haskell", "python"]},
+    "reason": {"type": ["string", "null"]}
+  },
+  "additionalProperties": false
+}

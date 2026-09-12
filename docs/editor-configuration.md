@@ -66,6 +66,13 @@ uses the editor-neutral [entry-testing API](../schemas/entry-tests-v1.md).
 The checkout setting identifies **AgdaProver**, not the Agda project you are
 proving. Prefer absolute paths for checkout, executable, and model settings.
 
+Search defaults to the established Python engine. To opt into the experimental
+Haskell engine, launch your editor with `AGDAPROVER_ENGINE=haskell` and
+`AGDAPROVER_SYMBOLIC_CORE` set to an installed `agdaprover-symbolic` executable.
+Both editor modes use these backend launch settings without changing goal
+selection or your source file. Set `AGDAPROVER_ENGINE=python` to switch back.
+See [native search limitations](interactive.md#experimental-haskell-search).
+
 | Setting | Emacs variable | VS Code setting |
 | --- | --- | --- |
 | AgdaProver checkout | `agdaprover-project-root` | `agdaprover.projectRoot` |

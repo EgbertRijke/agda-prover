@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from ..contracts import ProverResult, TaskSpec
+from ..contracts import ProverResult, StepResult, TaskSpec
 from ..kernel.protocol import KernelSessionFactory
 from ..principal_variation import PrincipalVariationObserver
 
@@ -26,3 +26,11 @@ class SymbolicEngine(Protocol):
         session_factory: KernelSessionFactory,
         progress_observer: PrincipalVariationObserver | None = None,
     ) -> ProverResult: ...
+
+    def step(
+        self,
+        task: TaskSpec,
+        *,
+        session_factory: KernelSessionFactory,
+        collect_all: bool = False,
+    ) -> StepResult: ...

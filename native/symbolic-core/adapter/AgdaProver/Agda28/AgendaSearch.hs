@@ -5,7 +5,7 @@
 -- Native controller. All source obligations remain coupled; source selection
 -- and final independent validation belong to the application boundary.
 module AgdaProver.Agda28.AgendaSearch
-  ( Run, Settings (..), Result (..), PauseReason (..), begin, beginSelection, advance, withLimits, withActionLimit, withObservers, cost, frontier ) where
+  ( Run, Settings (..), Result (..), PauseReason (..), begin, beginSelection, beginStep, advance, withLimits, withActionLimit, withObservers, cost, frontier ) where
 
 import Control.Concurrent (MVar, newMVar, withMVar)
 import Data.Aeson (Value, object, (.=))
@@ -48,8 +48,18 @@ begin = beginSelection Nothing
 
 beginSelection :: Maybe (NonEmpty InteractionId) -> S.Session s -> S.StateRef s -> Settings
                -> (Value -> IO ()) -> (S.Transition s -> IO ()) -> IO (Either Failure (Run s))
-beginSelection selection session state settings trace accepted = S.pending session state >>= \case
+beginSelection = beginWithStep False
+
+beginStep :: Maybe (NonEmpty InteractionId) -> S.Session s -> S.StateRef s -> Settings
+          -> (Value -> IO ()) -> (S.Transition s -> IO ()) -> IO (Either Failure (Run s))
+beginStep = beginWithStep True
+
+beginWithStep :: Bool -> Maybe (NonEmpty InteractionId) -> S.Session s -> S.StateRef s -> Settings
+              -> (Value -> IO ()) -> (S.Transition s -> IO ()) -> IO (Either Failure (Run s))
+beginWithStep oneMove selection session state supplied trace accepted = S.pending session state >>= \case
   Left failure -> pure $ Left failure
+  Right _ | oneMove && maybe True ((/= 1) . length) selection ->
+    pure $ Left $ KernelRejected "native-step-requires-one-selected-goal"
   Right pending | Just points <- selection,
       let ids = map interactionId $ NE.toList points,
       Set.size (Set.fromList ids) /= length ids || not (all (`elem` pendingGoals pending) ids) ->
@@ -58,11 +68,14 @@ beginSelection selection session state settings trace accepted = S.pending sessi
     baseline <- nativeWork <$> S.work session
     metrics <- newIORef $ Metrics 0 0 0 0 0 0
     owner <- newMVar ()
-    let queue = maybe (N.start state)
-          (\points -> N.startSelected state (map interactionId $ NE.toList points) (pendingGoals pending)) selection
+    let settings = if oneMove then supplied { evidenceMacro = False } else supplied
+        queue = case selection of
+          Just points | oneMove -> N.startOneMove state (interactionId $ NE.head points) (pendingGoals pending)
+          _ -> maybe (N.start state)
+            (\points -> N.startSelected state (map interactionId $ NE.toList points) (pendingGoals pending)) selection
         selected = maybe (pendingGoals pending) (map interactionId . NE.toList) selection
         refutationGoal = case selected of
-          [point] | keyBranch (S.stateKey state) == 0 -> either (const Nothing) (\goal -> Just (goal, initialMacroWork settings)) $
+          [point] | not oneMove && keyBranch (S.stateKey state) == 0 -> either (const Nothing) (\goal -> Just (goal, initialMacroWork settings)) $
             S.restoreGoalReference session (S.stateKey state) (fromIntegral point)
           _ -> Nothing
     pure $ Right $ Run session settings queue baseline metrics owner trace accepted refutationGoal

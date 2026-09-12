@@ -15,7 +15,7 @@ from collections.abc import Generator
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from ..artifacts import executable_sha256, file_sha256
 from ..bridge.agenda import search_agenda
@@ -26,7 +26,7 @@ from ..bridge.resources import CancellationToken, current_process_rss
 from ..bridge.symbolic import SymbolicProtocolError, search_evidence
 from ..bridge.workspace import project_inputs
 from ..budget import SearchBudget
-from ..contracts import ProverResult, Status, TaskSpec, task_identity
+from ..contracts import ProverResult, StepResult, TaskSpec, task_identity
 from ..kernel.p0 import AgdaBridgeError, open_kernel_session
 from ..kernel.protocol import KernelSessionFactory
 from ..nnue import NNUEModel
@@ -49,6 +49,7 @@ from .native_refutation import (
     FILENAME,
     replay_source,
 )
+from .native_step import NativeStepAttempt, accept_native_step
 from .native_variation import native_principal_variation
 
 
@@ -101,19 +102,60 @@ class NativeProofEngine:
         prefix: bool,
         progress_observer: PrincipalVariationObserver | None = None,
     ) -> ProverResult:
+        result = self._run(
+            task,
+            session_factory=session_factory,
+            cancellation=cancellation,
+            prefix=prefix,
+            progress_observer=progress_observer,
+        )
+        assert isinstance(result, ProverResult)
+        return result
+
+    def step(
+        self,
+        task: TaskSpec,
+        *,
+        session_factory: KernelSessionFactory,
+        collect_all: bool = False,
+    ) -> StepResult:
+        result = self._run(
+            task,
+            session_factory=session_factory,
+            cancellation=None,
+            prefix=False,
+            one_move=True,
+            collect_all=collect_all,
+        )
+        assert isinstance(result, StepResult)
+        return result
+
+    def _run(
+        self,
+        task: TaskSpec,
+        *,
+        session_factory: KernelSessionFactory,
+        cancellation: CancellationToken | None,
+        prefix: bool,
+        progress_observer: PrincipalVariationObserver | None = None,
+        one_move: bool = False,
+        collect_all: bool = False,
+    ) -> ProverResult | StepResult:
         started = time.monotonic()
         source = task.source_file.resolve()
-        result = ProverResult(
+        result: ProverResult | StepResult = (StepResult if one_move else ProverResult)(
             "",
             "internal-error",
             str(source),
             "",
             task.ranker,
-            policy_profile=f"native-{self.controller}-v1",
+            policy_profile="native-step-v1"
+            if one_move
+            else f"native-{self.controller}-v1",
         )
         scope = ResourceScope(task.resources, memory_sample=current_process_rss)
         calls = VerifierCallScope()
-        value_error_status: Status = "invalid-task"
+        value_error_status: Literal["invalid-task", "internal-error"] = "invalid-task"
         try:
             scope.open()
             calls.open(task.max_verifier_calls)
@@ -140,6 +182,10 @@ class NativeProofEngine:
             if prefix and self.controller != "agenda":
                 raise ValueError(
                     "the evidence-only controller does not implement joint solving"
+                )
+            if one_move and self.controller != "agenda":
+                raise ValueError(
+                    "the evidence-only controller does not implement one-step search"
                 )
             work_units = self.work_units
             assert_offline_configuration(task, deadline=budget.deadline)
@@ -199,7 +245,7 @@ class NativeProofEngine:
             identity = task_identity(
                 task,
                 result.source_hash,
-                mode=f"native-{self.controller}-{'prefix' if prefix else 'single'}",
+                mode=f"native-{self.controller}-{'step' if one_move else 'prefix' if prefix else 'single'}",
                 policy_profile=result.policy_profile,
                 toolchain_id=result.toolchain_id,
                 model_ids={"or": result.action_model_id, "focused": result.model_id},
@@ -226,9 +272,10 @@ class NativeProofEngine:
                     )
                     targets = (goal,)
             result.goal = goal.to_dict()
-            result.joint_goals = (
-                [target.to_dict() for target in targets] if prefix else []
-            )
+            if isinstance(result, ProverResult):
+                result.joint_goals = (
+                    [target.to_dict() for target in targets] if prefix else []
+                )
             result.cost.kernel_loads = 1
             result.cost.goal_inspections = 1
             value_error_status = "internal-error"
@@ -254,6 +301,7 @@ class NativeProofEngine:
                         tuple(g.goal_id for g in targets),
                         action_limit=task.max_candidates,
                         principal_variations=progress_observer is not None,
+                        one_move=one_move,
                         **arguments,
                     )
                 else:
@@ -309,8 +357,15 @@ class NativeProofEngine:
                         "action-allowance-spent",
                         "cancelled",
                     }:
+                        if isinstance(result, StepResult) and result.action is not None:
+                            result.search_stats["enumeration_censored"] = True
+                            break
                         raise ResourceLimitError(f"native search {outcome['reason']}")
                     if status == "refutation-candidate":
+                        if isinstance(result, StepResult):
+                            raise SymbolicProtocolError(
+                                "one-step search returned a refutation"
+                            )
                         proposal = outcome.get("refutation")
                         if not isinstance(proposal, dict):
                             raise SymbolicProtocolError(
@@ -365,7 +420,8 @@ class NativeProofEngine:
                         )
                         continue
                     if status in {"unsolved", "resource-exhausted"}:
-                        result.status = status
+                        if not isinstance(result, StepResult) or result.action is None:
+                            result.status = status
                         break
                     if status != "candidate":
                         raise SymbolicProtocolError(
@@ -391,6 +447,37 @@ class NativeProofEngine:
                         )
                         continue
                     entries = exported.get("entries", [])
+                    if isinstance(result, StepResult):
+                        try:
+                            action = accept_native_step(
+                                task,
+                                goal,
+                                entries,
+                                timeout_seconds=budget.require_time(
+                                    "fresh native step validation"
+                                ),
+                            )
+                        except (ValueError, ValidationError) as error:
+                            result.diagnostics.append(
+                                {"kind": "step-rejection", "message": str(error)}
+                            )
+                            continue
+                        inputs.assert_current(deadline=budget.deadline)
+                        result.attempts.append(
+                            NativeStepAttempt(
+                                action,
+                                "accepted" if result.action is None else "applicable",
+                            )
+                        )
+                        result.cost.generated_subgoals += len(
+                            action["expected_state_effect"]["subgoals"]
+                        )
+                        if result.action is None:
+                            result.action = action
+                        result.status = "accepted-step"
+                        if not collect_all:
+                            break
+                        continue
                     patch = reconstruct_native_batch(
                         source.read_text(), targets, entries
                     )
@@ -471,8 +558,11 @@ class NativeProofEngine:
             exhaustion = scope.finish()
             if exhaustion is not None:
                 result.status = "resource-exhausted"
-                result.proof_term = result.patch = None
-                result.impossibility_certificate = None
+                if isinstance(result, ProverResult):
+                    result.proof_term = result.patch = None
+                    result.impossibility_certificate = None
+                else:
+                    result.action = None
                 if result.search_stats is not None:
                     result.search_stats.pop("validated_native_choices", None)
                 result.diagnostics.append(
@@ -484,6 +574,8 @@ class NativeProofEngine:
             result.cost.fresh_validation_runs = calls.fresh_validation_runs
             calls.close()
             result.elapsed_ms = (time.monotonic() - started) * 1000
+            if isinstance(result, StepResult) and result.status != "accepted-step":
+                result.action = None
         return result
 
 

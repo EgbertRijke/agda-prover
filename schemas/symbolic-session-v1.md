@@ -80,6 +80,7 @@ Each operation permits only its listed additional fields:
 | `reconstruct-goals` | `state`, `goal_ids`, `descendant` | Reconstruct a nonempty ordered selection into one new coupled branch; return all entries and final pending obligations |
 | `export-goals` | `state`, `goal_ids`, `descendant` | The same checked batch with native source presentations, including required hidden-clause binders |
 | `start-search` | `state`, `limits`, `ranker`, `model_path`, `focused_model_path`, `native_path`, `focused_search`, `exclude_names`; optional `scheduling`, `goal_ids`, `action_limit` | Create a retained autonomous run over all or selected pending source goals |
+| `start-step` | Same fields; exactly one `goal_ids` entry is required | Retain one-move root alternatives; yield each checked transition without solving its children |
 | `advance-search` | `run`, `steps`, `limits`; optional `action_limit` | Advance a scheduling slice; return a new run revision or terminal finite exhaustion |
 | `search-cost` | `run` | Retained run cost snapshot |
 | `discard-search` | `run` | Retire the run handle/frontier, retaining its cost receipt |
@@ -92,6 +93,17 @@ Each operation permits only its listed additional fields:
 | `cost` | none | Current cumulative native-operation counters |
 | `cancel` | none | Cancel the active request, or report idle |
 | `close` | none | Cancel any active request, then close the session |
+
+`start-step` shares native ranked primitive/clause proposals, ownership, costs,
+slicing and source export with `start-search`. It disables compound evidence
+search and refutation. Each candidate is a single accepted transition from the
+original parent; rejecting a source presentation retains the other root moves.
+Partial exports retain native interaction identities until source rendering.
+The application fresh-loads an authorized partial edit before returning
+`accepted-step`, never `verified`. Its action uses `agdaprover.native-step.v1`,
+tag `native-refinement`, `expression`, `source_edit`,
+`expected_state_effect.subgoals`, and `reconstruction_validation`; it always
+sets `complete_proof: false`. Existing editors apply the structured source edit.
 
 Goal IDs must fit Agda's nonnegative machine-sized interaction identifier.
 The [native refutation contract](native-refutation-v1.md) defines its scoped

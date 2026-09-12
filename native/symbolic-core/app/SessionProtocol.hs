@@ -42,7 +42,7 @@ data Operation = Pending StateKey | Observe StateKey InteractionId P.Observation
   | ReconstructGoal StateKey InteractionId StateKey
   | ReconstructGoals StateKey (NonEmpty InteractionId) StateKey
   | ExportGoals StateKey (NonEmpty InteractionId) StateKey
-  | StartSearch StateKey Search.SearchLimits Policy.RankingMode (Maybe FilePath)
+  | StartSearch Bool StateKey Search.SearchLimits Policy.RankingMode (Maybe FilePath)
       (Maybe FilePath) (Maybe FilePath) Bool [String] Scheduling (Maybe (NonEmpty InteractionId)) (Maybe Integer)
   | AdvanceSearch Run.Key Natural Search.SearchLimits (Maybe (Maybe Integer))
   | RunCost Run.Key | DiscardSearch Run.Key
@@ -139,7 +139,7 @@ parseRequest = withObject "session request" $ \o -> do
       fields ["state", "goal_ids", "descendant"]
       (if opName == "export-goals" then ExportGoals else ReconstructGoals) <$> o .: "state"
         <*> goals <*> o .: "descendant"
-    "start-search" -> do
+    opName | opName `elem` ["start-search", "start-step"] -> do
       fields $ ["state", "limits", "ranker", "model_path", "focused_model_path",
         "native_path", "focused_search", "exclude_names"] ++ filter (`KM.member` o) ["scheduling", "goal_ids", "action_limit"]
       mode <- o .: "ranker" >>= \case
@@ -147,7 +147,7 @@ parseRequest = withObject "session request" $ \o -> do
         "symbolic" -> pure Policy.Symbolic
         _ -> fail "unknown ranker"
       scheduling <- if KM.member "scheduling" o then o .: "scheduling" else pure $ Scheduling 2 8 64 True True
-      StartSearch <$> o .: "state" <*> o .: "limits" <*> pure mode <*> o .: "model_path"
+      StartSearch (opName == "start-step") <$> o .: "state" <*> o .: "limits" <*> pure mode <*> o .: "model_path"
         <*> o .: "focused_model_path" <*> o .: "native_path" <*> o .: "focused_search"
         <*> o .: "exclude_names" <*> pure scheduling
         <*> (if KM.member "goal_ids" o then Just <$> goals else pure Nothing)
@@ -286,13 +286,13 @@ serve output session root = do
 
 perform :: S.Session s -> Run.Store s -> (Value -> IO ()) -> (Value -> IO ()) -> Operation -> IO Value
 perform session runs emit emitRun operation = case operation of
-  StartSearch key limits mode modelPath focusedPath nativePath focused excluded (Scheduling structural macro initial enabled dependenciesEnabled) selection actionLimit ->
+  StartSearch oneMove key limits mode modelPath focusedPath nativePath focused excluded (Scheduling structural macro initial enabled dependenciesEnabled) selection actionLimit ->
     resolved key $ \root -> do
       loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
       focusedModel <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.FocusedBranch)) focusedPath
       case ((++) <$> loaded <*> focusedModel) >>= Policy.models of
         Left reason -> pure $ failureView $ KernelFailure ("model-configuration:" ++ reason)
-        Right models -> Run.start runs root (G.Settings limits mode models focused excluded structural macro initial enabled actionLimit dependenciesEnabled) nativePath selection
+        Right models -> Run.start oneMove runs root (G.Settings limits mode models focused excluded structural macro initial enabled actionLimit dependenciesEnabled) nativePath selection
   AdvanceSearch key steps limits actionLimit -> Run.advance runs key steps limits actionLimit emitRun
   RunCost key -> Run.snapshot runs key
   DiscardSearch key -> Run.discard runs key

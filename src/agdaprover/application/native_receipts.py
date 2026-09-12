@@ -7,12 +7,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..bridge.symbolic import SymbolicProtocolError
-from ..contracts import ProverResult
+from ..contracts import ProverResult, StepResult
 
 
 @dataclass
 class NativeReceipts:
-    result: ProverResult
+    result: ProverResult | StepResult
     trace_bytes: int
     retained_bytes: int = 0
     omitted: int = 0
@@ -29,7 +29,7 @@ class NativeReceipts:
             cost = outcome.get("search_cost", outcome.get("cost"))
             if cost is not None:
                 self.cost(cost)
-            if result.policy_profile == "native-agenda-v1":
+            if result.policy_profile in {"native-agenda-v1", "native-step-v1"}:
                 # Export/reconstruction is checked too, after the last advance.
                 result.cost.speculative_checks = event["cost"]["checking_attempts"]
                 result.cost.case_split_checks = event["cost"]["clause_queries"]

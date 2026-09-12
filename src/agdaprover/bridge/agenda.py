@@ -29,6 +29,7 @@ def search_agenda(
     publish: Callable[[dict[str, Any]], None],
     quantum: int = 64,
     principal_variations: bool = False,
+    one_move: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """Yield provisional exports, resuming after caller rejection.
 
@@ -40,6 +41,8 @@ def search_agenda(
         raise ValueError("native scheduling quantum must be positive")
     if type(principal_variations) is not bool:
         raise ValueError("native principal-variation switch must be boolean")
+    if type(one_move) is not bool or (one_move and len(goal_ids) != 1):
+        raise ValueError("native step must select exactly one goal")
     if (
         not goal_ids
         or any(type(g) is not int or g < 0 for g in goal_ids)
@@ -49,7 +52,7 @@ def search_agenda(
     with resident_session(executable, project, budget, cancellation) as connection:
         limits = {"work_units": work_units}
         reply = connection.request(
-            "start-search",
+            "start-step" if one_move else "start-search",
             {
                 "state": connection.root_state,
                 "goal_ids": list(goal_ids),

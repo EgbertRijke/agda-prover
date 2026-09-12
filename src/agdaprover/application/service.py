@@ -65,7 +65,9 @@ class ProverApplication:
 
     def step(self, task: TaskSpec, *, collect_all: bool = False) -> StepResult:
         if self.engine is not None:
-            raise ValueError("selected engine has not qualified one-step operations")
+            return self.engine.step(
+                task, collect_all=collect_all, session_factory=self.session_factory
+            )
         return propose_step(
             task,
             collect_all=collect_all,

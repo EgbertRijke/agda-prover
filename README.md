@@ -161,6 +161,9 @@ The slots have distinct roles; see [model selection](schemas/model-defaults-v1.m
 
 The [interactive command](docs/interactive.md) supports progress inspection,
 pause, resume, stop, and accepting individual completed goals.
+The default engine remains Python. An opt-in
+[Haskell engine](docs/interactive.md#experimental-haskell-search) supports the
+same commands while its wider benchmark qualification is in progress.
 
 ## What to expect
 
