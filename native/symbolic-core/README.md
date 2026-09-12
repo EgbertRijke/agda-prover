@@ -36,6 +36,14 @@ Agda checks the source under its declared options. No library registry is
 discovered implicitly; imports use explicit include roots and Agda's primitives.
 Agda may generate normal import interfaces in that copy.
 
+Resident sessions additionally accept `--library-file=ABSOLUTE-REGISTRY` and
+repeated `--pin-config=ABSOLUTE-FILE` arguments before the checking-options
+separator. Supply the registry and every prepared project manifest as pins.
+The application does this automatically through the existing overlay boundary.
+Default-library discovery stays disabled, and Agda's own manifest parser and
+runtime-directory lookup remain authoritative. Configuration bytes are pinned
+before loading and checked at every resident request.
+
 For `observe`, stdout is one JSON response; progress and diagnostics go to stderr. A checking or
 unsupported-observation failure has a nonzero exit status. An observation is
 never a verified proof and never edits goal bodies.
@@ -276,11 +284,11 @@ assets. No model bytes or training policy change in this milestone.
 
 The application prepares an immutable project overlay, supervises its worker,
 reconstructs the candidate and freshly validates it with ordinary Agda before
-reporting `verified`. This slice accepts standalone projects and explicit
-source imports; `.agda-lib` manifest routing awaits H8 and is explicitly
-rejected here, never silently ignored. Existing production library support is
-unchanged. Autonomous clause scheduling, full induction workflows, joint solving and editor migration remain
-later milestones, not implied by `search_available`.
+reporting `verified`. This slice accepts standalone projects and isolated
+`.agda-lib` environments, preserving per-library and explicit command options.
+Existing production library support is unchanged. Complete native joint and
+editor workflow integration remain later milestones, not implied by
+`search_available`.
 
 `focused_search=False` on `NativeEvidenceEngine` disables only the focused fast
 path for paired measurements. `task.model_path` replaces the focused weights;

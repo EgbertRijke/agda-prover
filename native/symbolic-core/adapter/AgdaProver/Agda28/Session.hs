@@ -9,6 +9,7 @@
 module AgdaProver.Agda28.Session
   ( Session, StateRef, GoalRef, CheckedEvidence, Transition
   , withSession, stateKey, restoreReference, restoreGoalReference, goalState, goalId
+  , Configuration, pinConfiguration, pinRuntimeConfiguration, withSessionConfiguration
   , inspect, pending, tryExpression
   , solveEvidence, solveHelper
   , ClauseProposal, makeClauses, clauseView, applyClause
@@ -44,6 +45,8 @@ import System.Random (randomIO)
 
 import Agda.Interaction.BasicOps (parseExprIn, give_)
 import Agda.Interaction.Base (UseForce (WithoutForce))
+import Agda.Interaction.Library (getPrimitiveLibDir, getAgdaLibFile, AgdaLibFile (..))
+import Agda.Interaction.Library.Base (agdaLibFiles, runLibM)
 import Agda.Syntax.Abstract qualified as A
 import Agda.Syntax.Common (InteractionId, interactionId, NameId)
 import Agda.Syntax.Common.Pretty (prettyShow)
@@ -56,6 +59,7 @@ import Agda.TypeChecking.Reduce (instantiateFull)
 import Agda.Utils.FileName (filePath)
 import Agda.Utils.IO.UTF8 qualified as UTF8
 import Agda.Utils.Lens ((^.))
+import Agda.Utils.Null (empty)
 import AgdaProver.Agda28.Observation (observeGoal, encodeGoal, openInteractionPoints)
 import AgdaProver.Agda28.EvidenceSearch qualified as Search
 import AgdaProver.Agda28.Clauses qualified as Clauses
@@ -129,6 +133,28 @@ data Owner = Owner
   { ownerEpoch :: Integer, ownerClosed :: Bool, ownerNext :: Integer
   , ownerBranches :: Map.Map Integer Branch }
 data SourceWitness = SourceWitness FilePath FilePath BS.ByteString
+-- Captured before Agda setup/load, not after an option file may have changed.
+newtype Configuration = Configuration [SourceWitness]
+
+pinConfiguration :: [FilePath] -> IO Configuration
+pinConfiguration paths = Configuration <$> mapM capture paths
+ where
+  capture path = do
+    canonical <- canonicalizePath path
+    bytes <- BS.readFile path
+    pure $ SourceWitness path canonical bytes
+
+-- Agda owns its runtime location and manifest discovery. Do not encode an
+-- installed path or a built-in library filename in the solver.
+pinRuntimeConfiguration :: Configuration -> IO Configuration
+pinRuntimeConfiguration (Configuration project) = do
+  directory <- getPrimitiveLibDir
+  ((result, warnings), _) <- runLibM (getAgdaLibFile $ filePath directory) empty
+  case result of
+    Right manifests | null warnings -> do
+      Configuration runtime <- pinConfiguration $ map _libFile manifests
+      pure $ Configuration $ runtime ++ project
+    _ -> E.throwIO $ userError "symbolic-session-invalid-runtime-library-configuration"
 
 stateKey :: StateRef s -> StateKey
 stateKey (StateRef key) = key
@@ -147,7 +173,19 @@ restoreGoalReference session key point = GoalRef <$> restoreReference session ke
 -- imported modules. Pin that text and the current exact bytes/path together;
 -- neither a filesystem timestamp nor a hash collision can validate an epoch.
 withSession :: Interface -> (forall s. Session s -> StateRef s -> IO a) -> TCM a
-withSession root use = do
+withSession = withSessionConfiguration (Configuration [])
+
+withSessionConfiguration :: Configuration -> Interface
+                         -> (forall s. Session s -> StateRef s -> IO a) -> TCM a
+withSessionConfiguration (Configuration configuration) root use = do
+  libraries <- Map.keys . agdaLibFiles <$> useTC stLibCache
+  -- Never retain a branch loaded with an unpinned project configuration. The
+  -- caller's prepared overlay supplies these paths; Agda supplies actual usage.
+  known <- liftIO $ mapM canonicalizePath libraries
+  let pinnedPaths = Set.fromList [canonical | SourceWitness _ canonical _ <- configuration]
+      unpinned = filter (`Set.notMember` pinnedPaths) known
+  unless (null unpinned) $
+    genericError $ "symbolic-session-unpinned-library-configuration: " ++ unwords unpinned
   visited <- useTC stVisitedModules
   mapping <- moduleToSourceId <$> useTC stModuleToSource
   let interfaces = Map.insert (iTopLevelModuleName root) root $
@@ -161,15 +199,18 @@ withSession root use = do
   origins <- Map.fromList <$> forM points (\point -> (point,) <$> Recursion.owner point)
   initial <- getTC
   liftIO $ do
-    ledger <- newIORef emptyWork
+    ledger <- newIORef emptyWork { inputBytesRead = sum
+      [toInteger $ BS.length bytes | SourceWitness _ _ bytes <- configuration] }
     witnesses <- mapM (pin ledger) sources
     a <- randomIO :: IO Word64
     b <- randomIO :: IO Word64
     owner <- newMVar $ Owner 0 False 1 (Map.singleton 0 $ Branch (Just initial) Nothing origins)
     active <- newIORef Nothing
     let nonce = showHex a "-" ++ showHex b ""
-        session = Session nonce owner env witnesses ledger active
+        session = Session nonce owner env (configuration ++ witnesses) ledger active
         rootRef = StateRef $ StateKey nonce 0 0
+    stable <- inputsMatch session
+    unless stable $ E.throwIO $ userError "symbolic-session-configuration-changed-during-load"
     E.finally (use session rootRef) (close session)
 
 pin :: IORef Work -> (FilePath, TL.Text) -> IO SourceWitness

@@ -107,8 +107,6 @@ def resident_session(
     This is transport, not a search policy or verification authority. Multiple
     requests never restart the wall/output/resource envelope.
     """
-    if project.libraries:
-        raise ValueError("native library-manifest routing is pending H8")
     with tempfile.TemporaryDirectory(prefix="agdaprover-symbolic-") as directory:
         root = Path(directory)
         overlay = materialize_project(project, root, budget, cancellation)
@@ -120,6 +118,12 @@ def resident_session(
                 "session",
                 str(overlay.source_for(project.root_module)),
                 *map(str, overlay.include_roots),
+                *(
+                    [f"--library-file={overlay.library_file}"]
+                    if overlay.library_file
+                    else []
+                ),
+                *(f"--pin-config={path}" for path in overlay.configuration_paths),
                 "--",
                 *project.command_options,
             ]

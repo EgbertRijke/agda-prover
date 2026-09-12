@@ -36,6 +36,21 @@ prepared project copy. No ambient library registry is consulted. The initial
 `session-start` event supplies the root state key. All events have
 `schema_version: "agdaprover.symbolic-session-event.v1"`.
 
+Library-backed startup adds `--library-file=ABSOLUTE-REGISTRY` and repeated
+`--pin-config=ABSOLUTE-FILE` before `-- CHECKING-OPTIONS ...`. Exactly one or no
+registry is allowed. Every configuration path is absolute; the registry itself
+must be pinned. Agda loads only this registry, with default libraries disabled.
+The native owner compares every manifest in Agda's actual library cache against
+preload pins. Agda locates its own primitive-library manifests; these are also
+pinned, not exempted or recognized by hard-coded filename. Missing pins or a
+configuration change during load prevent session startup. Subsequent byte/path
+changes invalidate the epoch. The cumulative input ledger includes these reads.
+
+The application supplies paths from the existing immutable project overlay,
+not the user's ambient registry. Per-library flags remain attached to their
+original libraries, while explicit command options retain their existing role.
+No library-specific interpretation or semantic source rewriting is performed.
+
 A request is one UTF-8 JSON line, with these exact common fields:
 
 ```json

@@ -33,6 +33,7 @@ class ProjectOverlay:
     total_bytes: int
     library_file: Path | None
     include_roots: tuple[Path, ...]
+    configuration_paths: tuple[Path, ...] = ()
 
     def source_for(self, module: ModuleId) -> Path:
         return dict(self.sources)[module]
@@ -342,7 +343,12 @@ def _materialize_project(
         )
     )
     return ProjectOverlay(
-        tuple(sources), tuple(sorted(artifacts)), total_bytes, registry, include_roots
+        tuple(sources),
+        tuple(sorted(artifacts)),
+        total_bytes,
+        registry,
+        include_roots,
+        tuple(Path(path) for path in manifests) + ((registry,) if registry else ()),
     )
 
 
