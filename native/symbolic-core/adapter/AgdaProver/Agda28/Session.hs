@@ -10,6 +10,7 @@ module AgdaProver.Agda28.Session
   ( Session, StateRef, GoalRef, CheckedEvidence, Transition
   , withSession, stateKey, restoreReference, restoreGoalReference, goalState, goalId
   , Configuration, pinConfiguration, pinRuntimeConfiguration, withSessionConfiguration
+  , withSessionConfigurationReuse
   , inspect, pending, tryExpression
   , solveEvidence, solveHelper, RefutationProposal, proposeRefutation, refutationView, refutationKind
   , Refutation.Kind (..)
@@ -82,9 +83,10 @@ import Structure qualified as S
 -- owner's epoch and branch. Wire keys cannot construct these values directly.
 type role Session nominal
 data Session s = Session
-  { sessionNonce :: String, sessionOwner :: MVar Owner, sessionEnv :: TCEnv
+  { sessionNonce :: String, sessionOwner :: MVar (Owner s), sessionEnv :: TCEnv
   , sessionInputs :: [SourceWitness], sessionWork :: IORef Work
   , sessionActive :: IORef (Maybe ThreadId)
+  , sessionReuse :: ReusePolicy
   }
 type role StateRef nominal
 newtype StateRef s = StateRef StateKey
@@ -119,7 +121,7 @@ refutationView (RefutationProposal goal snapshot) = object $
   ("parent" .= stateKey (goalState goal)) : Refutation.viewFields (goalId goal) snapshot
 
 type role TermProposal nominal
-data TermProposal s = TermProposal (GoalRef s) Draft [(T.Text, T.Text)]
+data TermProposal s = TermProposal (GoalRef s) Draft [(T.Text, T.Text)] ActionIdentity
 
 data TermProposals s = CompleteTerms [TermProposal s] | CensoredTerms [TermProposal s]
 
@@ -127,10 +129,10 @@ data ClauseProposals = CompleteClauses [(ClauseAction, [(T.Text, T.Text)])]
   | CensoredClauses [(ClauseAction, [(T.Text, T.Text)])]
 
 termProposalGoal :: TermProposal s -> GoalRef s
-termProposalGoal (TermProposal goal _ _) = goal
+termProposalGoal (TermProposal goal _ _ _) = goal
 
 termProposalChoices :: TermProposal s -> [(T.Text, T.Text)]
-termProposalChoices (TermProposal _ _ choices) = choices
+termProposalChoices (TermProposal _ _ choices _) = choices
 
 -- Preserve checked-source abstract syntax as well as internal evidence. Agda's
 -- display reifier may use postfix projections: display syntax is not a draft
@@ -138,12 +140,22 @@ termProposalChoices (TermProposal _ _ choices) = choices
 data Allocation = Allocation NameId InteractionId
 data Draft = TextDraft DraftExpression | NativeDraft A.Expr Allocation
 data DraftAction = DraftAction InteractionId Draft
+-- Agda's A.Expr equality deliberately ignores some scope/presentation fields.
+-- Do not use it (or a rendered/hashed type) as an exact application witness.
+-- An issued identity seals the original proposal's full native draft/allocation.
+data ActionIdentity = SourceAction String | IssuedAction Integer Integer
+  deriving (Eq, Ord)
+data ApplicationKey = ApplicationKey StateKey InteractionId ActionIdentity
+  deriving (Eq, Ord)
 data Branch = Branch
   { branchState :: Maybe TCState, branchTrail :: Maybe (Integer, DraftAction)
-  , branchOrigins :: Map.Map InteractionId (Maybe Recursion.Owner) }
-data Owner = Owner
+  , branchOrigins :: Map.Map InteractionId (Maybe Recursion.Owner)
+  , branchApplication :: Maybe ApplicationKey }
+type role Owner nominal
+data Owner s = Owner
   { ownerEpoch :: Integer, ownerClosed :: Bool, ownerNext :: Integer
-  , ownerBranches :: Map.Map Integer Branch }
+  , ownerBranches :: Map.Map Integer Branch
+  , ownerApplications :: Map.Map ApplicationKey (Transition s) }
 data SourceWitness = SourceWitness FilePath FilePath BS.ByteString
 -- Captured before Agda setup/load, not after an option file may have changed.
 newtype Configuration = Configuration [SourceWitness]
@@ -189,7 +201,12 @@ withSession = withSessionConfiguration (Configuration [])
 
 withSessionConfiguration :: Configuration -> Interface
                          -> (forall s. Session s -> StateRef s -> IO a) -> TCM a
-withSessionConfiguration (Configuration configuration) root use = do
+withSessionConfiguration = withSessionConfigurationReuse ExactReuse
+
+-- Retain an explicit ablation path without changing the checked-transition API.
+withSessionConfigurationReuse :: ReusePolicy -> Configuration -> Interface
+                             -> (forall s. Session s -> StateRef s -> IO a) -> TCM a
+withSessionConfigurationReuse reuse (Configuration configuration) root use = do
   libraries <- Map.keys . agdaLibFiles <$> useTC stLibCache
   -- Never retain a branch loaded with an unpinned project configuration. The
   -- caller's prepared overlay supplies these paths; Agda supplies actual usage.
@@ -216,10 +233,11 @@ withSessionConfiguration (Configuration configuration) root use = do
     witnesses <- mapM (pin ledger) sources
     a <- randomIO :: IO Word64
     b <- randomIO :: IO Word64
-    owner <- newMVar $ Owner 0 False 1 (Map.singleton 0 $ Branch (Just initial) Nothing origins)
+    owner <- newMVar $ Owner 0 False 1
+      (Map.singleton 0 $ Branch (Just initial) Nothing origins Nothing) Map.empty
     active <- newIORef Nothing
     let nonce = showHex a "-" ++ showHex b ""
-        session = Session nonce owner env (configuration ++ witnesses) ledger active
+        session = Session nonce owner env (configuration ++ witnesses) ledger active reuse
         rootRef = StateRef $ StateKey nonce 0 0
     stable <- inputsMatch session
     unless stable $ E.throwIO $ userError "symbolic-session-configuration-changed-during-load"
@@ -264,7 +282,7 @@ work = readIORef . sessionWork
 -- thread do not: modifyMVar restores the original owner if checking is cancelled
 -- or raises an IO exception. No speculative TCState is then published.
 request :: Session s -> StateRef s
-        -> (Owner -> TCState -> IO (Owner, Either Failure a))
+        -> (Owner s -> TCState -> IO (Owner s, Either Failure a))
         -> IO (Either Failure a)
 request session ref action = recover $ modifyMVar (sessionOwner session) $ \owner ->
   E.bracket begin finish $ \_ -> do
@@ -302,7 +320,7 @@ request session ref action = recover $ modifyMVar (sessionOwner session) $ \owne
     , E.Handler $ \(_ :: E.IOException) -> pure $ Left (KernelFailure "native-io-failure")
     ]
 
-lookupState :: Session s -> StateRef s -> Owner -> Either Failure TCState
+lookupState :: Session s -> StateRef s -> Owner s -> Either Failure TCState
 lookupState session (StateRef key) owner
   | keySession key /= sessionNonce session = Left ForeignSession
   | ownerClosed owner = Left ClosedSession
@@ -311,8 +329,9 @@ lookupState session (StateRef key) owner
       Nothing -> Left UnknownState
       Just branch -> maybe (Left EvictedState) Right (branchState branch)
 
-invalidate :: Owner -> Owner
-invalidate owner = owner { ownerEpoch = ownerEpoch owner + 1, ownerBranches = Map.empty }
+invalidate :: Owner s -> Owner s
+invalidate owner = owner { ownerEpoch = ownerEpoch owner + 1,
+  ownerBranches = Map.empty, ownerApplications = Map.empty }
 
 close :: Session s -> IO ()
 close session = modifyMVar (sessionOwner session) $ \owner ->
@@ -383,7 +402,7 @@ proposeRefutation session goal limit = request session (goalState goal) $ \owner
 tryExpression :: Session s -> GoalRef s -> DraftExpression
               -> IO (Either Failure (Transition s))
 tryExpression session goal expression = request session (goalState goal) $ \owner state ->
-  check session owner (goalState goal) state (DraftAction (goalId goal) $ TextDraft expression) False
+  checkApplication session owner goal state (SourceAction $ draftSource expression) (TextDraft expression)
 
 inferHelper :: Session s -> GoalRef s -> ObservationMode -> DraftExpression
             -> IO (Either Failure (HelperProposal s))
@@ -488,15 +507,43 @@ proposeTerms session goal limits models mode native excluded emit = do
       if not exists then pure $ Left UnknownGoal else withInteractionId point $ do
         target <- getMetaTypeInContext =<< lookupInteractionId point
         Right <$> Search.primitiveProposals stats limits models mode native emit namespace excluded origin target
-    pure (owner, fmap (map $ \(expression, selected) -> TermProposal goal
-      (nativeDraft expression allocation) selected) $ result >>= id)
+    pure (owner, fmap (zipWith (\ordinal (expression, selected) -> TermProposal goal
+      (nativeDraft expression allocation) selected (IssuedAction (requests ledger) ordinal)) [0..]) $ result >>= id)
   observed <- readIORef stats
   recordSearchWork session observed
   pure (observed, (if Search.workExhausted observed then CensoredTerms else CompleteTerms) <$> outcome)
 
 applyTerm :: Session s -> TermProposal s -> IO (Either Failure (Transition s))
-applyTerm session (TermProposal goal draft _) = request session (goalState goal) $ \owner state ->
-  check session owner (goalState goal) state (DraftAction (goalId goal) draft) False
+applyTerm session (TermProposal goal draft _ identity) = request session (goalState goal) $ \owner state ->
+  checkApplication session owner goal state identity draft
+
+-- Only exact applications with an accepted, still-resident child are reused.
+-- Parent epoch/residency and pinned source bytes are checked by request before
+-- and after this operation. Failures and interrupted/blocked searches are never
+-- memoized, and reconstruction/replay deliberately call check directly.
+checkApplication :: Session s -> Owner s -> GoalRef s -> TCState -> ActionIdentity -> Draft
+                 -> IO (Owner s, Either Failure (Transition s))
+checkApplication session owner goal initial identity draft
+  | sessionReuse session == NoReuse = recheck owner
+  | otherwise = do
+      charge (sessionWork session) $ \w -> w
+        { exactReuseQueries = exactReuseQueries w + 1, symbolicActions = symbolicActions w + 1 }
+      case Map.lookup key (ownerApplications owner) of
+        Just transition | Right _ <- lookupState session (transitionState transition) owner -> do
+          charge (sessionWork session) $ \w -> w { exactReuseHits = exactReuseHits w + 1 }
+          pure (owner, Right transition)
+        _ -> do
+          (next, result) <- recheck owner
+          pure $ case result of
+            Left _ -> (next, result)
+            Right transition -> (next
+              { ownerApplications = Map.insert key transition (ownerApplications next)
+              , ownerBranches = Map.adjust (\b -> b { branchApplication = Just key })
+                  (keyBranch $ stateKey $ transitionState transition) (ownerBranches next)
+              }, result)
+ where
+  key = ApplicationKey (stateKey $ goalState goal) (goalId goal) identity
+  recheck current = check session current (goalState goal) initial (DraftAction (goalId goal) draft) False
 
 proposeClauseActions :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
                      -> Policy.RankingMode -> Maybe (NativeScorer n) -> (Value -> IO ())
@@ -567,8 +614,8 @@ recordSearchWork session observed =
     , helperQueries = helperQueries w + Search.helperInferenceQueries observed
     , clauseQueries = clauseQueries w + Search.helperClauseQueries observed }
 
-check :: Session s -> Owner -> StateRef s -> TCState -> DraftAction -> Bool
-      -> IO (Owner, Either Failure (Transition s))
+check :: Session s -> Owner s -> StateRef s -> TCState -> DraftAction -> Bool
+      -> IO (Owner s, Either Failure (Transition s))
 check session owner parent initial (DraftAction point expression) isReplay = do
   let previous = maybe Map.empty branchOrigins $
         Map.lookup (keyBranch $ stateKey parent) (ownerBranches owner)
@@ -610,7 +657,7 @@ check session owner parent initial (DraftAction point expression) isReplay = do
             [(p, Map.findWithDefault origin p previous)
             | number' <- pendingGoals obligations, let p = fromIntegral number']
           draft = DraftAction point $ nativeDraft scoped child
-          branch = Branch (Just child) (Just (keyBranch $ stateKey parent, draft)) origins
+          branch = Branch (Just child) (Just (keyBranch $ stateKey parent, draft)) origins Nothing
           next = owner { ownerNext = number + 1,
                          ownerBranches = Map.insert number branch (ownerBranches owner) }
           kind | not (null $ pendingGoals obligations) = AcceptedPartial
@@ -692,7 +739,7 @@ reconstructWith present session parent points descendant = request session paren
               (done, results) <- go allocation next (transitionState transition) child rest
               pure (done, ((point, transition, source):) <$> results)
 
-reconstructionDrafts :: Session s -> Owner -> StateRef s -> StateRef s
+reconstructionDrafts :: Session s -> Owner s -> StateRef s -> StateRef s
                      -> Either Failure ([(InteractionId, A.Expr)], [Allocation])
 reconstructionDrafts session owner parent descendant = drafts descendant >>= nativeActions
  where
@@ -733,10 +780,13 @@ evidenceView evidence = do
 
 evict :: Session s -> StateRef s -> IO (Either Failure ())
 evict session ref = request session ref $ \owner _ ->
-  let number = keyBranch (stateKey ref) in
+  let number = keyBranch (stateKey ref)
+      key = Map.lookup number (ownerBranches owner) >>= branchApplication
+  in
   if number == 0 then pure (owner, Left CannotEvictRoot) else
-  pure (owner { ownerBranches = Map.adjust (\b -> b { branchState = Nothing })
-                 number (ownerBranches owner) }, Right ())
+  pure (owner { ownerBranches = Map.adjust (\b -> b { branchState = Nothing, branchApplication = Nothing })
+                 number (ownerBranches owner)
+              , ownerApplications = maybe id Map.delete key (ownerApplications owner) }, Right ())
 
 -- Replay deliberately creates new branch identities. Even equal-looking
 -- observations cannot witness equality of arbitrary TCStates or old evidence.

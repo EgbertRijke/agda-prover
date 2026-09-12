@@ -35,6 +35,7 @@ import Agda.Version (version)
 import AgdaProver.Agda28.Observation (observeGoal, encodeGoal, openInteractionPoints)
 import AgdaProver.Agda28.Session qualified as Session
 import AgdaProver.Symbolic.Protocol qualified as P
+import AgdaProver.Symbolic.SessionTypes (ReusePolicy (..))
 import SessionProtocol qualified
 
 main :: IO ()
@@ -104,9 +105,15 @@ run emit sessionFailure = do
       | let (configuration, suffix) = break (== "--") arguments
             registries = mapMaybe (stripPrefix "--library-file=") configuration
             pins = mapMaybe (stripPrefix "--pin-config=") configuration
+            reuseFlags = mapMaybe (stripPrefix "--reuse=") configuration
             includes = filter (not . isPrefixOf "--") configuration
       , isAbsolute file, all isAbsolute (includes ++ registries ++ pins)
-      , length configuration == length includes + length registries + length pins
+      , length configuration == length includes + length registries + length pins + length reuseFlags
+      , Just reuse <- case reuseFlags of
+          [] -> Just ExactReuse
+          ["exact"] -> Just ExactReuse
+          ["disabled"] -> Just NoReuse
+          _ -> Nothing
       , length registries <= 1 -> do
         let registry = case registries of [path] -> Just path; _ -> Nothing
         unless (all (`elem` pins) registries) $ reject "unpinned-library-registry"
@@ -124,7 +131,7 @@ run emit sessionFailure = do
         opts <- case runOptM $ parsePragmaOptions (OptionsPragma (drop 1 suffix) noRange) initial of
           (Right pragmas, []) -> pure initial { optPragmaOptions = pragmas }
           _ -> reject "unsupported-checking-options"
-        runTCMPrettyErrors $ runAgdaWithOptions (session emit sessionFailure file pinned) program opts
+        runTCMPrettyErrors $ runAgdaWithOptions (session emit sessionFailure file pinned reuse) program opts
     "observe" : file : goal : mode : includes
       | isAbsolute file, all isAbsolute includes
       , Just point <- readGoal goal, Just policy <- P.parseMode mode -> do
@@ -162,8 +169,8 @@ observe emit file point mode setup _ = do
     UnsolvedConstraints{} -> True
     _ -> False
 
-session :: (Value -> IO ()) -> (String -> IO ()) -> FilePath -> Session.Configuration -> Interactor ()
-session emit failure file pinned setup _ = do
+session :: (Value -> IO ()) -> (String -> IO ()) -> FilePath -> Session.Configuration -> ReusePolicy -> Interactor ()
+session emit failure file pinned reuse setup _ = do
   setup
   path <- liftIO $ absolute file
   result <- typeCheckMain TypeCheck =<< parseSource =<< srcFromPath path
@@ -172,7 +179,7 @@ session emit failure file pinned setup _ = do
   -- Handle protocol exceptions before they cross TCM's liftIO boundary, which
   -- would otherwise relabel them as Agda checking errors. Exit outside Agda's
   -- driver after its own success exit; publish only the precise error once.
-  Session.withSessionConfiguration pinned (crInterface result) $ \owner root ->
+  Session.withSessionConfigurationReuse reuse pinned (crInterface result) $ \owner root ->
     SessionProtocol.serve emit owner root `catches`
       [ Handler $ \err -> failure (SessionProtocol.protocolFailureName err)
       , Handler $ \(_ :: IOException) -> failure "native-io-failure"

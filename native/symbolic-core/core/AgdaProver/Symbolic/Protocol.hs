@@ -38,6 +38,7 @@ capabilities = object
         "start-search", "advance-search", "search-cost", "discard-search", "infer-helper", "solve-helper",
         "solve-evidence", "propose-refutation", "evict", "replay", "cost", "cancel", "close"] :: [String])
   , "observation_modes" .= map modeName [minBound .. maxBound]
+  , "transition_reuse_policies" .= (["exact", "disabled"] :: [String])
   , "search_available" .= True
   , "search_fragments" .=
       (["evidence-application-v1", "structural-construction-v1", "structural-recursion-v1",

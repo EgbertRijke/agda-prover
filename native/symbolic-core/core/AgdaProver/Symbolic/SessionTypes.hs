@@ -3,7 +3,7 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Symbolic.SessionTypes
   ( StateKey (..), DraftExpression (..), Pending (..), TransitionKind (..)
-  , Failure (..), Work (..), emptyWork, kindName, failureName ) where
+  , Failure (..), ReusePolicy (..), Work (..), emptyWork, kindName, failureName ) where
 
 import Control.Monad (unless)
 import Data.Aeson
@@ -71,11 +71,14 @@ failureName Cancelled = "cancelled"
 failureName CannotEvictRoot = "cannot-evict-root"
 failureName ReplayRejected{} = "replay-rejected"
 
+data ReusePolicy = NoReuse | ExactReuse deriving (Eq, Show)
+
 -- Physical time is integer nanoseconds/picoseconds, never rounded per action.
 -- This ledger belongs to the owner, outside every restorable Agda snapshot.
 data Work = Work
   { requests :: !Integer, checkingAttempts :: !Integer, replayedActions :: !Integer
   , symbolicActions :: !Integer
+  , exactReuseQueries :: !Integer, exactReuseHits :: !Integer
   , refutationQueries :: !Integer, refutationAssignments :: !Integer, refutationCandidates :: !Integer
   , clauseQueries :: !Integer, helperQueries :: !Integer
   , acceptedChecks :: !Integer, rejectedChecks :: !Integer, cancelledRequests :: !Integer
@@ -86,6 +89,7 @@ emptyWork :: Work
 emptyWork = Work
   { requests = 0, checkingAttempts = 0, replayedActions = 0, clauseQueries = 0, helperQueries = 0
   , symbolicActions = 0
+  , exactReuseQueries = 0, exactReuseHits = 0
   , refutationQueries = 0, refutationAssignments = 0, refutationCandidates = 0
   , acceptedChecks = 0, rejectedChecks = 0, cancelledRequests = 0
   , inputBytesRead = 0, elapsedNanoseconds = 0, cpuPicoseconds = 0 }
@@ -94,6 +98,7 @@ instance ToJSON Work where
   toJSON w = object
     ["requests" .= requests w, "checking_attempts" .= checkingAttempts w,
      "symbolic_actions" .= symbolicActions w,
+     "exact_reuse_queries" .= exactReuseQueries w, "exact_reuse_hits" .= exactReuseHits w,
      "refutation_queries" .= refutationQueries w,
      "refutation_assignments" .= refutationAssignments w,
      "refutation_candidates" .= refutationCandidates w,

@@ -15,7 +15,9 @@ None grants proof verification authority or edits user files.
   `TCState`. The existing JSON bridge remains unchanged.
 - Each candidate starts from the requested full state. Failure, interruption,
   observation, and success all leave the parent available and unchanged.
-  A successful proof transition publishes a different child key. Checked native evidence belongs to
+  A successful proof transition publishes a child key distinct from its parent;
+  an identical application may reuse its already checked, resident child.
+  Checked native evidence belongs to
   that child, not to a parent or sibling with coincidentally equal meta numbers.
 - Pending interactions, hidden metas, and constraints remain obligations.
   `apparently-closed` is not `verified`; fresh validation remains independent.
@@ -35,6 +37,11 @@ Start `agdaprover-symbolic session ABSOLUTE-FILE [ABSOLUTE-INCLUDE ...]` in a
 prepared project copy. No ambient library registry is consulted. The initial
 `session-start` event supplies the root state key. All events have
 `schema_version: "agdaprover.symbolic-session-event.v1"`.
+
+The optional startup flag `--reuse=exact` (default) enables exact application
+reuse; `--reuse=disabled` forces each application to check again. It precedes
+`-- CHECKING-OPTIONS`, may occur at most once, and accepts no other values.
+Capabilities advertise these values as `transition_reuse_policies`.
 
 Library-backed startup adds `--library-file=ABSOLUTE-REGISTRY` and repeated
 `--pin-config=ABSOLUTE-FILE` before `-- CHECKING-OPTIONS ...`. Exactly one or no
@@ -105,7 +112,7 @@ Fatal startup or transport errors emit `session-error` and exit nonzero.
 
 An operation's rejection distinguishes foreign session, stale epoch/inputs,
 unknown/evicted state, unknown goal, kernel rejection/blocking, cancellation,
-and internal failure. Only successful transitions issue a usable new state.
+and internal failure. Only successful transitions issue or reuse a usable child state.
 Agda warnings about unresolved goals/metas/constraints remain obligations;
 new non-meta warnings, including termination failures, reject the transition.
 
@@ -114,6 +121,31 @@ means no interaction goals remain, but hidden metas or constraints do.
 `apparently-closed` requires all three to be empty. None means `verified`.
 
 ## Resource and ownership boundaries
+
+Exact application reuse is task-local and never merges similar goals. Its key
+contains the full issued parent/session/epoch key, the interaction ID, and either
+the identical untrusted source string or a sealed native proposal identity.
+The latter binds to one issued proposal's original syntax, allocation and scope,
+not to Agda abstract-expression equality (which ignores some scope information),
+a pretty-print, a model feature, or a hash. Separately issued proposals stay
+distinct even if their presentations coincide. Parallel proof witnesses are
+not identified just because their types match.
+
+The cache retains only accepted transitions with a resident child snapshot.
+Source validation and parent ownership checks still happen on every request.
+Partial/blocked children retain all obligations; the cache never promotes their
+status to closed. Rejected, cancelled, or censored attempts are not negatively
+memoized. Reconstruction and replay bypass reuse and check again; final fresh
+Agda validation remains mandatory. Evicting a child releases its cache entry,
+and invalidating/closing the epoch drops the entire table. Cache retention is
+bounded by the retained accepted children, within the caller's physical budget.
+
+`exact_reuse_queries` and `exact_reuse_hits` are cumulative native counters.
+Each lookup charges one `symbolic_actions` unit; only actual checking enters
+`checking_attempts`/`accepted_checks`. Requests, source reads and physical time
+are still charged on a hit. Disabling reuse skips both lookups and their charges.
+This is exact transition reuse, not cross-run caching or a proof of canonical
+equivalence between independently created Agda states.
 
 The native ledger counts entered owner requests, checking attempts, accepted and
 rejected checks, clause/helper queries, replayed actions, cancellations, input bytes read,
