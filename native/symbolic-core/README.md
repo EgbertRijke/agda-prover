@@ -298,6 +298,18 @@ so doubling allowances cannot monopolize search ahead of cheap alternatives.
 is removed and the physical resource counters are unchanged.
 Increasing a run's work allowance does not reset accumulated work. Typed
 catalogue censorship pauses the run rather than discarding unexplored moves.
+Whole-search preparation is now staged: completed local closure, selected
+equations/propagation, construction, term and clause families publish their
+proposals before the remaining preparation finishes. The exact-parent cursor
+retains completed work and the drafts needed for overlap checks; proposals
+compete with the continuation in the same agenda. Preparation consumes scheduler
+and physical work, not proof-action allowance or accepted proof depth.
+The `staged_planning=false` scheduling ablation restores all-at-once preparation.
+One-step mode keeps its original complete catalogue. Individual generators and
+Agda calls remain atomic, so a censored unfinished stage may still need replay;
+this does not claim mid-checker suspension or complete native qualification.
+Generic `prepare-procedure` events expose the family, parent and goal for
+external diagnostics. No benchmark-specific tracing is embedded in the engine.
 The Haskell API exposes generic agenda events and cost snapshots. Autonomous
 helper-application invention is not implied. The application routes public
 operations to this controller and supervises shared physical resource limits.

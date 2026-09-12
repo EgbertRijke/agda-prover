@@ -508,17 +508,37 @@ and `exclude_names` is the existing list of forbidden premise names. The optiona
 `scheduling` object has the first four required fields below and optional
 `dependency_ordering`, `progress_ordering`, `retry_work_ordering`, `evidence_depth_reuse`, `coalesce_introductions`,
 `target_function_operands`, `recursive_evidence_operands`,
-`joint_constructor_propagation`, `multi_subject_clauses` and `contextual_evidence` booleans
+`joint_constructor_propagation`, `multi_subject_clauses`, `contextual_evidence`
+and `staged_planning` booleans
 (defaults shown):
 
 ```json
-{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true,"evidence_depth_reuse":true,"coalesce_introductions":true,"target_function_operands":true,"recursive_evidence_operands":true,"joint_constructor_propagation":true,"multi_subject_clauses":true,"contextual_evidence":true}
+{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true,"evidence_depth_reuse":true,"coalesce_introductions":true,"target_function_operands":true,"recursive_evidence_operands":true,"joint_constructor_propagation":true,"multi_subject_clauses":true,"contextual_evidence":true,"staged_planning":true}
 ```
 
 Delays are nonnegative scheduling priorities, not proof-depth restrictions.
 The initial macro slice is positive and grows on retry. `evidence_macro` is a
 feature flag for the coarse fallback; disabling it restricts the configured
 fragment and must not be confused with a general impossibility result.
+`staged_planning` publishes completed preparation families separately during
+whole search: local closure (when contextual evidence is enabled), selected
+later equations and propagation, structural constructions, ordinary terms,
+and clauses/coarse fallback. Each stage retains the exact parent, selected
+obligations and any already sealed drafts needed for overlap checks. Its
+proposals compete with a finite-priority continuation of remaining preparation.
+Completed stages are not repeated when that continuation resumes. Preparation
+does not produce a checked transition or increase accepted proof depth, and
+does not consume `action_limit`; its scheduler steps and physical work remain
+charged. `actions_generated` includes preparation queue entries, whereas
+`actions_attempted` counts proof actions. The cost receipt records whether
+staged planning is effective. A `prepare-procedure` agenda event identifies
+the procedure, exact parent and goal without exposing a speculative proof.
+
+The switch defaults to true for autonomous search and is disabled by one-step
+mode or `evidence_macro=false`. False restores all-at-once preparation for
+ablation. Within-stage Agda operations are still atomic: a censored stage is
+retained for retry, not declared complete or silently discarded. This is
+between-family reuse, not mid-checker suspension or full native qualification.
 `dependency_ordering` enables the conservative read described below. It changes
 goal order, never the authorized selection or coupled-state semantics.
 `progress_ordering` orders branches by spent scheduling cost plus sixteen units per

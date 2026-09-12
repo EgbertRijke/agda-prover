@@ -4,7 +4,7 @@
 -- Coupled native moves beneath single/joint scheduling. The planner supplies
 -- alternatives; it never supplies a replacement typechecker or proof authority.
 module AgdaProver.Agda28.AgendaExecution
-  ( Move (..), Planning (..), Config (..), Queue, Outcome (..), Interruption (..), start, startSelected, startOneMove, prioritizeProgress, frontier, step, stepWithDepth ) where
+  ( Move (..), Planning (..), Preparation (..), PreparationStage (..), Config (..), Queue, Outcome (..), Interruption (..), start, startSelected, startOneMove, prioritizeProgress, frontier, step, stepWithDepth ) where
 
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
@@ -30,6 +30,14 @@ data Move s
   | PlannedClause (S.ClauseMove s)
   | Helper (S.GoalRef s) ObservationMode DraftExpression
   | LocalClosure (S.GoalRef s) [S.TermProposal s] Pending
+  | Prepare (Preparation s)
+
+-- An immutable exact-parent cursor, not a captured checker/scorer callback.
+-- Completed stages publish owned proposals; unstarted stages stay in the
+-- same agenda. Retain only the drafts needed for structural overlap checks.
+data Preparation s = Preparation (S.GoalRef s) Pending [Int] (PreparationStage s)
+data PreparationStage s = PrepareLocals | PrepareEquations | PreparePropagation [Int]
+  | PrepareStructures | PrepareTerms [S.TermProposal s] | PrepareClauses [S.TermProposal s]
 
 data Planning s = Moves [A.Proposal (Move s)] | PlanningCensored
 
@@ -38,6 +46,7 @@ data Config s n = Config
   , models :: P.Models, ranking :: P.RankingMode, scorer :: Maybe (NativeScorer n)
   , focused :: Bool, excluded :: [String]
   , plan :: S.StateRef s -> Pending -> IO (Either Failure (Planning s))
+  , prepare :: Preparation s -> IO (Either Failure (Planning s))
   , chargeStep :: IO Bool, chargeMove :: IO Bool, observe :: A.Event -> IO ()
   , policyTrace :: Value -> IO ()
   , searchCost :: E.SearchStats -> IO ()
@@ -161,7 +170,9 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
     , A.sameState = \(SearchState a sa oa pa _ ca) (SearchState b sb ob pb _ cb) ->
         pure $ S.stateKey a == S.stateKey b && sa == sb && oa == ob && pa == pb && ca == cb }
   execute current@(SearchState state selected _ _ _ _) move = do
-    allowed <- liftIO $ chargeMove config
+    -- Preparation consumes scheduler/physical work, not an attempted proof
+    -- action. It cannot produce a checked transition or advance proof depth.
+    allowed <- liftIO $ case move of Prepare{} -> pure True; _ -> chargeMove config
     if not allowed then throwError ActionAllowanceExhausted else pure ()
     let goal = case move of
           Evidence g -> g
@@ -172,6 +183,7 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
           PlannedClause proposal -> S.clauseMoveGoal proposal
           Helper g _ _ -> g
           LocalClosure g _ _ -> g
+          Prepare (Preparation g _ _ _) -> g
     if S.stateKey (S.goalState goal) /= S.stateKey state ||
         maybe False (Set.notMember $ fromIntegral $ S.goalId goal) selected
       then throwError $ SessionFailure $ KernelFailure "agenda-move-parent-mismatch"
@@ -180,6 +192,9 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
         Clause _ action -> liftIO (S.applyClause session goal action) >>= transition current True
         PlannedClause proposal -> liftIO (S.applyClauseMove session proposal) >>= transition current True
         LocalClosure _ terms obligations -> localClosure current goal terms obligations
+        Prepare cursor -> require (prepare config cursor) >>= \case
+          Moves moves -> pure $ A.Planned moves
+          PlanningCensored -> throwError PlanningAllowanceExhausted
         Evidence _ -> search current Nothing $ S.solveEvidence session goal (moveLimits config)
           (models config) (ranking config) (scorer config) (focused config)
           (excluded config) (policyTrace config)

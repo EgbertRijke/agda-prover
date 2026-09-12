@@ -32,7 +32,7 @@ data Settings = Settings
   , dependencyOrdering :: Bool, depthLimit :: Maybe Natural, progressOrdering :: Bool
   , retryWorkOrdering :: Bool, jointConstructorPropagation :: Bool, multiSubjectClauses :: Bool
   , evidenceDepthReuse :: Bool, coalesceIntroductions :: Bool, targetFunctionOperands :: Bool
-  , recursiveEvidenceOperands :: Bool, contextualEvidence :: Bool }
+  , recursiveEvidenceOperands :: Bool, contextualEvidence :: Bool, stagedPlanning :: Bool }
 
 data Metrics = Metrics
   { schedulerSteps :: !Integer, modelItems :: !Integer, modelNanoseconds :: !Integer
@@ -123,6 +123,7 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "target_function_operands" .= targetFunctionOperands settings,
     "recursive_evidence_operands" .= recursiveEvidenceOperands settings,
     "contextual_evidence" .= contextualEvidence settings,
+    "staged_planning" .= (evidenceMacro settings && stagedPlanning settings),
     "local_closure_handoffs" .= (evidenceMacro settings && contextualEvidence settings),
     "joint_constructor_propagation" .= jointConstructorPropagation settings,
     "multi_subject_clauses" .= multiSubjectClauses settings,
@@ -197,6 +198,8 @@ advance native count run@(Run session settings initial baseline metrics owner tr
     [] -> pure $ Right $ N.Moves []
     point:_ -> case S.restoreGoalReference session (S.stateKey state) (fromIntegral point) of
       Left failure -> pure $ Left failure
+      Right goal | evidenceMacro settings && stagedPlanning settings -> pure $ Right $ N.Moves
+        [A.Proposal (N.Prepare $ N.Preparation goal obligations constraining N.PrepareLocals) 0]
       Right goal -> do
         budget <- moveAllowance
         let operands = E.PrimitiveOptions
@@ -266,6 +269,79 @@ advance native count run@(Run session settings initial baseline metrics owner tr
                               multiSubjectClauses settings || not (S.clauseMoveIsBatch action)]
                       ++ [A.Proposal (N.SlicedEvidence goal (initialMacroWork settings) E.initialDepth)
                             (macroDelay settings) | evidenceMacro settings]
+  prepareStage (N.Preparation goal obligations constraining stage) = do
+    let continue next moves = N.Moves $ moves ++
+          [A.Proposal (N.Prepare $ N.Preparation goal obligations constraining next) 1]
+        termMoves = A.rankedProposals 0 . map N.Term
+        publish generate next = do
+          budget <- moveAllowance
+          (stats, result) <- generate budget
+          recordSearch stats
+          pure $ case result of
+            Left failure -> Left failure
+            Right S.CensoredTerms{} -> Right N.PlanningCensored
+            Right (S.CompleteTerms terms) -> Right $ next terms
+        generated call budget = call session goal budget (models settings)
+          (ranking settings) native (excluded settings) trace
+        state = S.goalState goal
+        name = case stage of
+          N.PrepareLocals -> "local-closure"
+          N.PrepareEquations -> "equations"
+          N.PreparePropagation{} -> "propagation"
+          N.PrepareStructures -> "structures"
+          N.PrepareTerms{} -> "terms"
+          N.PrepareClauses{} -> "clauses"
+    trace $ object ["schema_version" .= ("agdaprover.symbolic-agenda-event.v1" :: String),
+      "event" .= ("prepare-procedure" :: String), "procedure" .= (name :: String),
+      "parent" .= S.stateKey state, "goal_id" .= interactionId (S.goalId goal)]
+    case stage of
+      N.PrepareLocals | not (contextualEvidence settings) -> pure $ Right $ continue N.PrepareEquations []
+      N.PrepareLocals -> publish (generated S.proposeLocalClosures) $
+        continue N.PrepareEquations . termMoves
+      N.PrepareEquations ->
+        case traverse (S.restoreGoalReference session (S.stateKey state) . fromIntegral)
+            (drop 1 $ pendingGoals obligations) of
+          Left failure -> pure $ Left failure
+          Right later ->
+            let next = N.PreparePropagation $ filter (`elem` constraining) $ drop 1 $ pendingGoals obligations
+            in if null later then pure $ Right $ continue next [] else
+              publish (generated $ S.proposeEquations later) $ continue next . termMoves
+      N.PreparePropagation [] -> pure $ Right $ continue N.PrepareStructures []
+      N.PreparePropagation (point:rest) ->
+        case S.restoreGoalReference session (S.stateKey state) (fromIntegral point) of
+          Left failure -> pure $ Left failure
+          Right later -> publish
+            (\budget -> S.proposePropagation session later budget (models settings)
+              (ranking settings) native (excluded settings) trace) $
+            continue (N.PreparePropagation rest) . termMoves
+      N.PrepareStructures -> publish (generated S.proposeStructures) $ \terms ->
+        continue (N.PrepareTerms terms) $ termMoves terms
+      N.PrepareTerms structures -> do
+        let operands = E.PrimitiveOptions
+              { E.goalFunctionOperands = targetFunctionOperands settings
+              , E.recursiveEvidenceOperands = recursiveEvidenceOperands settings
+              , E.contextualEvidence = contextualEvidence settings }
+        publish (generated $ S.proposeTermsWithOptions operands) $ \terms ->
+          let combined = S.preferStructures structures terms
+              -- The leading structures were already published by their stage.
+              additions = drop (length structures) combined
+          in continue (N.PrepareClauses combined) $ termMoves additions
+      N.PrepareClauses terms -> do
+        budget <- moveAllowance
+        (stats, result) <- S.proposeClauseActions session goal budget
+          (models settings) (ranking settings) native (excluded settings) trace
+        recordSearch stats
+        pure $ case result of
+          Left failure -> Left failure
+          Right S.CensoredClauses{} -> Right N.PlanningCensored
+          Right (S.CompleteClauses clauses) ->
+            let distinct = if coalesceIntroductions settings
+                  then S.withoutResultIntroductionOverlap terms clauses else clauses
+            in Right $ N.Moves $
+              A.rankedProposals (structuralDelay settings)
+                [N.PlannedClause action | (action, _) <- distinct,
+                  multiSubjectClauses settings || not (S.clauseMoveIsBatch action)] ++
+              [A.Proposal (N.SlicedEvidence goal (initialMacroWork settings) E.initialDepth) (macroDelay settings)]
   constructorGoals _ [] = pure $ Right $ S.CompleteTerms []
   constructorGoals state (point:rest) =
     case S.restoreGoalReference session (S.stateKey state) (fromIntegral point) of
@@ -285,12 +361,15 @@ advance native count run@(Run session settings initial baseline metrics owner tr
   go refutation remaining queue = do
     budget <- moveAllowance
     let config = N.Config budget (models settings) (ranking settings) native
-          (focused settings) (excluded settings) planner
+          (focused settings) (excluded settings) planner prepareStage
           (allowance >>= \left -> if left == Just 0 then pure False else
             modifyIORef' metrics (\m -> m { schedulerSteps = schedulerSteps m + 1 }) >> pure True)
           chargeAction recordEvent trace recordSearch
           (\stats -> if retryWorkOrdering settings then fromInteger $ max 0 $ E.workUnits stats else 0)
-          accepted (evidenceDepthReuse settings) (evidenceMacro settings && contextualEvidence settings)
+          accepted (evidenceDepthReuse settings)
+          -- Staged planning owns closure for every goal. Do not also run the
+          -- legacy clause-only pass and then repeat its exact-parent probes.
+          (evidenceMacro settings && contextualEvidence settings && not (stagedPlanning settings))
     N.stepWithDepth (depthLimit settings) session config queue >>= \case
       N.Progress next -> go refutation (remaining-1) next
       N.Candidate state next -> pure $ Candidate state $ saved refutation next
