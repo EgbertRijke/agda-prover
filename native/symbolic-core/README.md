@@ -194,6 +194,14 @@ observations for ablation. The run receipt records the setting across slices.
 the existing work allowance and physical symbolic ledger; Agda queries keep
 their own counters. Every proposed application still needs normal checking.
 
+Coarse evidence search shares that native rigid-head criterion before building
+fully applied dependent skeletons. It does not normalize under binders or guess
+alias equality: unknown, dependent and rewrite-enabled heads retain ordinary
+checking. Partial/forward application remains available. The informational
+`application_shape_observations` and `application_shape_rejections` counters
+describe this precheck within charged inference operations; they do not add
+spine-construction work or alter proof authority.
+
 `recursive_evidence_operands` additionally offers closed native recursive
 results as application operands, optionally together with one goal-mentioned
 function. Both proposal sources retain their existing NNUE provenance. Before

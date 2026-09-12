@@ -850,11 +850,28 @@ hidden parameters. Original native argument syntax is retained; general forward
 applications remain a fallback. Recursive expected-type saturation is one depth step,
 while its per-parameter checker work is fully charged.
 
+Before building that skeleton, coarse evidence search uses the same rigid-head
+criterion as primitive application generation. It inspects the already inferred
+native telescope without normalizing under its binders. Distinct original
+context variables, datatype/record heads, sorts and function types can rule out
+a fully saturated application. A telescope-bound result variable, alias,
+rewrite-enabled head, or blocked/unknown shape retains normal Agda checking.
+`Abs` and `NoAbs` preserve their different binding behavior. Forward/partial
+application alternatives remain available; no proof or premise is invented.
+
+The additive evidence-cost v2 counters `application_shape_observations` and
+`application_shape_rejections` expose this precheck. The goal-head observation
+has one charged inference query. Inspecting the result of an already charged
+candidate inference is part of that query, not a second inference or a generated
+spine. These counters are informational subsets, not additional work units;
+`application_generation_steps` retains its specialized-spine meaning. Final
+applications still undergo ordinary checking and fresh reconstruction validation.
+
 Search cost adds `recursive_context_queries`, `recursive_proposals` and
 `recursive_validation_queries`. The last counts whole candidate admissibility
 queries (non-forced assignment plus source-owner termination) and is a subset
 of `checker_queries`, not extra proof authority. `work_units` equals
-`inference_queries + checker_queries + recursive_context_queries + focused_actions + algebra_actions`; native
+`inference_queries + checker_queries + recursive_context_queries + focused_actions + algebra_actions + application_generation_steps`; native
 result-type comparisons count as checker queries. Rejected proposals and
 recursive validation work survive rollback. There are no per-term Python
 callbacks, datatype-specific rules or model-weight changes.

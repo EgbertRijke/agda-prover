@@ -155,6 +155,41 @@ data ExpectedShape = FunctionShape | SortShape | FamilyShape QName | LocalShape 
 data ArgumentShape = ArgumentShape
   { argumentInfo :: ArgInfo, argumentResult :: Maybe ExpectedShape, argumentDomain :: Maybe ExpectedShape }
 
+compatibleShape :: Maybe ExpectedShape -> Maybe ExpectedShape -> Bool
+compatibleShape Nothing _ = True
+compatibleShape _ Nothing = True
+compatibleShape (Just wanted) (Just offered) = wanted == offered
+
+-- Inspect already available native syntax. Defined aliases, projections and
+-- blocked computations are unknown, not distinct rigid families. Telescope
+-- binders are instantiable; only variables from the original context are rigid.
+outerShape :: Int -> I.Type -> TCM (Maybe ExpectedShape)
+outerShape introduced = \case
+  I.El _ I.Pi{} -> pure $ Just FunctionShape
+  I.El _ (I.Sort _) -> pure $ Just SortShape
+  I.El _ (I.Var index _) -> pure $ if index >= introduced
+    then Just $ LocalShape (index - introduced) else Nothing
+  I.El _ (I.Def name _) -> do
+    rules <- getRewriteRulesFor name
+    if not (null rules) then pure Nothing else getConstInfo name >>= \definition -> pure
+      (case theDef definition of
+        Datatype{} -> Just $ FamilyShape name
+        RecordDefn{} -> Just $ FamilyShape name
+        _ -> Nothing)
+  _ -> pure Nothing
+
+-- This cheap precheck does not elaborate placeholders or normalize under a
+-- telescope. Unknown/aliased spines retain ordinary expected-type inference.
+-- NoAbs is deliberately not counted as a binder. This shares the same rigid
+-- head criterion as primitive application generation, not a second unifier.
+applicationResultShape :: I.Type -> TCM (Maybe ExpectedShape)
+applicationResultShape = go 0
+ where
+  go introduced (I.El _ (I.Pi _ body)) = case body of
+    I.Abs _ rest -> go (introduced + 1) rest
+    I.NoAbs _ rest -> go introduced rest
+  go introduced ty = outerShape introduced ty
+
 run :: IterationDepth -> IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode -> Maybe (NativeScorer s)
     -> Bool -> (Value -> IO ()) -> String -> [String] -> InteractionId -> Maybe Recursion.Owner
     -> (A.Expr -> TCM ()) -> I.Type -> TCM Result
@@ -269,31 +304,15 @@ primitiveProposals options stats limits models mode native emit namespace exclud
           I.El _ (I.Pi domain body) -> do
             inspectDomain <- if targetFunctions || recursiveEvidenceOperands options then charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
               else pure False
-            domainShape <- if inspectDomain then reduce (I.unDom domain) >>= outerShape else pure Nothing
+            introduced <- subtract originalSize <$> getContextSize
+            domainShape <- if inspectDomain then reduce (I.unDom domain) >>= outerShape introduced else pure Nothing
             (result, rest) <- underAbstraction domain body signature
             pure (if visible domain then Just FunctionShape else result,
               ArgumentShape (getArgInfo domain) result domainShape:rest)
-          exposed -> (\shape -> (shape, [])) <$> outerShape exposed
-      outerShape = \case
-          I.El _ I.Pi{} -> pure $ Just FunctionShape
-          I.El _ (I.Sort _) -> pure $ Just SortShape
-          I.El _ (I.Var index _) -> do
-            -- Parameters from the original goal are rigid, but variables
-            -- introduced while inspecting a function's telescope can be
-            -- instantiated by its application. Account for actual context
-            -- extension: Agda's NoAbs does not introduce a new binder.
+          exposed -> do
             introduced <- subtract originalSize <$> getContextSize
-            pure (if index >= introduced
-              then Just $ LocalShape (index - introduced) else Nothing)
-          I.El _ (I.Def name _) -> getConstInfo name >>= \definition -> pure
-            (case theDef definition of
-              Datatype{} -> Just $ FamilyShape name
-              RecordDefn{} -> Just $ FamilyShape name
-              _ -> Nothing)
-          _ -> pure Nothing
-      compatible Nothing _ = True
-      compatible _ Nothing = True
-      compatible (Just wanted) (Just offered) = wanted == offered
+            (\shape -> (shape, [])) <$> outerShape introduced exposed
+      compatible = compatibleShape
       applications :: Maybe ExpectedShape -> ScopeInfo -> A.Expr -> [(Int, A.Expr)]
                    -> [ArgumentShape] -> TCM [A.Expr]
       applications expected scope expression anchors infos = do
@@ -477,7 +496,8 @@ primitiveProposals options stats limits models mode native emit namespace exclud
             if not (noMetas closed && noMetas closedType) then pure Nothing else do
               allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
               if not allowed then pure Nothing else do
-                shape <- reduce closedType >>= outerShape
+                introduced <- subtract originalSize <$> getContextSize
+                shape <- reduce closedType >>= outerShape introduced
                 syntax <- reify closed
                 pure $ Just (syntax, closedType, shape, picked)
   generalized <- fmap catMaybes $ forM reusable $ \(expression, ty, _, picked) ->
@@ -1050,16 +1070,30 @@ search enableFocused inventory@(GlobalInventory globals forbidden recursion) dep
     let classification = maybe Classification.unknownClassification id classified
     seeds <- nativeOperation $ \runtime -> rankSeeds runtime classification target globals
     let construction = [constructRecord, introduce]
-        application = [queryInferWithS DontExpandLast expression $ \(_, ty) ->
-            guidedApplication expression ty depth [] (selected ++ picked)
-          | (Seed expression _ _, picked) <- seeds]
+        application = do
+          -- Direct evidence, rewriting or construction may already close the
+          -- goal. Observe its shape only when application search is reached.
+          _ <- chargeS $ \s -> s { inferenceQueries = inferenceQueries s + 1,
+            applicationShapeObservations = applicationShapeObservations s + 1 }
+          expectedShape <- liftS $ reduce target >>= outerShape 0
+          choicesS [queryInferWithS DontExpandLast expression $ \(_, ty) ->
+              do -- Inspect the type returned by this charged inference. This
+                 -- walks existing syntax; it is not another checker query.
+                 modifyS $ \s -> s { applicationShapeObservations = applicationShapeObservations s + 1 }
+                 offeredShape <- liftS $ applicationResultShape ty
+                 if compatibleShape expectedShape offeredShape
+                   then guidedApplication expression ty depth [] (selected ++ picked)
+                   else do
+                     modifyS $ \s -> s { applicationShapeRejections = applicationShapeRejections s + 1 }
+                     pure Nothing
+            | (Seed expression _ _, picked) <- seeds]
     choicesS $
       [queryCheckS expression target $ \term -> use expression term (selected ++ picked)
        | (Seed expression _ _, picked) <- seeds]
       ++ [algebraic seeds]
       ++ [recursiveCall inferredArguments context | Just context <- [recursion]]
       ++ (if Classification.constructionFirst classification
-            then construction ++ application else application ++ construction)
+            then construction ++ [application] else application : construction)
       ++ [recursiveCall arguments context | Just context <- [recursion]]
       ++ [produce expression picked | (Seed expression _ _, picked) <- seeds]
   -- Recognizers consume native types; ranked visible/local evidence supplies
