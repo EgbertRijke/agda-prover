@@ -250,6 +250,16 @@ It keeps subject eliminations and record-result splits; it does not identify
 their resulting proof states. `coalesce_introductions=false` restores the
 overlapping routes. The command catalogue and one-step mode are unchanged.
 
+New clause obligations have a local-closure handoff before broad planning.
+Agda tests local inhabitants without new meta assignments or constraints; the
+existing NNUE role orders admissible choices. Each choice produces an ordinary
+checked transition, while an exact-parent cursor retains other choices and
+ordinary planning fallback. Resuming that fallback does not invent a proof
+state or increase accepted proof depth. The existing `contextual_evidence=false`
+ablation disables this whole-search phase; the cost receipt records
+`local_closure_handoffs`. This is the first checked procedure handoff, not
+complete native workflow qualification or a replacement for fresh validation.
+
 Scheduling slices keep the queue and alternatives after provisional solutions.
 Coarse evidence search runs in soft, increasing work slices and yields to other
 branches. It retains pending alternatives, dependent operand substitutions and

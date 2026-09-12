@@ -123,6 +123,7 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "target_function_operands" .= targetFunctionOperands settings,
     "recursive_evidence_operands" .= recursiveEvidenceOperands settings,
     "contextual_evidence" .= contextualEvidence settings,
+    "local_closure_handoffs" .= (evidenceMacro settings && contextualEvidence settings),
     "joint_constructor_propagation" .= jointConstructorPropagation settings,
     "multi_subject_clauses" .= multiSubjectClauses settings,
     "model_items_scored" .= modelItems measured, "model_elapsed_ns" .= modelNanoseconds measured,
@@ -289,7 +290,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
             modifyIORef' metrics (\m -> m { schedulerSteps = schedulerSteps m + 1 }) >> pure True)
           chargeAction recordEvent trace recordSearch
           (\stats -> if retryWorkOrdering settings then fromInteger $ max 0 $ E.workUnits stats else 0)
-          accepted (evidenceDepthReuse settings)
+          accepted (evidenceDepthReuse settings) (evidenceMacro settings && contextualEvidence settings)
     N.stepWithDepth (depthLimit settings) session config queue >>= \case
       N.Progress next -> go refutation (remaining-1) next
       N.Candidate state next -> pure $ Candidate state $ saved refutation next

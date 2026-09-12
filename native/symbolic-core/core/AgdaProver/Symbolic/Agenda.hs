@@ -56,7 +56,11 @@ data Inspection action result = Open [Proposal action] | Candidate result | Stuc
   deriving (Eq, Show)
 -- A deferred operation can report additional spent scheduling work. It is not
 -- a second budget charge: the owner's physical ledger remains authoritative.
-data Transition state continuation = Advanced state | Deferred Natural continuation | Declined
+data Transition state action continuation
+  = Advanced state
+  | AdvancedWithRemainder state Natural continuation
+  | Planned [Proposal action]
+  | Deferred Natural continuation | Declined
   deriving (Eq, Show)
 data Event = Expanded Int | Attempted | Resumed | AdvancedState | Yielded
   | Rejected | CyclePruned | Proposed | Stalled | DepthDeferred
@@ -66,8 +70,8 @@ data Hooks m state action continuation result = Hooks
   { charge :: m Bool
   , observe :: Event -> m ()
   , inspect :: state -> m (Inspection action result)
-  , apply :: state -> action -> m (Transition state continuation)
-  , resume :: continuation -> m (Transition state continuation)
+  , apply :: state -> action -> m (Transition state action continuation)
+  , resume :: continuation -> m (Transition state action continuation)
   -- True needs exact native ancestry evidence, never a hash/display match.
   -- Unknown equivalence must return False. Cross-branch reuse is separate.
   , sameState :: state -> state -> m Bool }
@@ -158,8 +162,19 @@ stepWithDepth requested hooks input = case Map.minViewWithKey queue of
           event = observe hooks
           transition parent ancestors result = case result of
             Declined -> event Rejected >> pure (Progress remaining)
+            Planned proposals -> do
+              event $ Expanded $ length proposals
+              pure $ Progress $ foldl'
+                (\agenda proposal -> insert (spent + 1 + penalty proposal)
+                  (Apply parent (action proposal) ancestors) agenda) remaining proposals
             Deferred extra continuation -> event Yielded >> pure
               (Progress $ insert (spent+1+extra) (Resume parent continuation ancestors) remaining)
+            AdvancedWithRemainder next extra continuation -> do
+              let retain = insert (spent+1+extra) (Resume parent continuation ancestors)
+              cyclic <- anyM (sameState hooks next) (parent:ancestors)
+              if cyclic then event CyclePruned >> pure (Progress $ retain remaining)
+              else event AdvancedState >> pure
+                (Progress $ retain $ insert (spent+1) (Inspect next $ parent:ancestors) remaining)
             Advanced next -> do
               cyclic <- anyM (sameState hooks next) (parent:ancestors)
               if cyclic then event CyclePruned >> pure (Progress remaining)

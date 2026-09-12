@@ -499,6 +499,26 @@ application contexts admit constructors, definitions and local functions;
 lifting and composition require actual supplied operations. No particular
 relation, datatype, constructor or theorem name is distinguished.
 
+In whole-search mode, this switch also enables a checked local-closure handoff
+for new obligations created by clause execution. Before rebuilding the broad
+catalogue, the adapter tests existing local inhabitants by Agda conversion
+without assigning metas or postponing constraints, and ranks the admissible
+alternatives through the existing evidence-policy role. Each proposed closure
+is still applied through the ordinary checked session transition.
+
+The procedure retains an immutable cursor bound to its exact parent and goal.
+A successful child and the parent's remaining alternatives are published
+separately; rejecting or reconstructing that candidate does not erase fallback.
+After the cursor is exhausted, ordinary planning resumes on the original parent.
+Resuming a catalogue is not a new proof state or an extra accepted-depth step.
+All probes, scoring, retries and applications share cumulative accounting;
+source changes, stale handles and cancellation use the normal session boundary.
+The cost receipt records the derived `local_closure_handoffs` boolean. Disabling
+`contextual_evidence` or whole-search macros disables this handoff. Explicit
+clause commands and one-step mode remain unchanged. This first phase reuses
+locals only; general clause-state and evidence-composition integration remain
+separate work, and resident closure never replaces fresh validation.
+
 The adapter computes redexes while retaining named neutral calls, rather than
 re-elaborating normalized private case-function implementations. It proposes
 strictly size-decreasing steps (or a step reaching the requested endpoint),

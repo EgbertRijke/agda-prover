@@ -4,7 +4,7 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE RankNTypes #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.EvidenceSearch (run, begin, resume, Pending, runHelper, primitiveProposals, structuralProposals, equationProposals, constructorProposals, propagationProposals, clauseProposals, Result (..)) where
+module AgdaProver.Agda28.EvidenceSearch (run, begin, resume, Pending, runHelper, localClosureProposals, primitiveProposals, structuralProposals, equationProposals, constructorProposals, propagationProposals, clauseProposals, Result (..)) where
 
 import Control.Monad (forM)
 import Control.Monad.Except (catchError, runExceptT, throwError)
@@ -298,6 +298,28 @@ runHelper stats limits models mode native emit namespace point view application 
 -- native holes retain dependencies for the shared agenda instead of recursing
 -- through every operand before other actions get a turn. No arity cap and no
 -- printed type matching. Rechecking each proposal owns all meta assignments.
+-- A finite exact-context closure phase. Do not build the visible-premise,
+-- application or clause catalogues just to reuse a newly exposed inhabitant.
+-- Conversion may not assign metas or postpone constraints; genuine choices
+-- retain their native expressions and use the existing NNUE policy role.
+localClosureProposals :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
+                      -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> [String]
+                      -> Maybe Recursion.Owner -> InteractionId -> I.Type
+                      -> TCM [(A.Expr, [(T.Text, T.Text)])]
+localClosureProposals stats limits models mode native emit namespace _ _ _ target = do
+  pruned <- liftIO $ newIORef False
+  let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
+  context <- getContext
+  matches <- fmap catMaybes $ forM context $ \entry -> localTCState $ attempt runtime $ do
+    let expression = A.Var $ ctxEntryName entry
+    reallyNoConstraints $ dontAssignMetas $ queryCheck runtime expression target $ \term -> do
+      complete <- instantiateFull term
+      pure $ if noMetas complete then Just expression else Nothing
+  targetText <- prettyShow <$> prettyTCM target
+  ranked <- rankDescribed runtime Classification.unknownClassification target
+    [Seed expression "local" targetText Nothing | expression <- matches]
+  pure [(expression, picked) | (Seed expression _ _ _, picked) <- ranked]
+
 primitiveProposals :: PrimitiveOptions -> IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
                    -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> [String]
                    -> Maybe Recursion.Owner -> InteractionId -> I.Type

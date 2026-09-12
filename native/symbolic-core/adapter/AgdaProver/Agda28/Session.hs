@@ -17,7 +17,7 @@ module AgdaProver.Agda28.Session
   , Refutation.Kind (..)
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
-  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, preferStructures, withoutResultIntroductionOverlap, proposeTerms, proposeTermsWithOptions, proposeStructures, proposeEquations, proposeConstructors, proposePropagation, applyTerm
+  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, preferStructures, withoutResultIntroductionOverlap, proposeTerms, proposeTermsWithOptions, proposeLocalClosures, proposeStructures, proposeEquations, proposeConstructors, proposePropagation, applyTerm
   , ClauseMove, clauseMoveGoal, clauseMoveIsBatch, applyClauseMove, ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
@@ -644,6 +644,11 @@ proposeStructures :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Mod
                   -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
                   -> IO (Search.SearchStats, Either Failure (TermProposals s))
 proposeStructures = proposeTermsUsing Search.structuralProposals
+
+proposeLocalClosures :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
+                    -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
+                    -> IO (Search.SearchStats, Either Failure (TermProposals s))
+proposeLocalClosures = proposeTermsUsing Search.localClosureProposals
 
 proposeEquations :: [GoalRef s] -> Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
                  -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())

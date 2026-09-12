@@ -29,6 +29,7 @@ data Move s
   | Clause (S.GoalRef s) ClauseAction
   | PlannedClause (S.ClauseMove s)
   | Helper (S.GoalRef s) ObservationMode DraftExpression
+  | LocalClosure (S.GoalRef s) [S.TermProposal s] Pending
 
 data Planning s = Moves [A.Proposal (Move s)] | PlanningCensored
 
@@ -42,16 +43,17 @@ data Config s n = Config
   , searchCost :: E.SearchStats -> IO ()
   , retryPenalty :: E.SearchStats -> Natural
   , accepted :: S.Transition s -> IO ()
-  , reuseEvidenceDepth :: Bool }
+  , reuseEvidenceDepth :: Bool, closureHandoffs :: Bool }
 
 -- Selection is caller authority, not an independence claim. Unselected goals
 -- remain in the same native state; newly created AND children inherit selection.
 -- Retain the branch's AND order separately from Agda's interaction identifiers.
 -- A refinement replaces one obligation with fresh identifiers, which Agda
 -- appends after unrelated source goals. Those identifiers are not priorities.
-data SearchState s = SearchState (S.StateRef s) (Maybe (Set.Set Int)) [Int] (Maybe StateKey) Natural
+data SearchState s = SearchState (S.StateRef s) (Maybe (Set.Set Int)) [Int] (Maybe StateKey) Natural (Set.Set Int)
 data Continuation s = RetryEvidence (SearchState s) (S.GoalRef s) Natural E.IterationDepth
   | RetainedEvidence (SearchState s) (S.GoalRef s) Natural (S.EvidenceContinuation s)
+  | LocalAlternatives (SearchState s) (S.GoalRef s) [S.TermProposal s] Pending
 type Queue s = A.Agenda (SearchState s) (Move s) (Continuation s)
 
 -- An exhausted coarse evidence attempt is censored, not a declined branch.
@@ -65,18 +67,18 @@ data Outcome s
   | Paused (Queue s) | DepthPaused (Queue s) | Interrupted Interruption (Queue s) | Exhausted
 
 start :: S.StateRef s -> [Int] -> Queue s
-start state obligations = A.start $ SearchState state Nothing obligations Nothing 0
+start state obligations = A.start $ SearchState state Nothing obligations Nothing 0 Set.empty
 
 startSelected :: S.StateRef s -> [Int] -> [Int] -> Queue s
 startSelected state selected allGoals = A.start $
-  SearchState state (Just $ Set.fromList selected) allGoals Nothing 0
+  SearchState state (Just $ Set.fromList selected) allGoals Nothing 0 Set.empty
 
 -- A step proposes one checked transition from the original parent. Its open
 -- descendants are deliberately not solved. Rejected source handoffs can resume
 -- the same root alternatives; neither a fresh search nor Python planning occurs.
 startOneMove :: S.StateRef s -> Int -> [Int] -> Queue s
 startOneMove state selected allGoals = A.start $
-  SearchState state (Just $ Set.singleton selected) allGoals (Just $ S.stateKey state) 0
+  SearchState state (Just $ Set.singleton selected) allGoals (Just $ S.stateKey state) 0 Set.empty
 
 -- A goal generally needs more than one inspect/apply pair (introductions,
 -- elimination and closure). A soft eight-pair estimate gives a completed
@@ -90,14 +92,14 @@ startOneMove state selected allGoals = A.start $
 -- counts or claiming independence from unselected goals. Transition receipts
 -- already contain these counts; scheduling performs no additional kernel work.
 prioritizeProgress :: Queue s -> Queue s
-prioritizeProgress = A.prioritize $ \(SearchState _ selected order stepParent debt) ->
+prioritizeProgress = A.prioritize $ \(SearchState _ selected order stepParent debt _) ->
   if stepParent /= Nothing then 0 else 16 * (debt + fromIntegral
     (length $ maybe order (\chosen -> filter (`Set.member` chosen) order) selected))
 
 frontier :: Queue s -> (Int, Maybe (S.StateRef s, Natural, Natural))
 frontier queue = (A.pending queue, fmap unwrap $ A.principal queue)
  where
-  unwrap (SearchState state _ _ _ _, priority, depth) = (state, priority, depth)
+  unwrap (SearchState state _ _ _ _ _, priority, depth) = (state, priority, depth)
 
 step :: S.Session s -> Config s n -> Queue s -> IO (Outcome s)
 step = stepWithDepth Nothing
@@ -115,7 +117,7 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
   hooks = A.Hooks
     { A.charge = liftIO $ chargeStep config
     , A.observe = liftIO . observe config
-    , A.inspect = \(SearchState state selected order stepParent _) -> do
+    , A.inspect = \(SearchState state selected order stepParent _ closureGoals) -> do
         obligations <- require $ S.pending session state
         let live = Set.fromList $ pendingGoals obligations
             ordered = filter (`Set.member` live) order ++
@@ -130,18 +132,35 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
           pure $ if not (null ordered) ||
               (pendingMetas obligations == 0 && pendingConstraints obligations == 0)
             then A.Candidate state else A.Stuck
-        else require (plan config state obligations { pendingGoals = selectedPending }) >>= \case
-          Moves moves -> pure $ A.Open moves
-          PlanningCensored -> throwError PlanningAllowanceExhausted
+        else let selectedObligations = obligations { pendingGoals = selectedPending }
+                 ordinary = require (plan config state selectedObligations) >>= \case
+                   Moves moves -> pure $ A.Open moves
+                   PlanningCensored -> throwError PlanningAllowanceExhausted
+             in case selectedPending of
+               point:_ | closureHandoffs config, Set.member point closureGoals -> do
+                 goal <- either (throwError . SessionFailure) pure $
+                   S.restoreGoalReference session (S.stateKey state) (fromIntegral point)
+                 (cost, proposed) <- liftIO $ S.proposeLocalClosures session goal
+                   (moveLimits config) (models config) (ranking config) (scorer config)
+                   (excluded config) (policyTrace config)
+                 liftIO $ searchCost config cost
+                 case proposed of
+                   Left failure -> throwError $ SessionFailure failure
+                   Right S.CensoredTerms{} -> throwError PlanningAllowanceExhausted
+                   Right (S.CompleteTerms []) -> ordinary
+                   Right (S.CompleteTerms terms) -> pure $ A.Open
+                     [A.Proposal (LocalClosure goal terms selectedObligations) 0]
+               _ -> ordinary
     , A.apply = execute
     , A.resume = \case
         RetryEvidence state goal allowance depth -> execute state $ SlicedEvidence goal allowance depth
         RetainedEvidence state goal allowance remaining -> execute state $ ResumeEvidence goal allowance remaining
+        LocalAlternatives state goal terms obligations -> execute state $ LocalClosure goal terms obligations
     -- Identical issued keys witness the same immutable branch only. Equal
     -- printed goals and equal endpoint types never authorize state merging.
-    , A.sameState = \(SearchState a sa oa pa _) (SearchState b sb ob pb _) ->
-        pure $ S.stateKey a == S.stateKey b && sa == sb && oa == ob && pa == pb }
-  execute current@(SearchState state selected _ _ _) move = do
+    , A.sameState = \(SearchState a sa oa pa _ ca) (SearchState b sb ob pb _ cb) ->
+        pure $ S.stateKey a == S.stateKey b && sa == sb && oa == ob && pa == pb && ca == cb }
+  execute current@(SearchState state selected _ _ _ _) move = do
     allowed <- liftIO $ chargeMove config
     if not allowed then throwError ActionAllowanceExhausted else pure ()
     let goal = case move of
@@ -152,13 +171,15 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
           Clause g _ -> g
           PlannedClause proposal -> S.clauseMoveGoal proposal
           Helper g _ _ -> g
+          LocalClosure g _ _ -> g
     if S.stateKey (S.goalState goal) /= S.stateKey state ||
         maybe False (Set.notMember $ fromIntegral $ S.goalId goal) selected
       then throwError $ SessionFailure $ KernelFailure "agenda-move-parent-mismatch"
       else case move of
-        Term proposal -> liftIO (S.applyTerm session proposal) >>= transition current
-        Clause _ action -> liftIO (S.applyClause session goal action) >>= transition current
-        PlannedClause proposal -> liftIO (S.applyClauseMove session proposal) >>= transition current
+        Term proposal -> liftIO (S.applyTerm session proposal) >>= transition current False
+        Clause _ action -> liftIO (S.applyClause session goal action) >>= transition current True
+        PlannedClause proposal -> liftIO (S.applyClauseMove session proposal) >>= transition current True
+        LocalClosure _ terms obligations -> localClosure current goal terms obligations
         Evidence _ -> search current Nothing $ S.solveEvidence session goal (moveLimits config)
           (models config) (ranking config) (scorer config) (focused config)
           (excluded config) (policyTrace config)
@@ -193,7 +214,7 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
       Right (E.WorkExhausted, Nothing, _, Just next) ->
         pure $ A.Deferred (retryPenalty config cost) $ RetainedEvidence current goal (2 * max 1 allowance) next
       Right (E.FragmentExhausted, Nothing, _, Nothing) -> pure A.Declined
-      Right (E.FoundCandidate, Just next, _, Nothing) -> transition current $ Right next
+      Right (E.FoundCandidate, Just next, _, Nothing) -> transition current False $ Right next
       _ -> throwError $ SessionFailure $ KernelFailure "agenda-inconsistent-evidence-continuation"
   search current continuation action = do
     (cost, result) <- liftIO action
@@ -204,11 +225,33 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
         Just again -> pure $ A.Deferred (retryPenalty config cost) (again cost)
         Nothing -> throwError $ MoveAllowanceExhausted cost
       Right (E.FragmentExhausted, Nothing, _) -> pure A.Declined
-      Right (E.FoundCandidate, Just next, _) -> transition current $ Right next
+      Right (E.FoundCandidate, Just next, _) -> transition current False $ Right next
       _ -> throwError $ SessionFailure $ KernelFailure "agenda-inconsistent-search-result"
-  transition (SearchState parent selected previousOrder stepParent _) = \case
+  -- The local procedure owns an immutable cursor and its exact parent. A
+  -- checked child and untried parent alternatives are separate publications;
+  -- neither successful local reuse nor downstream rejection erases fallback.
+  -- Catalogue expansion is not a fictitious checked state/depth transition.
+  localClosure (SearchState state _ _ _ _ _) _ [] obligations =
+    require (plan config state obligations) >>= \case
+      Moves moves -> pure $ A.Planned moves
+      PlanningCensored -> throwError PlanningAllowanceExhausted
+  localClosure current goal (proposal:rest) obligations = do
+    let original = S.termProposalGoal proposal
+        continuation = LocalAlternatives current goal rest obligations
+    if S.stateKey (S.goalState original) /= S.stateKey (S.goalState goal)
+        || S.goalId original /= S.goalId goal
+      then throwError $ SessionFailure $ KernelFailure "local-procedure-parent-mismatch"
+      else liftIO (S.applyTerm session proposal) >>= \case
+        Left KernelRejected{} -> pure $ A.Deferred 0 continuation
+        Left KernelBlocked{} -> pure $ A.Deferred 0 continuation
+        Left failure -> throwError $ SessionFailure failure
+        Right next -> do
+          child <- acceptedState current False next
+          pure $ A.AdvancedWithRemainder child 0 continuation
+  transition current handoff = \case
     Left failure -> declined failure
-    Right next -> do
+    Right next -> A.Advanced <$> acceptedState current handoff next
+  acceptedState (SearchState parent selected previousOrder stepParent _ closureGoals) handoff next = do
       -- The all-goal entry point is lazy about its initial pending query. Read
       -- it once on successful root transitions, never interpret every original
       -- source goal as a newly generated child.
@@ -225,7 +268,10 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
           order = children ++ filter (`Set.member` after) before
           chosen = fmap (\active -> Set.union (Set.intersection active after)
             (Set.difference after previousGoals)) selected
-      pure $ A.Advanced $ SearchState (S.transitionState next) chosen order stepParent debt
+          closures = Set.union (Set.intersection closureGoals after) $
+            if handoff && closureHandoffs config && stepParent == Nothing
+              then Set.fromList children else Set.empty
+      pure $ SearchState (S.transitionState next) chosen order stepParent debt closures
   declined = \case
     KernelRejected{} -> pure A.Declined
     KernelBlocked{} -> pure A.Declined
