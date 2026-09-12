@@ -5,10 +5,11 @@
 -- adapter alone observes, checks and reconstructs them.
 module AgdaProver.Symbolic.Agenda
   ( Agenda, Proposal (..), Inspection (..), Transition (..), Outcome (..)
-  , Event (..), Hooks (..), rankedProposals, start, prioritize, pending, principal, step, stepWithDepth ) where
+  , Event (..), Hooks (..), rankedProposals, dependentFirst, start, prioritize, pending, principal, step, stepWithDepth ) where
 
 import Data.Map.Strict qualified as Map
 import Data.List (foldl')
+import Data.Set qualified as Set
 import Numeric.Natural (Natural)
 
 data Proposal action = Proposal
@@ -20,6 +21,37 @@ data Proposal action = Proposal
 -- is removed: even the last has a finite, caller-visible scheduling cost.
 rankedProposals :: Natural -> [action] -> [Proposal action]
 rankedProposals delay = zipWith (flip Proposal) [delay..]
+
+-- Order a compound elimination before the values its subjects depend on.
+-- Edges point from a dependent to its prerequisites. Unselected vertices
+-- retain transitive constraints but are never returned as actions. Kahn's
+-- queue preserves learned preference among ready subjects, in O((V+E) log V).
+-- An incomplete/cyclic ordering is not an admissibility proof: keep the
+-- original alternatives, and let the adapter check every resulting proposal.
+dependentFirst :: Ord a => Map.Map a (Set.Set a) -> [a] -> [a]
+dependentFirst edges preferred
+  | Map.size positions /= length preferred = preferred
+  | otherwise = go degrees ready [] 0
+ where
+  positions = Map.fromList $ zip preferred [0 :: Int ..]
+  vertices = Set.unions $ Map.keysSet positions : Map.keysSet edges : Map.elems edges
+  degrees = Map.unionWith (+) (Map.fromSet (const (0 :: Int)) vertices) $
+    Map.fromListWith (+) [(target, 1) | targets <- Map.elems edges, target <- Set.toList targets]
+  key vertex = (Map.findWithDefault (-1) vertex positions, vertex)
+  ready = Set.fromList [key vertex | (vertex, 0) <- Map.toList degrees]
+  go remaining queue result visited = case Set.minView queue of
+    Nothing | visited == Set.size vertices -> reverse result
+            | otherwise -> preferred
+    Just ((_, vertex), rest) ->
+      let release (counts, unlocked) target =
+            let count = (counts Map.! target) - 1
+            in (Map.insert target count counts,
+                if count == 0 then Set.insert (key target) unlocked else unlocked)
+          (next, available) = foldl' release (remaining, rest) $
+            Set.toList $ Map.findWithDefault Set.empty vertex edges
+          chosen = if Map.member vertex positions then vertex : result else result
+      in go next available chosen (visited + 1)
+
 data Inspection action result = Open [Proposal action] | Candidate result | Stuck
   deriving (Eq, Show)
 -- A deferred operation can report additional spent scheduling work. It is not

@@ -11,6 +11,7 @@ import Data.Aeson (Value (..), toJSON)
 import Data.Aeson.KeyMap qualified as KM
 import Data.Foldable (toList)
 import Data.IORef
+import Data.IntSet qualified as IntSet
 import Data.List (nub, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
@@ -38,6 +39,7 @@ import Agda.Interaction.BasicOps qualified as Basic
 import Agda.Interaction.Base (UseForce (WithoutForce), Rewrite (AsIs))
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Conversion (compareType)
+import Agda.TypeChecking.Free (allFreeVars)
 import Agda.TypeChecking.Pretty (prettyTCM)
 import Agda.TypeChecking.Reduce (instantiateFull, reduce)
 import Agda.TypeChecking.Rules.Term (checkExpr, inferExpr, inferExpr')
@@ -45,6 +47,7 @@ import Agda.TypeChecking.Substitute (absApp, apply, raise)
 import Agda.Utils.Impossible (impossible)
 
 import AgdaProver.Symbolic.Evidence
+import AgdaProver.Symbolic.Agenda qualified as Agenda
 import AgdaProver.Agda28.Construction qualified as Construction
 import AgdaProver.Agda28.Recursion qualified as Recursion
 import AgdaProver.Agda28.Scheduling qualified as Scheduling
@@ -362,6 +365,7 @@ clauseProposals stats limits models mode native emit namespace excluded target =
   let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
   (forbidden, _) <- excludedGlobals excluded
   context <- getContext
+  let nativeBindings = Map.fromList $ zip [0..] $ map ctxEntryName context
   observed <- fmap catMaybes $ forM (zip [0..] context) $ \(index, entry) -> attempt runtime $ do
     allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
     if not allowed then pure Nothing else do
@@ -378,10 +382,14 @@ clauseProposals stats limits models mode native emit namespace excluded target =
       let name = prettyShow $ A.nameConcrete $ ctxEntryName entry
           subject = fmap (\single -> (name, rendered, single,
             ClauseExecution.BoundSubjects (ctxEntryName entry :| []))) splitting
-      pure $ Just (rendered, subject)
+          dependencies = Set.fromList
+            [binding | variable <- IntSet.toList $ allFreeVars ty,
+             Just binding <- [Map.lookup variable nativeBindings]]
+      pure $ Just (rendered, subject, (ctxEntryName entry, dependencies))
   targetText <- T.pack . prettyShow <$> prettyTCM target
-  let subjects = catMaybes $ map snd observed
-      goal = F.GoalView targetText (map (T.pack . fst) observed) Nothing
+  let subjects = [subject | (_, Just subject, _) <- observed]
+      dependencies = Map.fromList [edge | (_, _, edge) <- observed]
+      goal = F.GoalView targetText [T.pack ty | (ty, _, _) <- observed] Nothing
       decision = T.pack namespace <> ":case"
       candidates = [P.Candidate (T.pack $ show index) (T.pack name) 0
         (Right $ F.candidateTokens goal $ F.CandidateView "case-variable" "split"
@@ -407,7 +415,10 @@ clauseProposals stats limits models mode native emit namespace excluded target =
         name <- NE.toList names]
       linearSubjects = [name | (ClauseExecution.BoundSubjects names, _) <- ordered,
         name <- NE.toList names, Set.member name linearNames]
-      batches = case linearSubjects of
+      -- A dependent witness can make its index splittable, while the reverse
+      -- sequence may be inadmissible. Preserve native telescope dependencies
+      -- inside the compound action; singles retain their learned ordering.
+      batches = case Agenda.dependentFirst dependencies linearSubjects of
         first:second:rest -> [(ClauseExecution.BoundSubjects (first :| (second:rest)), [])]
         _ -> []
       features action = case [(ty) | (_, ty, _, proposed) <- subjects, proposed == action] of

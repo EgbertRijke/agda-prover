@@ -390,8 +390,12 @@ view. They never carry anonymous meta identities into source reconstruction;
 checking the proposal in its original branch preserves coupled constraints.
 
 Autonomous case search also offers one compound move for local variables with
-one-constructor inductive types, in the ranked subject order. Agda owns all
-dependent substitutions and admissibility checks. Individual eliminations remain
+one-constructor inductive types. Within that batch, native type dependencies put
+a dependent witness before its prerequisites; NNUE order breaks ties among
+ready subjects. Dependencies through unselected context entries are retained
+without making those entries new case subjects. Agda owns all dependent
+substitutions and admissibility checks. Individual eliminations retain their
+original ranked order and remain
 available; multi-constructor variables are not combined into an exponential
 case tree. `multi_subject_clauses=false` retains single-subject scheduling for
 comparison without changing the user's resource envelope.
