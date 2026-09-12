@@ -4,7 +4,7 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE RankNTypes #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.EvidenceSearch (run, begin, resume, Pending, runHelper, primitiveProposals, structuralProposals, equationProposals, constructorProposals, clauseProposals, Result (..)) where
+module AgdaProver.Agda28.EvidenceSearch (run, begin, resume, Pending, runHelper, primitiveProposals, structuralProposals, equationProposals, constructorProposals, propagationProposals, clauseProposals, Result (..)) where
 
 import Control.Monad (forM)
 import Control.Monad.Except (catchError, runExceptT, throwError)
@@ -708,14 +708,32 @@ equationProposals later stats limits models mode native emit namespace excluded 
 
 -- A cheap target-directed slice for other selected joint obligations. It does
 -- not enumerate their premise catalogues or perform a hidden whole-goal search.
--- Eager propagation must supply checked information, not merely turn a later
--- source hole into suspended checking. Ordinary selected-goal construction
--- still offers the same expressions when their prerequisites become useful.
 constructorProposals :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
                      -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> [String]
                      -> Maybe Recursion.Owner -> InteractionId -> I.Type
                      -> TCM [(A.Expr, [(T.Text, T.Text)])]
-constructorProposals stats limits models mode native emit namespace excluded owner point target = do
+constructorProposals stats limits models mode native emit namespace excluded owner _ target = do
+  pruned <- liftIO $ newIORef False
+  let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
+  (forbiddenHere, _) <- excludedGlobals excluded
+  inherited <- maybe (pure Set.empty) Recursion.ownerGroup owner
+  proposals <- Construction.constructorClosures
+    (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
+    (Set.union forbiddenHere inherited) target
+  seeds <- mapM (describe runtime "constructor-closure") proposals
+  ranked <- rankDescribed runtime Classification.unknownClassification target seeds
+  pure [(expression, picked) | (Seed expression _ _, picked) <- ranked]
+
+-- Scheduling eligibility is separate from the shared constructor catalogue.
+-- Eager propagation must supply checked information, not merely turn a later
+-- source hole into suspended checking. Ordinary selected-goal construction
+-- still offers the same expressions when their prerequisites become useful.
+propagationProposals :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
+                     -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> [String]
+                     -> Maybe Recursion.Owner -> InteractionId -> I.Type
+                     -> TCM [(A.Expr, [(T.Text, T.Text)])]
+propagationProposals stats limits models mode native emit namespace excluded owner point target = do
+  candidates <- constructorProposals stats limits models mode native emit namespace excluded owner point target
   pruned <- liftIO $ newIORef False
   let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
       closedAssignment meta = do
@@ -733,14 +751,7 @@ constructorProposals stats limits models mode native emit namespace excluded own
     meta <- lookupInteractionId other
     complete <- closedAssignment meta
     pure $ if complete then Nothing else Just meta
-  (forbiddenHere, _) <- excludedGlobals excluded
-  inherited <- maybe (pure Set.empty) Recursion.ownerGroup owner
-  proposals <- Construction.constructorClosures
-    (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
-    (Set.union forbiddenHere inherited) target
-  seeds <- mapM (describe runtime "constructor-closure") proposals
-  ranked <- rankDescribed runtime Classification.unknownClassification target seeds
-  catMaybes <$> forM ranked (\(Seed expression _ _, picked) -> localTCState $ attempt runtime $ do
+  catMaybes <$> forM candidates (\(expression, picked) -> localTCState $ attempt runtime $ do
     before <- length <$> getAllConstraints
     queryCheck runtime expression target $ \term -> do
       closed <- instantiateFull term

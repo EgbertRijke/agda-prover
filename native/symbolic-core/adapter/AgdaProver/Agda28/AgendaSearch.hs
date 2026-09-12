@@ -271,7 +271,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
       Left failure -> pure $ Left failure
       Right goal -> do
         budget <- moveAllowance
-        (stats, proposals) <- S.proposeConstructors session goal budget (models settings)
+        (stats, proposals) <- S.proposePropagation session goal budget (models settings)
           (ranking settings) native (excluded settings) trace
         recordSearch stats
         case proposals of

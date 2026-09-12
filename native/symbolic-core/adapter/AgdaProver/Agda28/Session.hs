@@ -17,7 +17,7 @@ module AgdaProver.Agda28.Session
   , Refutation.Kind (..)
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
-  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, preferStructures, withoutResultIntroductionOverlap, proposeTerms, proposeTermsWithOptions, proposeStructures, proposeEquations, proposeConstructors, applyTerm
+  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, preferStructures, withoutResultIntroductionOverlap, proposeTerms, proposeTermsWithOptions, proposeStructures, proposeEquations, proposeConstructors, proposePropagation, applyTerm
   , ClauseMove, clauseMoveGoal, clauseMoveIsBatch, applyClauseMove, ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
@@ -660,6 +660,11 @@ proposeConstructors :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.M
                     -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
                     -> IO (Search.SearchStats, Either Failure (TermProposals s))
 proposeConstructors = proposeTermsUsing Search.constructorProposals
+
+proposePropagation :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
+                   -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
+                   -> IO (Search.SearchStats, Either Failure (TermProposals s))
+proposePropagation = proposeTermsUsing Search.propagationProposals
 
 type TermGenerator n = IORef Search.SearchStats -> Search.SearchLimits -> Policy.Models
   -> Policy.RankingMode -> Maybe (NativeScorer n) -> (Value -> IO ()) -> String -> [String]
