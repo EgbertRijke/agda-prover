@@ -12,7 +12,7 @@ module AgdaProver.Agda28.Session
   , inspect, pending, tryExpression
   , solveEvidence, solveHelper
   , ClauseProposal, makeClauses, clauseView, applyClause
-  , reconstructGoal, reconstructGoals
+  , reconstructGoal, reconstructGoals, exportGoals
   , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, proposeTerms, applyTerm
   , ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
@@ -63,6 +63,7 @@ import AgdaProver.Agda28.Helpers qualified as Helpers
 import AgdaProver.Agda28.ClauseExecution qualified as ClauseExecution
 import AgdaProver.Agda28.Recursion qualified as Recursion
 import AgdaProver.Agda28.DraftAssembly qualified as Assembly
+import AgdaProver.Agda28.Source qualified as Source
 import AgdaProver.Symbolic.Clause (ClauseAction)
 import AgdaProver.Symbolic.Evidence qualified as Search
 import AgdaProver.Symbolic.NNUE.Native (NativeScorer)
@@ -556,7 +557,19 @@ reconstructGoal session goal descendant = fmap (fmap $ snd . NE.head) $
 -- checking work remains charged. Unrequested source goals are never discarded.
 reconstructGoals :: Session s -> StateRef s -> NonEmpty InteractionId -> StateRef s
                  -> IO (Either Failure (NonEmpty (InteractionId, Transition s)))
-reconstructGoals session parent points descendant = request session parent $ \owner initial ->
+reconstructGoals session parent points descendant = fmap (fmap $ fmap (\(p, t, ()) -> (p, t))) $
+  reconstructWith (\_ _ -> pure ()) session parent points descendant
+
+exportGoals :: Session s -> StateRef s -> NonEmpty InteractionId -> StateRef s
+            -> IO (Either Failure (NonEmpty (InteractionId, Transition s, Value)))
+exportGoals session = reconstructWith (\point expression -> Source.view <$>
+  Source.render (liftIO $ charge (sessionWork session) $ \w -> w
+    { checkingAttempts = checkingAttempts w + 1, clauseQueries = clauseQueries w + 1 }) point expression) session
+
+reconstructWith :: (InteractionId -> A.Expr -> TCM a) -> Session s -> StateRef s
+                -> NonEmpty InteractionId -> StateRef s
+                -> IO (Either Failure (NonEmpty (InteractionId, Transition s, a)))
+reconstructWith present session parent points descendant = request session parent $ \owner initial ->
   case reconstructionDrafts session owner parent descendant of
     Left failure -> pure (owner, Left failure)
     Right (expressions, allocations) -> case mapM (\point ->
@@ -581,15 +594,19 @@ reconstructGoals session parent points descendant = request session parent $ \ow
  where
   go _ owner _ _ [] = pure (owner, Right [])
   go allocation owner current state ((point, expression):rest) = do
-    (next, result) <- check session owner current state
-      (DraftAction point $ NativeDraft expression allocation) False
-    case result of
+    (rendered, _) <- kernel session state $ reserveAllocation allocation >> present point expression
+    case rendered of
       Left failure -> pure (owner, Left failure)
-      Right transition -> case lookupState session (transitionState transition) next of
-        Left failure -> pure (owner, Left failure)
-        Right child -> do
-          (done, results) <- go allocation next (transitionState transition) child rest
-          pure (done, ((point, transition):) <$> results)
+      Right source -> do
+        (next, result) <- check session owner current state
+          (DraftAction point $ NativeDraft expression allocation) False
+        case result of
+          Left failure -> pure (owner, Left failure)
+          Right transition -> case lookupState session (transitionState transition) next of
+            Left failure -> pure (owner, Left failure)
+            Right child -> do
+              (done, results) <- go allocation next (transitionState transition) child rest
+              pure (done, ((point, transition, source):) <$> results)
 
 reconstructionDrafts :: Session s -> Owner -> StateRef s -> StateRef s
                      -> Either Failure ([(InteractionId, A.Expr)], [Allocation])

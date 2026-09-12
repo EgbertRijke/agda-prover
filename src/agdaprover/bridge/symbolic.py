@@ -59,7 +59,7 @@ def search_evidence(
     if type(focused_search) is not bool:
         raise ValueError("focused_search must be a boolean")
     with resident_session(executable, project, budget, cancellation) as connection:
-        return connection.request(
+        reply = connection.request(
             "solve-evidence",
             {
                 "state": connection.root_state,
@@ -76,6 +76,23 @@ def search_evidence(
             },
             publish,
         )
+        outcome = reply["outcome"]
+        if outcome.get("status") == "candidate" and outcome.get("candidate"):
+            exported = connection.request(
+                "export-goals",
+                {
+                    "state": connection.root_state,
+                    "goal_ids": [goal_id],
+                    "descendant": outcome["candidate"]["state"],
+                },
+                publish,
+            )
+            reply = {
+                **reply,
+                "source_export": exported["outcome"],
+                "cost": exported["cost"],
+            }
+        return reply
 
 
 @contextmanager

@@ -41,6 +41,7 @@ data Operation = Pending StateKey | Observe StateKey InteractionId P.Observation
   | ApplyClause StateKey InteractionId ClauseAction
   | ReconstructGoal StateKey InteractionId StateKey
   | ReconstructGoals StateKey (NonEmpty InteractionId) StateKey
+  | ExportGoals StateKey (NonEmpty InteractionId) StateKey
   | StartSearch StateKey Search.SearchLimits Policy.RankingMode (Maybe FilePath)
       (Maybe FilePath) (Maybe FilePath) Bool [String] Scheduling
   | AdvanceSearch Run.Key Natural Search.SearchLimits
@@ -108,14 +109,14 @@ parseRequest = withObject "session request" $ \o -> do
     "reconstruct-goal" -> do
       fields ["state", "goal_id", "descendant"]
       ReconstructGoal <$> o .: "state" <*> goal <*> o .: "descendant"
-    "reconstruct-goals" -> do
+    opName | opName `elem` ["reconstruct-goals", "export-goals"] -> do
       fields ["state", "goal_ids", "descendant"]
       ids <- o .: "goal_ids" :: Parser [Integer]
       unless (all (\n -> n >= 0 && n <= toInteger (maxBound :: Int)) ids
               && Set.size (Set.fromList ids) == length ids) $ fail "invalid goal ids"
       case ids of
         [] -> fail "empty goal selection"
-        first:rest -> ReconstructGoals <$> o .: "state"
+        first:rest -> (if opName == "export-goals" then ExportGoals else ReconstructGoals) <$> o .: "state"
           <*> pure (fmap fromInteger $ first :| rest) <*> o .: "descendant"
     "start-search" -> do
       fields $ ["state", "limits", "ranker", "model_path", "focused_model_path",
@@ -284,18 +285,10 @@ perform session runs emit emitRun operation = case operation of
     S.reconstructGoal session ref descendant >>= checkedResult
   ReconstructGoals key goals child -> resolved key $ \ref -> resolved child $ \descendant -> do
     batch <- S.reconstructGoals session ref goals descendant
-    pure $ case batch of
-      Left failure -> failureView failure
-      Right transitions ->
-        let final = snd $ NE.last transitions
-            entries = traverse (\(point, checked) -> do
-              evidence <- S.evidenceView $ S.transitionEvidence checked
-              pure $ object ["goal_id" .= interactionId point, "evidence" .= evidence]) transitions
-        in case entries of
-          Left reason -> failureView $ KernelFailure reason
-          Right values -> object ["state" .= S.stateKey (S.transitionState final),
-            "status" .= kindName (S.transitionKind final), "pending" .= S.transitionPending final,
-            "entries" .= values, "proof_authority" .= False]
+    pure $ batchResult $ fmap (fmap $ \(point, checked) -> (point, checked, [])) batch
+  ExportGoals key goals child -> resolved key $ \ref -> resolved child $ \descendant -> do
+    batch <- S.exportGoals session ref goals descendant
+    pure $ batchResult $ fmap (fmap $ \(point, checked, source) -> (point, checked, ["source" .= source])) batch
   Give key goal expression -> resolvedGoal key goal $ \ref -> do
     answer <- S.tryExpression session ref expression
     checkedResult answer
@@ -307,6 +300,16 @@ perform session runs emit emitRun operation = case operation of
   Replay key -> resolved key $ \ref -> result (\state -> object ["state" .= S.stateKey state]) <$> S.replay session ref
   _ -> pure $ failureView (KernelFailure "control-dispatched-as-work")
  where
+  batchResult = either failureView $ \transitions ->
+    let (_, final, _) = NE.last transitions
+        entries = traverse (\(point, checked, extra) -> do
+          evidence <- S.evidenceView $ S.transitionEvidence checked
+          pure $ object $ ["goal_id" .= interactionId point, "evidence" .= evidence] ++ extra) transitions
+    in case entries of
+      Left reason -> failureView $ KernelFailure reason
+      Right values -> object ["state" .= S.stateKey (S.transitionState final),
+        "status" .= kindName (S.transitionKind final), "pending" .= S.transitionPending final,
+        "entries" .= values, "proof_authority" .= False]
   solve key goal limits mode modelPath focusedPath nativePath enableFocused excluded helper = resolvedGoal key goal $ \ref -> do
     loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
     focused <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.FocusedBranch)) focusedPath

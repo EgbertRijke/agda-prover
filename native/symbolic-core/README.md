@@ -86,6 +86,12 @@ source patches and hidden-binder exposure remain separate export work.
 
 `reconstruct-goals` rechecks an ordered batch in one new branch. Later entries
 can depend on earlier reconstructed definitions; unselected goals stay open.
+`export-goals` adds a native source presentation to each checked entry. Hidden
+clause binders referenced by the proof are exposed by Agda and mapped by native
+binding identity. Relative helper layout is retained. The application anchors
+the resulting expression or whole-clause edit and validates it freshly; wider
+format integration remains pending. See the source-presentation contract in
+the session schema.
 The batch returns each entry's checked evidence and the final pending state.
 A failed batch publishes no intermediate states, while preserving its spent
 work. Whole-source fresh validation is still required.

@@ -55,6 +55,7 @@ Each operation permits only its listed additional fields:
 | `apply-clause` | `state`, `goal_id`, `action` | Checked native helper/clause child, evidence view and dependent obligations |
 | `reconstruct-goal` | `state`, `goal_id`, `descendant` | Assemble native drafts from a descendant, recheck from the original goal's parent, return a provisional checked transition |
 | `reconstruct-goals` | `state`, `goal_ids`, `descendant` | Reconstruct a nonempty ordered selection into one new coupled branch; return all entries and final pending obligations |
+| `export-goals` | `state`, `goal_ids`, `descendant` | The same checked batch with native source presentations, including required hidden-clause binders |
 | `start-search` | `state`, `limits`, `ranker`, `model_path`, `focused_model_path`, `native_path`, `focused_search`, `exclude_names`; optional `scheduling` | Create a retained autonomous run over the source state's pending goals |
 | `advance-search` | `run`, `steps`, `limits` | Advance a scheduling slice; return a new run revision or terminal finite exhaustion |
 | `search-cost` | `run` | Retained run cost snapshot |
@@ -204,8 +205,8 @@ Agda checks the assembled draft again from the original parent under the usual
 owner/termination/warning rules. The operation returns a new provisional
 transition and charges its checking work; it does not mutate either input
 branch. Remaining child goals or hidden obligations prevent apparent closure.
-Source drift invalidates the epoch. General source patches, binder exposure
-and independent fresh validation remain separate duties.
+Source drift invalidates the epoch. Source export and independent fresh
+validation remain separate duties.
 
 `reconstruct-goals` uses the same native ancestry with a nonempty, duplicate-free
 array `goal_ids`. Each ID must be an open goal in the original `state`. The
@@ -222,6 +223,32 @@ coupled branch. Unselected source goals and hidden obligations remain pending.
 An apparently closed batch is not independently verified and is not a source
 patch. Validate the reconstructed source together, not individual proof terms
 against unrelated copies of the original file.
+
+### Native source presentations
+
+`export-goals` uses the same batch/ancestry/rollback contract, and adds `source`
+to each entry. Its schema is `agdaprover.symbolic-source.v1`, with
+`proof_authority: false`, zero-based half-open `goal_range`, `kind` and `body`.
+`kind: expression` replaces only the original hole. `kind: clause` additionally
+has `source_range` for the original containing clause.
+
+The renderer detects referenced context bindings absent from the native scope.
+It asks Agda's `makeCase` operation to expose them without splitting, then maps
+the retained RHS's binding identities to the generated LHS telescope. Hiding,
+instance arguments and native helper layout are preserved. No textual
+substitution, constructor recognition or library-specific rules are involved.
+Exposure and its context check are charged in the session ledger. Rendering
+does not mutate input branches or count as independent validation.
+
+The current source consumer permits direct expression edits and exposed
+whole-clause holes with one-line original heads. It preserves module indentation
+and trailing comments and checks that native ranges match the selected source
+goal. Exposure in extended lambdas, nested RHS expressions, where declarations
+or wider multiline clause regions is explicitly refused; these require H8's
+remaining format/coordinate integration. The native evidence application uses
+this handoff before fresh validation; it no longer blindly inserts display text
+that can refer to inaccessible hidden binders. Model bytes and defaults are
+unchanged.
 
 ## Resident search runs
 

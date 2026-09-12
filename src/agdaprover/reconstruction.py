@@ -255,6 +255,52 @@ def reconstruct_hole_completion(
     )
 
 
+def reconstruct_native_completion(
+    source: str, goal: GoalInfo, presentation: dict[str, Any]
+) -> dict[str, Any]:
+    """Anchor Agda's native expression/clause export at its original source.
+
+    The native renderer owns binder exposure. This is lexical patch assembly,
+    not proof acceptance; callers still pin inputs and freshly validate the edit.
+    """
+    if presentation.get("schema_version") != "agdaprover.symbolic-source.v1":
+        raise ValueError("unsupported native source schema")
+    hole_start, hole_end = _goal_offsets(source, goal)
+    expected_goal = [hole_start, hole_end]
+    native_goal = presentation.get("goal_range")
+    if (
+        not isinstance(native_goal, list)
+        or any(type(value) is not int for value in native_goal)
+        or native_goal != expected_goal
+    ):
+        raise ValueError("native source selects a different goal")
+    body = presentation.get("body")
+    if not isinstance(body, str) or not body.strip():
+        raise ValueError("native source has no body")
+    if presentation.get("kind") == "expression":
+        return reconstruct_hole_completion(source, goal, body, native_layout=True)
+    if presentation.get("kind") != "clause":
+        raise ValueError("unsupported native source kind")
+    span = presentation.get("source_range")
+    if (
+        not isinstance(span, list)
+        or len(span) != 2
+        or any(type(value) is not int for value in span)
+        or not 0 <= span[0] <= hole_start < hole_end <= span[1] <= len(source)
+    ):
+        raise ValueError("invalid native clause range")
+    # Keep the established lexical whole-clause authorization in this first
+    # handoff. Multiline/extended-lambda clause ranges are a separate format
+    # integration; never widen a refused edit heuristically.
+    patch = reconstruct_case_split(source, goal, [body])
+    edit_start, edit_end = patch["source_range"]
+    if not edit_start - 1 <= span[0] <= span[1] <= edit_end - 1:
+        raise ValueError("native clause requires wider source authorization")
+    if re.search(r"\{![\s\S]*?!\}|(?<![\w?])\?(?![\w?])", body):
+        raise ValueError("native clause retains a proof hole")
+    return patch
+
+
 def reconstruct_intro(source: str, goal: GoalInfo, preview: str) -> dict[str, Any]:
     """Render Agda's checked introduction, preserving implicit abstractions.
 

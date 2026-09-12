@@ -29,7 +29,7 @@ from ..observability.policy_trace import validated_proof_evidence
 from ..offline import assert_offline_configuration
 from ..project import choose_goal, require_agda_source_file
 from ..ranking.bundled import FOCUSED_MODEL, OR_MODEL
-from ..reconstruction import reconstruct_hole_completion
+from ..reconstruction import reconstruct_native_completion
 from ..resource_budget import ResourceLimitError, ResourceScope
 from ..validation import validate_reconstruction
 from ..verifier_budget import VerifierCallLimitExceeded, VerifierCallScope
@@ -270,8 +270,24 @@ class NativeEvidenceEngine:
                 )
                 return result
             display = candidate["evidence"]["display"]
-            patch = reconstruct_hole_completion(
-                source.read_text(), goal, display, native_layout=True
+            exported = reply.get("source_export", {})
+            if exported.get("reason") == "cancelled":
+                raise ResourceLimitError("native source export was cancelled")
+            if exported.get("reason") not in {None, "kernel-rejected", "kernel-blocked"}:
+                raise SymbolicProtocolError(f"native source export failed: {exported}")
+            entries = exported.get("entries", [])
+            if (
+                exported.get("status") not in {"apparently-closed", "accepted-partial"}
+                or len(entries) != 1
+                or entries[0].get("goal_id") != goal.goal_id
+            ):
+                result.status = "unsolved"
+                result.diagnostics.append(
+                    {"kind": "reconstruction", "message": str(exported)}
+                )
+                return result
+            patch = reconstruct_native_completion(
+                source.read_text(), goal, entries[0]["source"]
             )
             validation, trust = validate_reconstruction(
                 source,

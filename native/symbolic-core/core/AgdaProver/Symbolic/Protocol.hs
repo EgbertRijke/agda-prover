@@ -34,7 +34,7 @@ capabilities = object
   , "ghc_version" .= ("9.6.7" :: String)
   , "operations" .= (["capabilities", "observe-goal", "resident-session"] :: [String])
   , "session_operations" .=
-      (["pending", "observe", "give", "make-clause", "apply-clause", "reconstruct-goal", "reconstruct-goals",
+      (["pending", "observe", "give", "make-clause", "apply-clause", "reconstruct-goal", "reconstruct-goals", "export-goals",
         "start-search", "advance-search", "search-cost", "discard-search", "infer-helper", "solve-helper",
         "solve-evidence", "evict", "replay", "cost", "cancel", "close"] :: [String])
   , "observation_modes" .= map modeName [minBound .. maxBound]
