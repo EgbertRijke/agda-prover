@@ -40,6 +40,7 @@ import Agda.Interaction.BasicOps qualified as Basic
 import Agda.Interaction.Base (UseForce (WithoutForce), Rewrite (AsIs))
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Conversion (compareType)
+import Agda.TypeChecking.Empty (ensureEmptyType)
 import Agda.TypeChecking.Free (allFreeVars)
 import Agda.TypeChecking.Pretty (prettyTCM)
 import Agda.TypeChecking.Reduce (instantiateFull, reduce)
@@ -1156,9 +1157,15 @@ search runtime@(Runtime _ _ _ _ _ _ _ _ enableFocused) inventory@(GlobalInventor
           _ <- give_ False WithoutForce point' Nothing argument
           fillArguments expression rest (Map.insert point' argument filled) selected'
   eliminate expression ty picked = do
-    modify runtime $ \s -> s { absurdProposals = absurdProposals s + 1 }
-    proposal <- Construction.eliminateEmpty expression ty target
-    queryCheck runtime proposal target $ \term -> use proposal term picked
+    allowed <- charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }
+    if not allowed then pure Nothing else do
+      -- Use the same Agda operation as absurd-pattern checking before reifying
+      -- a complete helper. Unlike a Boolean emptiness test, this also preserves
+      -- postponed emptiness constraints; unknown does not become impossible.
+      ensureEmptyType noRange ty
+      modify runtime $ \s -> s { absurdProposals = absurdProposals s + 1 }
+      proposal <- Construction.eliminateEmpty expression ty target
+      queryCheck runtime proposal target $ \term -> use proposal term picked
   applyMore expression term ty remaining picked = reduce ty >>= \case
     I.El _ (I.Pi domain codomain)
       | remaining <= 0 -> deferDepth runtime
