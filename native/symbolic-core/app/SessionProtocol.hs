@@ -241,6 +241,7 @@ failureView failure = object
 serve :: (Value -> IO ()) -> S.Session s -> S.StateRef s -> IO ()
 serve output session root = do
   runs <- Run.newStore session root
+  modelCache <- Model.newModelCache
   outputLock <- newMVar ()
   active <- newMVar Nothing
   serial <- newIORef (-1)
@@ -271,7 +272,7 @@ serve output session root = do
                     ["request_id" .= number, "trace" .= trace]
                   emitRun payload = emit $ event "search-progress"
                     ["request_id" .= number, "payload" .= payload]
-              outcome <- (takeMVar gate >> unmask (perform session runs emitSearch emitRun operation)) `E.catches`
+              outcome <- (takeMVar gate >> unmask (perform session runs modelCache emitSearch emitRun operation)) `E.catches`
                 [ E.Handler $ \(err :: E.AsyncException) -> case err of
                     E.ThreadKilled -> pure (failureView Cancelled)
                     _ -> E.throwIO err
@@ -322,22 +323,22 @@ serve output session root = do
   cost <- S.work session
   emit $ event "session-end" ["cost" .= cost]
 
-loadPrimary :: Bool -> Maybe FilePath -> IO (Either String [Model.Model])
-loadPrimary _ Nothing = pure $ Right []
-loadPrimary oneMove (Just path) = do
-  loaded <- Model.loadModel Nothing path
+loadPrimary :: Model.ModelCache -> Bool -> Maybe FilePath -> IO (Either String [Model.Model])
+loadPrimary _ _ Nothing = pure $ Right []
+loadPrimary cache oneMove (Just path) = do
+  loaded <- Model.loadModelCached cache Nothing path
   pure $ do
     model <- loaded
     unless (Model.modelRole model `elem` if oneMove then [Model.OneStep]
       else [Model.FocusedBranch, Model.ProofTerm]) $ Left "primary-model-role-mismatch"
     pure [model]
 
-perform :: S.Session s -> Run.Store s -> (Value -> IO ()) -> (Value -> IO ()) -> Operation -> IO Value
-perform session runs emit emitRun operation = case operation of
+perform :: S.Session s -> Run.Store s -> Model.ModelCache -> (Value -> IO ()) -> (Value -> IO ()) -> Operation -> IO Value
+perform session runs modelCache emit emitRun operation = case operation of
   StartSearch oneMove key limits mode modelPath focusedPath nativePath focused excluded scheduling selection actionLimit depthLimit ->
     resolved key $ \root -> do
-      loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
-      focusedModel <- loadPrimary oneMove focusedPath
+      loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . loadOR) modelPath
+      focusedModel <- loadPrimary modelCache oneMove focusedPath
       case ((++) <$> loaded <*> focusedModel) >>= Policy.models of
         Left reason -> pure $ failureView $ KernelFailure ("model-configuration:" ++ reason)
         Right models -> Run.start oneMove runs root G.Settings
@@ -383,6 +384,7 @@ perform session runs emit emitRun operation = case operation of
   Replay key -> resolved key $ \ref -> result (\state -> object ["state" .= S.stateKey state]) <$> S.replay session ref
   _ -> pure $ failureView (KernelFailure "control-dispatched-as-work")
  where
+  loadOR = Model.loadModelCached modelCache (Just Model.ORDecision)
   batchResult = either failureView $ \transitions ->
     let (_, final, _) = NE.last transitions
         entries = traverse (\(point, checked, extra) -> do
@@ -394,8 +396,8 @@ perform session runs emit emitRun operation = case operation of
         "status" .= kindName (S.transitionKind final), "pending" .= S.transitionPending final,
         "entries" .= values, "proof_authority" .= False]
   solve key goal limits mode modelPath focusedPath nativePath enableFocused excluded helper = resolvedGoal key goal $ \ref -> do
-    loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
-    focused <- loadPrimary False focusedPath
+    loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . loadOR) modelPath
+    focused <- loadPrimary modelCache False focusedPath
     case ((++) <$> loaded <*> focused) >>= Policy.models of
       Left reason -> pure $ failureView $ KernelFailure ("model-configuration:" ++ reason)
       Right models -> withNativeScorer nativePath $ \native -> do

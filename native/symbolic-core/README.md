@@ -247,6 +247,12 @@ dispatch code belongs here.
 
 ## Existing NNUE compatibility
 
+Repeated operations in one native session reuse decoded models after comparing
+the current complete file bytes (and legacy role sidecar). There is one cache
+slot per model role. Custom-model edits and invalid inputs remain detectable;
+already retained searches keep their original weights. This saves repeated
+decoding, not Agda proof checking, and does not change scores or search order.
+
 The Haskell library reads the existing APNNUE v1/v2/v3 models, retaining artifact
 SHA-256, role restrictions and scoped decision families. No weights are changed
 or trained. Custom model paths work offline. The feature layer preserves the

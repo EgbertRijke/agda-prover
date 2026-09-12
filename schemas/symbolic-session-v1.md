@@ -629,6 +629,13 @@ external CPU/memory/I/O and cancellation supervision; depth widens. `ranker` is
 uses symbolic order and is reported as unavailable, not as learned inference.
 The application normally supplies the pinned bundled OR artifact. The response
 includes its loaded hash, checked against the application's pinned model.
+Within one session, model loading reuses at most one decoded artifact per role.
+Every new model-bearing request rereads the bounded file bytes and, for APNNUE1,
+its role sidecar. Reuse requires exact byte equality and still enforces the
+requested role; a path, timestamp or hash alone is not a reuse witness. Missing,
+changed or invalid files do not fall back to cached weights. Existing retained
+runs keep their immutable model versions when a later request changes weights.
+The cache ends with the session and never stores proof evidence or training data.
 `primary_model_path` optionally supplies a focused-branch or proof-term APNNUE
 for proof search, or a one-step APNNUE for `start-step`. The old
 `focused_model_path` field is a compatibility alias; two non-null paths are

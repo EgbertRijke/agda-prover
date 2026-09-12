@@ -7,15 +7,18 @@ module AgdaProver.Symbolic.NNUE.Model
   , modelRole, modelId, inputSize, hiddenSize, modelSeed, policyFamilies
   , hiddenBias, embeddings, outputWeights, outputBias
   , decodeModel, loadModel, requireRole, supportsFamily, legacyFamilies
+  , ModelCache, newModelCache, loadModelCached
   ) where
 
 import Control.Exception qualified as E
+import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
 import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, parseEither)
 import Data.Bits ((.|.), shiftL)
 import Data.ByteString qualified as BS
+import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Vector.Storable qualified as V
 import Data.Word (Word32)
@@ -135,7 +138,41 @@ word32LE bytes start = foldr (\offset rest ->
 -- Explicit provisioning supplies paths; loading never downloads or executes a
 -- model. A caller may cancel loading through normal IO interruption.
 loadModel :: Maybe ModelRole -> FilePath -> IO (Either String Model)
-loadModel expected path = do
+loadModel expected path = fmap (>>= decodeSource expected) $ readSource path
+
+-- A session retains at most one decoded model per supported role. Running
+-- searches own their immutable models independently; replacing a cache slot
+-- cannot change their weights. A new request still reads bounded exact bytes,
+-- including the legacy sidecar, so paths and timestamps are never witnesses.
+data ModelSource = ModelSource !BS.ByteString !(Maybe BS.ByteString)
+  deriving Eq
+newtype ModelCache = ModelCache (MVar (Map.Map ModelRole (ModelSource, Model)))
+
+newModelCache :: IO ModelCache
+newModelCache = ModelCache <$> newMVar Map.empty
+
+loadModelCached :: ModelCache -> Maybe ModelRole -> FilePath -> IO (Either String Model)
+loadModelCached (ModelCache cache) expected path = do
+  source <- readSource path
+  case source of
+    Left failure -> pure $ Left failure
+    Right witness -> modifyMVar cache $ \entries -> do
+      let matches = [model | (saved, model) <- Map.elems entries, saved == witness]
+          loaded = case matches of
+            model:_ -> model <$ maybe (Right ()) (`requireRole` model) expected
+            [] -> decodeSource expected witness
+      -- Force validation before publishing the slot. Cancellation/decoding
+      -- failure leaves the previous cache intact, never a suspended decoder.
+      case loaded of
+        Left failure -> pure (entries, Left failure)
+        Right model -> pure (Map.insert (modelRole model) (witness, model) entries, Right model)
+
+decodeSource :: Maybe ModelRole -> ModelSource -> Either String Model
+decodeSource expected (ModelSource bytes sidecar) = decodeModel expected
+  (sidecar >>= either (const Nothing) Just . eitherDecodeStrict') bytes
+
+readSource :: FilePath -> IO (Either String ModelSource)
+readSource path = do
   loaded <- E.try $ boundedRead maxFile path
   case loaded of
     Left (_ :: E.IOException) -> pure $ Left "model-read-failed"
@@ -144,11 +181,11 @@ loadModel expected path = do
       manifest <- if BS.take 8 bytes == "APNNUE1\0" then do
         result <- E.try $ boundedRead maxHeader (path ++ ".json")
         pure $ case result of
-          Right (Right value) -> either (const Nothing) Just (eitherDecodeStrict' value)
+          Right (Right value) -> Just value
           Left (_ :: E.IOException) -> Nothing
           _ -> Nothing
         else pure Nothing
-      pure $ decodeModel expected manifest bytes
+      pure $ Right $ ModelSource bytes manifest
 
 boundedRead :: Int -> FilePath -> IO (Either String BS.ByteString)
 boundedRead limit path = withBinaryFile path ReadMode $ \handle -> go handle 0 []
