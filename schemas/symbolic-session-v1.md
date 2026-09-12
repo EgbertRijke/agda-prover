@@ -913,11 +913,33 @@ application alternatives remain available; no proof or premise is invented.
 
 The additive evidence-cost v2 counters `application_shape_observations` and
 `application_shape_rejections` expose this precheck. The goal-head observation
-has one charged inference query. Inspecting the result of an already charged
-candidate inference is part of that query, not a second inference or a generated
-spine. These counters are informational subsets, not additional work units;
+has one charged inference query. Inspecting an already available candidate type
+does not constitute a second inference or a generated spine. That type can now
+come from a reused observation, so shape observations are not necessarily a
+subset of this advance's inference queries. These are informational counters,
+not additional work units;
 `application_generation_steps` retains its specialized-spine meaning. Final
 applications still undergo ordinary checking and fresh reconstruction validation.
+
+`retained_head_observations` and `reused_head_observations` count native typed
+head reuse within one ranked inventory. The original `DontExpandLast` inference
+is charged normally and must succeed under Agda's `dontAssignMetas` and
+`reallyNoConstraints`; both its value and type must be metavariable-free.
+Only ordinary variable/definition/unambiguous projection heads are retained.
+Universe syntax is recognized through Agda's native builtin identities and
+follows the normal inference path, regardless of local renaming. Constructors,
+applications, helpers, ambiguous heads, and failed read-only observations retain
+their existing checked fallback. A failed read-only probe followed by ordinary
+inference charges both attempts.
+
+The retained observation has no textual key, cross-inventory cache or independent
+session handle. It stays inside the exact lexical context of its inventory and
+its owning, parent-branded continuation. New contexts build new inventories;
+separate inhabitants remain separate seeds. Primitive application eligibility,
+coarse application eligibility and algebra inspection share these observations.
+Calls using `ExpandLast` still infer afresh: inserting hidden/instance operands
+belongs to the current dependent choice, not the shared head. Reuse does not
+count as another checker call; later comparison/application checks remain charged.
 
 Search cost adds `recursive_context_queries`, `recursive_proposals` and
 `recursive_validation_queries`. The last counts whole candidate admissibility

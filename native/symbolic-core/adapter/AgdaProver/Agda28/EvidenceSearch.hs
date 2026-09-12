@@ -18,7 +18,7 @@ import Data.List (nub, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, isNothing)
 import Data.Monoid (Any (..))
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -42,6 +42,7 @@ import Agda.Interaction.BasicOps qualified as Basic
 import Agda.Interaction.Base (UseForce (WithoutForce), Rewrite (AsIs))
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Conversion (compareType)
+import Agda.TypeChecking.Constraints (reallyNoConstraints)
 import Agda.TypeChecking.Empty (ensureEmptyType)
 import Agda.TypeChecking.Free (allFreeVars)
 import Agda.TypeChecking.Pretty (prettyTCM)
@@ -81,7 +82,11 @@ import AgdaProver.Symbolic.SessionTypes (DraftExpression)
 data Result = Result SearchStatus (Maybe A.Expr) [(T.Text, T.Text)]
 data Runtime s = Runtime SearchLimits (IORef SearchStats) (IORef Bool)
   P.Models P.RankingMode (Maybe (NativeScorer s)) (Value -> IO ()) T.Text Bool
-data Seed = Seed A.Expr String String
+-- The observation belongs only to this ranked inventory's lexical TCM context.
+-- Seeds never cross a context extension, enter a child inventory, or leave the
+-- adapter. Retained tasks already carry the exact parent/context snapshot.
+-- Keep different expressions/proofs distinct, even at the same native type.
+data Seed = Seed A.Expr String String (Maybe (I.Term, I.Type))
 data GlobalInventory = GlobalInventory [A.Expr] (Set.Set QName) (Maybe Recursion.CallContext)
 
 data Services = forall s. Services (Runtime s)
@@ -147,6 +152,14 @@ queryInferWithS :: ExpandHidden -> A.Expr -> ((I.Term, I.Type) -> Search (Maybe 
 queryInferWithS expansion expression use = do
   _ <- chargeS $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
   liftS (inferExpr' expansion expression) >>= use
+
+-- Only DontExpandLast observations are shared. ExpandLast can create fresh
+-- hidden/instance arguments and must still run in the consuming choice.
+querySeedS :: Seed -> ((I.Term, I.Type) -> Search (Maybe a)) -> Search (Maybe a)
+querySeedS (Seed expression _ _ Nothing) = queryInferWithS DontExpandLast expression
+querySeedS (Seed _ _ _ (Just observed)) = \use -> do
+  modifyS $ \s -> s { reusedHeadObservations = reusedHeadObservations s + 1 }
+  use observed
 
 -- Only rigid type heads can witness a mismatch. A stuck definition, newly
 -- introduced telescope variable or meta is unknown. LocalShape identifies a
@@ -275,7 +288,7 @@ runHelper stats limits models mode native emit namespace point view application 
       if not (noMetas closed) then pure Nothing else do
         allowed <- charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }
         if not allowed then pure Nothing else validate expression >> pure (Just (expression, picked))
-    | (Seed expression _ _, picked) <- ranked]
+    | (Seed expression _ _ _, picked) <- ranked]
   exhausted <- stopped runtime
   pure $ case found of
     Just (expression, picked) -> Result FoundCandidate (Just expression) picked
@@ -483,7 +496,7 @@ primitiveProposals options stats limits models mode native emit namespace exclud
           if Recursion.copatternCall context then fromIntegral (length proposals) else 0 }
       described <- mapM (describe runtime "recursive") proposals
       ordered <- rankDescribed runtime classification target described
-      pure [(expression, picked) | (Seed expression _ _, picked) <- ordered]
+      pure [(expression, picked) | (Seed expression _ _ _, picked) <- ordered]
   -- A recursive result can constrain an operand of another application, not
   -- only close the current goal. Retain native closed syntax, never temporary
   -- metas or inferred helper declarations. These are proposals, not recursive
@@ -514,9 +527,9 @@ primitiveProposals options stats limits models mode native emit namespace exclud
             helperClauseQueries = helperClauseQueries s + 1 }) forbidden point expression ty
       modify runtime $ \s -> s { helperProposals = helperProposals s + maybe 0 (const 1) proposal }
       pure $ fmap (\draft -> (draft, picked)) proposal
-  headSignatures <- forM ranked $ \(Seed expression _ _, picked) -> do
+  headSignatures <- forM ranked $ \(seed@(Seed expression _ _ _), picked) -> do
     observed <- localTCState $ attempt runtime $
-      queryInferWith DontExpandLast runtime expression $ \(value, ty) -> do
+      querySeed runtime seed $ \(value, ty) -> do
         (result, infos) <- signature ty
         let originalKeys = headKeys expression
             goalKeys = maybe Set.empty id mentioned
@@ -722,7 +735,7 @@ constructorProposals stats limits models mode native emit namespace excluded own
     (Set.union forbiddenHere inherited) target
   seeds <- mapM (describe runtime "constructor-closure") proposals
   ranked <- rankDescribed runtime Classification.unknownClassification target seeds
-  pure [(expression, picked) | (Seed expression _ _, picked) <- ranked]
+  pure [(expression, picked) | (Seed expression _ _ _, picked) <- ranked]
 
 -- Scheduling eligibility is separate from the shared constructor catalogue.
 -- Eager propagation must supply checked information, not merely turn a later
@@ -926,6 +939,12 @@ queryInferWith expansion runtime expression use = do
   allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
   if allowed then inferExpr' expansion expression >>= use else pure Nothing
 
+querySeed :: Runtime s -> Seed -> ((I.Term, I.Type) -> TCM (Maybe a)) -> TCM (Maybe a)
+querySeed runtime (Seed expression _ _ Nothing) = queryInferWith DontExpandLast runtime expression
+querySeed runtime (Seed _ _ _ (Just observed)) = \use -> do
+  modify runtime $ \s -> s { reusedHeadObservations = reusedHeadObservations s + 1 }
+  use observed
+
 -- Current recursive definitions are never ordinary evidence. Agda supplies
 -- the exact mutual group; dedicated calls below carry clause descent context.
 -- User exclusions are resolved before any premise typing or ranking.
@@ -987,17 +1006,39 @@ visibleGlobals forbidden = do
     [A.Con $ I.AmbQ (name :| []) | name <- toList names]
   expandConstructors expression = [expression]
 
--- No inferred Agda term/type is retained by describe. Its presentation is used
--- solely by the unchanged NNUE feature vocabulary. Actual use re-elaborates in
--- the appropriate branch with native operands and expected dependent types.
+-- Share a head's non-instantiating inference with primitive/coarse eligibility
+-- and algebra inspection in this same inventory. Agda must certify that it
+-- added no constraints and assigned no metas; neither returned value nor type
+-- may contain metas. Inference of expressions which can introduce declarations
+-- or solve placeholders remains speculative and is not retained. Presentation
+-- is still only the unchanged NNUE view, never a cache key or typing witness.
 describe :: Runtime s -> String -> A.Expr -> TCM Seed
 describe runtime origin expression = do
-  info <- localTCState $ attempt runtime $ do
+  stableHead <- case expression of
+    A.Var{} -> pure True
+    -- Universe syntax follows Agda's special inference path (with level
+    -- insertion), not ordinary head lookup. Resolve its native builtin
+    -- identity; local spelling and renaming are irrelevant.
+    A.Def name -> (isNothing . ($ name) . isNameOfUniv) <$> sortKit
+    A.Proj _ (I.AmbQ (_ :| [])) -> pure True
+    _ -> pure False
+  observed <- if not stableHead then pure Nothing else localTCState $ attempt runtime $ do
     allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
     if not allowed then pure Nothing else do
-      (_, ty) <- inferExpr expression
-      Just . prettyShow <$> prettyTCM ty
-  pure $ Seed expression origin (maybe "unknown" id info)
+      inferred@(value, ty) <- reallyNoConstraints $ dontAssignMetas $ inferExpr expression
+      let reusable = noMetas value && noMetas ty
+      display <- prettyShow <$> prettyTCM ty
+      modify runtime $ \s -> s { retainedHeadObservations = retainedHeadObservations s + if reusable then 1 else 0 }
+      pure $ Just (display, if reusable then Just inferred else Nothing)
+  -- The constrained probe and its fallback are separate charged operations.
+  -- Do not let failure of read-only inference remove an ordinary candidate.
+  info <- case observed of
+    Just value -> pure $ Just value
+    Nothing -> localTCState $ attempt runtime $
+      queryInferWith DontExpandLast runtime expression $ \(_, ty) -> do
+        display <- prettyShow <$> prettyTCM ty
+        pure $ Just (display, Nothing)
+  pure $ uncurry (Seed expression origin) $ maybe ("unknown", Nothing) id info
 
 rankSeeds :: Runtime s -> Classification.Classification -> I.Type -> [A.Expr] -> TCM [(Seed, [(T.Text, T.Text)])]
 rankSeeds runtime classification target globals = do
@@ -1040,9 +1081,9 @@ rankDescribed runtime@(Runtime _ ref _ models mode native emit namespace _) clas
   stats <- liftIO $ readIORef ref
   let ordinal = policyDecisions stats
       decision = namespace <> ":evidence:" <> T.pack (show ordinal)
-      contextText = [T.pack typeText | Seed _ "local" typeText <- seeds]
+      contextText = [T.pack typeText | Seed _ "local" typeText _ <- seeds]
       goal = F.GoalView targetText contextText Nothing
-  candidates <- forM (zip [0 :: Int ..] seeds) $ \(index, seed@(Seed expression origin typeText)) -> do
+  candidates <- forM (zip [0 :: Int ..] seeds) $ \(index, seed@(Seed expression origin typeText _)) -> do
     display <- T.pack . prettyShow <$> prettyTCM expression
     let view = F.CandidateView "evidence-application-v1" "native-evidence" (T.pack typeText) display 1 [("origin", T.pack origin)]
     pure $ P.Candidate (T.pack $ show index) display 0 (Right $ F.candidateTokens goal view) seed
@@ -1063,7 +1104,7 @@ rankDescribed runtime@(Runtime _ ref _ models mode native emit namespace _) clas
       rankCompatible runtime P.ProofTerms goal
         [(0, F.termTokens goal <$> PolicyViews.termView expression,
           (seed, if length candidates > 1 then [(decision, P.candidateId candidate)] else []))
-        | candidate <- P.rankedCandidates batch, let seed@(Seed expression _ _) = P.candidateValue candidate]
+        | candidate <- P.rankedCandidates batch, let seed@(Seed expression _ _ _) = P.candidateValue candidate]
 
 -- Continuations implement the AND part: if a later argument or final check
 -- fails, search revisits earlier argument choices with the original TCState.
@@ -1136,8 +1177,8 @@ search enableFocused inventory@(GlobalInventory globals forbidden recursion) dep
           _ <- chargeS $ \s -> s { inferenceQueries = inferenceQueries s + 1,
             applicationShapeObservations = applicationShapeObservations s + 1 }
           expectedShape <- liftS $ reduce target >>= outerShape 0
-          choicesS [queryInferWithS DontExpandLast expression $ \(_, ty) ->
-              do -- Inspect the type returned by this charged inference. This
+          choicesS [querySeedS seed $ \(_, ty) ->
+              do -- Inspect the freshly inferred or reused native type. This
                  -- walks existing syntax; it is not another checker query.
                  modifyS $ \s -> s { applicationShapeObservations = applicationShapeObservations s + 1 }
                  offeredShape <- liftS $ applicationResultShape ty
@@ -1146,16 +1187,16 @@ search enableFocused inventory@(GlobalInventory globals forbidden recursion) dep
                    else do
                      modifyS $ \s -> s { applicationShapeRejections = applicationShapeRejections s + 1 }
                      pure Nothing
-            | (Seed expression _ _, picked) <- seeds]
+            | (seed@(Seed expression _ _ _), picked) <- seeds]
     choicesS $
       [queryCheckS expression target $ \term -> use expression term (selected ++ picked)
-       | (Seed expression _ _, picked) <- seeds]
+       | (Seed expression _ _ _, picked) <- seeds]
       ++ [algebraic seeds]
       ++ [recursiveCall inferredArguments context | Just context <- [recursion]]
       ++ (if Classification.constructionFirst classification
             then construction ++ [application] else application : construction)
       ++ [recursiveCall arguments context | Just context <- [recursion]]
-      ++ [produce expression picked | (Seed expression _ _, picked) <- seeds]
+      ++ [produce expression picked | (Seed expression _ _ _, picked) <- seeds]
   -- Recognizers consume native types; ranked visible/local evidence supplies
   -- every law and relation operation. Pure rewrite paths preserve distinct
   -- proofs, and a downstream rejection resumes alternative paths. This does
@@ -1168,8 +1209,8 @@ search enableFocused inventory@(GlobalInventory globals forbidden recursion) dep
       choicesS [rewriteView view | view <- views]
    where
       rewriteView view = do
-        observed <- fmap catMaybes $ forM seeds $ \(Seed expression _ _, picked) -> scopeS localTCState $ attemptS $
-          queryInferWithS DontExpandLast expression $ \(_, ty) ->
+        observed <- fmap catMaybes $ forM seeds $ \(seed@(Seed expression _ _ _), picked) -> scopeS localTCState $ attemptS $
+          querySeedS seed $ \(_, ty) ->
             fmap (\role -> (role,(expression,picked))) <$> liftS (NativeAlgebra.inspectEvidence view ty)
         let (ops, edges) = NativeAlgebra.operations observed
             (left,right) = NativeAlgebra.endpoints view

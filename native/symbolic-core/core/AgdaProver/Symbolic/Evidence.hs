@@ -56,6 +56,7 @@ retryDepth stats
 
 data SearchStats = SearchStats
   { workUnits :: !Integer, checkerQueries :: !Integer, inferenceQueries :: !Integer
+  , retainedHeadObservations :: !Integer, reusedHeadObservations :: !Integer
   , rejectedQueries :: !Integer, blockedQueries :: !Integer
   , lambdaProposals :: !Integer, applicationProposals :: !Integer, applicationGenerationSteps :: !Integer
   , applicationShapeObservations :: !Integer, applicationShapeRejections :: !Integer
@@ -77,6 +78,7 @@ data SearchStats = SearchStats
 emptyStats :: SearchStats
 emptyStats = SearchStats
   { workUnits = 0, checkerQueries = 0, inferenceQueries = 0
+  , retainedHeadObservations = 0, reusedHeadObservations = 0
   , rejectedQueries = 0, blockedQueries = 0
   , lambdaProposals = 0, applicationProposals = 0, applicationGenerationSteps = 0
   , applicationShapeObservations = 0, applicationShapeRejections = 0
@@ -98,6 +100,8 @@ instance ToJSON SearchStats where
     ["schema_version" .= ("agdaprover.symbolic-evidence-cost.v2" :: String)
     ,"work_units" .= workUnits s, "checker_queries" .= checkerQueries s
     ,"inference_queries" .= inferenceQueries s, "rejected_queries" .= rejectedQueries s
+    ,"retained_head_observations" .= retainedHeadObservations s
+    ,"reused_head_observations" .= reusedHeadObservations s
     ,"blocked_queries" .= blockedQueries s, "lambda_proposals" .= lambdaProposals s
     ,"application_proposals" .= applicationProposals s, "nodes" .= searchNodes s
     ,"application_generation_steps" .= applicationGenerationSteps s
