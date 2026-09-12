@@ -53,6 +53,7 @@ Each operation permits only its listed additional fields:
 | `give` | `state`, `goal_id`, `expression` | Child state, native evidence view, obligations |
 | `make-clause` | `state`, `goal_id`, `action` | Parent-bound native clause proposal, not a child state |
 | `apply-clause` | `state`, `goal_id`, `action` | Checked native helper/clause child, evidence view and dependent obligations |
+| `infer-helper` | `state`, `goal_id`, `mode`, `application` | Parent-bound native helper signature, not a proof transition |
 | `solve-evidence` | `state`, `goal_id`, `limits`, `ranker`, `model_path`, `native_path`, `exclude_names`; optional `focused_model_path`, `focused_search` | Search status, provisional child/evidence, cumulative search cost, selected policy choices |
 | `evict` | `state` | Drop child snapshot; preserve replay ancestry |
 | `replay` | `state` | Rechecked state key (resident states are returned unchanged) |
@@ -86,7 +87,7 @@ means no interaction goals remain, but hidden metas or constraints do.
 ## Resource and ownership boundaries
 
 The native ledger counts entered owner requests, checking attempts, accepted and
-rejected checks, clause queries, replayed actions, cancellations, input bytes read,
+rejected checks, clause/helper queries, replayed actions, cancellations, input bytes read,
 and elapsed monotonic nanoseconds/process CPU picoseconds during owner operations. It is
 not an OS-wide resource budget and excludes initial Agda loading and transport
 work; an external supervisor must account for the entire worker process.
@@ -178,6 +179,27 @@ text can mention a hidden parent binder that must first be exposed in source.
 Do not paste it blindly or interpret a closed native branch as `verified`.
 Independent fresh checking remains mandatory. Autonomous clause selection and
 full workflow integration are separate migration tasks.
+
+## Helper inference
+
+`infer-helper` delegates to Agda's `metaHelperType` using the same environments
+and renderer as `Cmd_helper_function`. `application` is an untrusted string
+such as `helper p (f q)`; `mode` uses the five observation mode names above.
+Agda scopes arguments and computes the abstraction, including dependent
+compound arguments, section parameters, and implicit/instance binders.
+
+Success returns `parent`, `goal_id`, and a `proposal` with schema
+`agdaprover.symbolic-helper.v1`, `status: "proposed"`, echoed `mode`, and
+Agda-rendered `signature`. `applied` and `proof_authority` are false. Internally,
+the nominally parent-branded proposal retains the native abstract signature and
+its generation state. The displayed signature is not a serialized executable
+handle and must not become a text-derived substitute for that native syntax.
+
+No source or parent state changes, no child is issued, and no proof is claimed.
+Success and failure charge `checking_attempts` and `helper_queries`, not
+`accepted_checks`; invalid state/goal and kernel failures retain the ordinary
+session failure semantics. Finite helper construction and autonomous use are
+separate operations, not implied by successful type inference.
 
 ## Evidence operation
 

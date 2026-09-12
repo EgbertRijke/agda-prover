@@ -3,7 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.Observation
-  ( GoalSnapshot, observeGoal, encodeGoal, openInteractionPoints ) where
+  ( GoalSnapshot, observeGoal, encodeGoal, openInteractionPoints, rewrite ) where
 
 import Control.Monad (unless)
 import Control.Monad.Except (runExceptT)

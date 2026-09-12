@@ -75,14 +75,14 @@ failureName ReplayRejected{} = "replay-rejected"
 -- This ledger belongs to the owner, outside every restorable Agda snapshot.
 data Work = Work
   { requests :: !Integer, checkingAttempts :: !Integer, replayedActions :: !Integer
-  , clauseQueries :: !Integer
+  , clauseQueries :: !Integer, helperQueries :: !Integer
   , acceptedChecks :: !Integer, rejectedChecks :: !Integer, cancelledRequests :: !Integer
   , inputBytesRead :: !Integer, elapsedNanoseconds :: !Integer, cpuPicoseconds :: !Integer
   } deriving (Eq, Show)
 
 emptyWork :: Work
 emptyWork = Work
-  { requests = 0, checkingAttempts = 0, replayedActions = 0, clauseQueries = 0
+  { requests = 0, checkingAttempts = 0, replayedActions = 0, clauseQueries = 0, helperQueries = 0
   , acceptedChecks = 0, rejectedChecks = 0, cancelledRequests = 0
   , inputBytesRead = 0, elapsedNanoseconds = 0, cpuPicoseconds = 0 }
 
@@ -90,6 +90,7 @@ instance ToJSON Work where
   toJSON w = object
     ["requests" .= requests w, "checking_attempts" .= checkingAttempts w,
      "clause_queries" .= clauseQueries w,
+     "helper_queries" .= helperQueries w,
      "replayed_actions" .= replayedActions w, "accepted_checks" .= acceptedChecks w,
      "rejected_checks" .= rejectedChecks w, "cancelled_requests" .= cancelledRequests w,
      "input_bytes_read" .= inputBytesRead w,

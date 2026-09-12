@@ -34,6 +34,7 @@ data Operation = Pending StateKey | Observe StateKey InteractionId P.Observation
   | SolveEvidence StateKey InteractionId Search.SearchLimits Policy.RankingMode (Maybe FilePath) (Maybe FilePath) (Maybe FilePath) Bool [String]
   | MakeClause StateKey InteractionId ClauseAction
   | ApplyClause StateKey InteractionId ClauseAction
+  | InferHelper StateKey InteractionId P.ObservationMode DraftExpression
   | Cost | Cancel | Close
 data Request = Request Integer Operation
 data Active = Active Integer ThreadId (MVar ())
@@ -73,6 +74,10 @@ parseRequest = withObject "session request" $ \o -> do
     "make-clause" -> do
       fields ["state", "goal_id", "action"]
       MakeClause <$> o .: "state" <*> goal <*> o .: "action"
+    "infer-helper" -> do
+      fields ["state", "goal_id", "mode", "application"]
+      mode <- o .: "mode" >>= maybe (fail "unknown observation mode") pure . P.parseMode
+      InferHelper <$> o .: "state" <*> goal <*> pure mode <*> (DraftExpression <$> o .: "application")
     "apply-clause" -> do
       fields ["state", "goal_id", "action"]
       ApplyClause <$> o .: "state" <*> goal <*> o .: "action"
@@ -196,6 +201,8 @@ perform session emit operation = case operation of
   Observe key goal mode -> resolvedGoal key goal $ \ref -> result id <$> S.inspect session ref mode
   MakeClause key goal action -> resolvedGoal key goal $ \ref ->
     result S.clauseView <$> S.makeClauses session ref action
+  InferHelper key goal mode expression -> resolvedGoal key goal $ \ref ->
+    result S.helperView <$> S.inferHelper session ref mode expression
   ApplyClause key goal action -> resolvedGoal key goal $ \ref -> do
     answer <- S.applyClause session ref action
     checkedResult answer

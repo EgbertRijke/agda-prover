@@ -47,7 +47,7 @@ library agda28
     AgdaProver.Agda28.EvidenceSearch, AgdaProver.Agda28.Construction,
     AgdaProver.Agda28.Clauses, AgdaProver.Agda28.ClauseExecution,
     AgdaProver.Agda28.Recursion, AgdaProver.Agda28.Scheduling,
-    AgdaProver.Agda28.Focused
+    AgdaProver.Agda28.Focused, AgdaProver.Agda28.Helpers
   build-depends:
     agda-prover-symbolic,
     Agda ==2.8.0,

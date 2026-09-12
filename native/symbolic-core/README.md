@@ -45,6 +45,7 @@ never a verified proof and never edits goal bodies.
 `session` loads once and reads newline-delimited JSON requests. It supports
 observations, speculative `give`, native `make-clause` proposals and checked
 `apply-clause` transitions, retained branches,
+read-only `infer-helper` signatures,
 eviction/replay, cost snapshots, cancellation, and close. `solve-evidence` additionally chooses typed
 applications and lambdas inside that resident checker. See [the session protocol](../../schemas/symbolic-session-v1.md)
 for fields, events, resource supervision, and failure semantics.
@@ -75,6 +76,11 @@ cancellation and replay preserve the same transaction/cost rules as `give`.
 This is not yet autonomous clause search or full source export: displayed
 evidence can require exposing hidden parent binders before insertion. Full
 proof-plan reconstruction and fresh workflow qualification remain required.
+
+`infer-helper` uses Agda's helper-function inference directly, including
+abstraction over compound arguments and the five observation modes. It retains
+the native signature in a parent-branded snapshot and returns Agda's rendering
+for inspection. It neither installs a helper nor claims a proof.
 
 ## Boundaries
 

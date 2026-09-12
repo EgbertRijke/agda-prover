@@ -12,6 +12,7 @@ module AgdaProver.Agda28.Session
   , inspect, pending, tryExpression
   , solveEvidence
   , ClauseProposal, makeClauses, clauseView, applyClause
+  , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
   , evict, replay, close, cancel, work, evidenceView
   ) where
@@ -53,6 +54,7 @@ import Agda.Utils.Lens ((^.))
 import AgdaProver.Agda28.Observation (observeGoal, encodeGoal, openInteractionPoints)
 import AgdaProver.Agda28.EvidenceSearch qualified as Search
 import AgdaProver.Agda28.Clauses qualified as Clauses
+import AgdaProver.Agda28.Helpers qualified as Helpers
 import AgdaProver.Agda28.ClauseExecution qualified as ClauseExecution
 import AgdaProver.Agda28.Recursion qualified as Recursion
 import AgdaProver.Symbolic.Clause (ClauseAction)
@@ -89,6 +91,9 @@ data Transition s = Transition
 -- state in which it was generated travel together under the parent's brand.
 type role ClauseProposal nominal
 data ClauseProposal s = ClauseProposal (GoalRef s) Clauses.ClauseSnapshot TCState
+
+type role HelperProposal nominal
+data HelperProposal s = HelperProposal (GoalRef s) Helpers.Snapshot TCState
 
 -- Preserve checked-source abstract syntax as well as internal evidence. Agda's
 -- display reifier may use postfix projections: display syntax is not a draft
@@ -279,6 +284,26 @@ tryExpression :: Session s -> GoalRef s -> DraftExpression
               -> IO (Either Failure (Transition s))
 tryExpression session goal expression = request session (goalState goal) $ \owner state ->
   check session owner (goalState goal) state (DraftAction (goalId goal) $ TextDraft expression) False
+
+inferHelper :: Session s -> GoalRef s -> ObservationMode -> DraftExpression
+            -> IO (Either Failure (HelperProposal s))
+inferHelper session goal mode expression = request session (goalState goal) $ \owner state -> do
+  charge (sessionWork session) $ \w -> w
+    { checkingAttempts = checkingAttempts w + 1, helperQueries = helperQueries w + 1 }
+  (inferred, planningState) <- kernel session state $ do
+    exists <- elem (goalId goal) <$> openInteractionPoints
+    if not exists then pure $ Left UnknownGoal
+      else Right <$> Helpers.infer (goalId goal) mode expression
+  let result = inferred >>= id
+  case result of
+    Left _ -> charge (sessionWork session) $ \w -> w { rejectedChecks = rejectedChecks w + 1 }
+    Right _ -> pure ()
+  pure (owner, (\snapshot -> HelperProposal goal snapshot planningState) <$> result)
+
+helperView :: HelperProposal s -> Value
+helperView (HelperProposal goal snapshot _) = object
+  ["parent" .= stateKey (goalState goal), "goal_id" .= interactionId (goalId goal)
+  ,"proposal" .= Helpers.view snapshot, "proof_authority" .= False]
 
 makeClauses :: Session s -> GoalRef s -> ClauseAction -> IO (Either Failure (ClauseProposal s))
 makeClauses session goal action = request session (goalState goal) $ \owner state -> do
