@@ -17,6 +17,19 @@ class NativeReceipts:
     retained_bytes: int = 0
     omitted: int = 0
 
+    def models(self) -> dict[str, str]:
+        primary_role = (self.result.search_stats or {}).get(
+            "primary_model_role", "focused-search-branch-policy"
+        )
+        return {
+            role: identity
+            for role, identity in (
+                ("or-decision-ranking", self.result.action_model_id),
+                (primary_role, self.result.model_id),
+            )
+            if role is not None and identity is not None
+        }
+
     def publish(self, event: dict[str, Any]) -> None:
         result = self.result
         stats = result.search_stats = dict(result.search_stats or {})
@@ -35,12 +48,20 @@ class NativeReceipts:
                 result.cost.case_split_checks = event["cost"]["clause_queries"]
         trace = event.get("trace") if kind == "search-policy" else event.get("payload")
         if isinstance(trace, dict) and "model_items_scored" in trace:
-            expected_model = (
-                result.model_id
-                if trace.get("role") == "focused-search-branch-policy"
-                else result.action_model_id
-            )
-            if trace.get("model_id") not in {None, expected_model}:
+            role = trace.get("role")
+            if role not in {
+                "proof-term-ranking",
+                "one-step-refinement-ranking",
+                "focused-search-branch-policy",
+                "or-decision-ranking",
+            }:
+                raise SymbolicProtocolError("native trace has an unknown model role")
+            expected_model = self.models().get(str(role))
+            identity = trace.get("model_id")
+            if identity not in {None, expected_model} or (
+                trace.get("model_items_scored", 0) > 0
+                and (expected_model is None or identity != expected_model)
+            ):
                 raise SymbolicProtocolError("native trace uses an unpinned NNUE")
             result.model_calls += trace.get("model_items_scored", 0)
             result.cost.model_items_scored = result.cost.actions_scored = (
@@ -59,14 +80,7 @@ class NativeReceipts:
         result = self.result
         schema = cost.get("schema_version")
         if schema == "agdaprover.symbolic-agenda-cost.v1":
-            expected = {
-                role: identity
-                for role, identity in (
-                    ("or-decision-ranking", result.action_model_id),
-                    ("focused-search-branch-policy", result.model_id),
-                )
-                if identity is not None
-            }
+            expected = self.models()
             if cost.get("models") != expected:
                 raise SymbolicProtocolError(
                     "native agenda uses unpinned model identities"

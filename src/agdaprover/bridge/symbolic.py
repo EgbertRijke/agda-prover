@@ -47,6 +47,7 @@ def search_evidence(
     ranker: str,
     model_path: Path | None,
     focused_model_path: Path | None = None,
+    primary_model_path: Path | None = None,
     focused_search: bool = True,
     native_path: Path | None,
     cancellation: CancellationToken,
@@ -69,6 +70,9 @@ def search_evidence(
                 "model_path": str(model_path.resolve()) if model_path else None,
                 "focused_model_path": str(focused_model_path.resolve())
                 if focused_model_path
+                else None,
+                "primary_model_path": str(primary_model_path.resolve())
+                if primary_model_path
                 else None,
                 "focused_search": focused_search,
                 "native_path": str(native_path.resolve()) if native_path else None,

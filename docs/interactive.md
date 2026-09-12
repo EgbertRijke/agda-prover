@@ -54,11 +54,17 @@ each offered goal still needs independent fresh validation when accepted.
 Native `step` returns one checked transition, leaving any child goals open,
 and fresh-loads its proposed source edit. It is not a theorem-completion claim.
 
-Native search currently requires Agda 2.8.0, uses the bundled focused/OR NNUE
-roles, and supports `--ranker symbolic`. Explicit legacy `--max-depth`,
-one-step model overrides, and `--action-model` are not yet qualified; unsupported
-configurations fail rather than being silently ignored. Use `--engine python`
-for the established configuration surface until native qualification finishes.
+Native search requires Agda 2.8.0. It uses the bundled focused/OR models for
+proof search and the bundled one-step/OR models for `step`. `--model` accepts
+a proof-term or focused-branch model for proof search, and a one-step model for
+`step`; `--action-model` replaces the OR policy. Wrong model roles are rejected.
+`--ranker symbolic` disables bundled ranking; an explicitly supplied
+`--action-model` still enables that policy, just as for Python proof search.
+Native actions outside a model's feature vocabulary retain symbolic ordering;
+this is a distinction between action shapes, not libraries or filenames.
+
+Explicit legacy `--max-depth` is not yet qualified and fails clearly.
+Use `--engine python` for that setting until native qualification finishes.
 
 ## Deep search
 

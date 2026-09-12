@@ -55,9 +55,7 @@ def load_proof_models(
 
     term: ProofTermRanker | None = None
     focused: SparsePolicyRanker | None = None
-    refinement: SparsePolicyRanker | None = None
     primary_id: str | None = None
-    refinement_id: str | None = None
     if task.ranker == "nnue":
         primary = (
             NNUEModel.load(task.model_path, deadline=deadline)
@@ -73,17 +71,8 @@ def load_proof_models(
             raise ValueError(
                 f"the {command} --model must rank proof terms or focused branches"
             )
-    if task.action_model_path is not None:
-        concrete_refinement = NNUEModel.load(
-            task.action_model_path,
-            expected_role="or-decision-ranking",
-            deadline=deadline,
-        )
-        refinement = concrete_refinement
-        refinement_id = concrete_refinement.model_id
-    elif task.ranker == "nnue":
-        refinement = OR_MODEL.load(deadline=deadline)
-        refinement_id = refinement.model_id
+    refinement = load_or_model(task, deadline=deadline)
+    refinement_id = refinement.model_id if refinement is not None else None
     return LoadedProofModels(
         term,
         focused,
@@ -91,6 +80,17 @@ def load_proof_models(
         primary_id,
         refinement_id,
     )
+
+
+def load_or_model(task: TaskSpec, *, deadline: float | None) -> NNUEModel | None:
+    """An explicit OR model is an opt-in even under symbolic primary ranking."""
+    if task.action_model_path is not None:
+        return NNUEModel.load(
+            task.action_model_path,
+            expected_role="or-decision-ranking",
+            deadline=deadline,
+        )
+    return OR_MODEL.load(deadline=deadline) if task.ranker == "nnue" else None
 
 
 def load_step_model(

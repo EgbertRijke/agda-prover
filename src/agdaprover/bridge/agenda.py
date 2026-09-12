@@ -30,6 +30,7 @@ def search_agenda(
     quantum: int = 64,
     principal_variations: bool = False,
     one_move: bool = False,
+    primary_model_path: Path | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield provisional exports, resuming after caller rejection.
 
@@ -62,6 +63,9 @@ def search_agenda(
                 "model_path": str(model_path.resolve()) if model_path else None,
                 "focused_model_path": str(focused_model_path.resolve())
                 if focused_model_path
+                else None,
+                "primary_model_path": str(primary_model_path.resolve())
+                if primary_model_path
                 else None,
                 "native_path": str(native_path.resolve()) if native_path else None,
                 "focused_search": focused_search,

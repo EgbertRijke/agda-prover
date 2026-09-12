@@ -46,6 +46,7 @@ import AgdaProver.Symbolic.Evidence
 import AgdaProver.Agda28.Construction qualified as Construction
 import AgdaProver.Agda28.Recursion qualified as Recursion
 import AgdaProver.Agda28.Scheduling qualified as Scheduling
+import AgdaProver.Agda28.PolicyViews qualified as PolicyViews
 import AgdaProver.Agda28.Focused qualified as NativeFocused
 import AgdaProver.Agda28.Algebra qualified as NativeAlgebra
 import AgdaProver.Symbolic.Algebra qualified as Algebra
@@ -213,8 +214,22 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
         modify runtime $ \s -> s { lambdaProposals = lambdaProposals s + 1 }
         pure [(A.Lam exprNoRange (A.mkDomainFree $ Arg (getArgInfo domain) $ unnamed $ A.mkBinder_ name) hole, [])]
     _ -> pure []
-  pure $ if Classification.constructionFirst classification
-    then introduction ++ record ++ heads else heads ++ introduction ++ record
+  let ordered = if Classification.constructionFirst classification
+        then [(0, item) | item <- introduction ++ record] ++ [(1, item) | item <- heads]
+        else [(0, item) | item <- heads] ++ [(1, item) | item <- introduction ++ record]
+  if not (P.hasDomain models P.Refinements) || mode == P.Symbolic then pure $ map snd ordered else do
+    context <- getContext
+    localTypes <- forM (zip [0..] context) $ \(index, entry) -> do
+      ty <- typeOfBV index
+      text <- T.pack . prettyShow <$> prettyTCM ty
+      pure (ctxEntryName entry, text)
+    targetText <- T.pack . prettyShow <$> prettyTCM target
+    let goal = F.GoalView targetText (map snd localTypes) Nothing
+        features expression = do
+          (tag, local) <- PolicyViews.refinementView expression
+          pure $ F.refinementTokens goal tag (local >>= (`lookup` localTypes))
+    rankCompatible runtime P.Refinements goal
+      [(tier, features expression, item) | (tier, item@(expression, _)) <- ordered]
 
 -- Clause subjects come from native context identities and datatype/record
 -- metadata. Agda's operation resolves their local spelling and decides whether
@@ -264,7 +279,43 @@ clauseProposals stats limits models mode native emit namespace target = do
           | candidate <- P.rankedCandidates batch]
   -- Result splitting also exposes binders that are absent from the local
   -- context. Keep that Agda operation; do not guess a telescope from text.
-  pure $ (Clause.splitResult, []):ordered
+  let features action = case [(ty) | (_, ty, proposed) <- subjects, proposed == action] of
+        ty:_ -> Just $ F.refinementTokens goal "case-split" (Just $ T.pack ty)
+        [] -> Nothing
+  refinements <- rankCompatible runtime P.Refinements goal
+    [(0, features action, item) | item@(action, _) <- ordered]
+  pure $ (Clause.splitResult, []):refinements
+
+-- Optional legacy roles only see compatible native feature views. Unmodelled
+-- actions keep their original slots, and structural tiers are never crossed.
+-- The terms themselves remain native values throughout; text is scoring only.
+rankCompatible :: Runtime s -> P.RankingDomain -> F.GoalView
+               -> [(Int, Maybe (Either String [T.Text]), (a, [(T.Text, T.Text)]))]
+               -> TCM [(a, [(T.Text, T.Text)])]
+rankCompatible runtime@(Runtime _ ref _ models mode native emit namespace _) domain goal entries
+  | not (P.hasDomain models domain) || mode == P.Symbolic = pure $ map (\(_, _, item) -> item) entries
+  | otherwise = do
+    stats <- liftIO $ readIORef ref
+    let ordinal = policyDecisions stats
+        decision = namespace <> ":primary:" <> T.pack (show ordinal)
+        candidates = [P.Candidate (T.pack $ show index) "native-action" tier tokens item
+          | (index, (tier, Just tokens, item)) <- zip [0 :: Int ..] entries]
+    ranked <- liftIO $ P.rankBatch native models mode domain decision (F.stateTokens goal) candidates
+    case ranked of
+      Left reason -> genericError $ "native-primary-policy-batch:" ++ reason
+      Right batch -> do
+        modify runtime $ \s -> s { policyDecisions = ordinal + 1,
+          modelItems = modelItems s + fromIntegral (P.traceItemsScored $ P.decisionTrace batch),
+          modelNanoseconds = modelNanoseconds s + P.traceModelNanoseconds (P.decisionTrace batch) }
+        liftIO $ emit $ P.traceView $ P.decisionTrace batch
+        let reordered = [(value, chosen ++ [(decision, P.candidateId candidate)])
+              | candidate <- P.rankedCandidates batch, let (value, chosen) = P.candidateValue candidate]
+            merge :: [(Int, Maybe (Either String [T.Text]), b)] -> [b] -> TCM [b]
+            merge [] [] = pure []
+            merge ((_, Nothing, item):rest) values = (item :) <$> merge rest values
+            merge ((_, Just _, _):rest) (item:values) = (item :) <$> merge rest values
+            merge _ _ = genericError "native-primary-policy-cardinality"
+        merge entries reordered
 
 modify :: Runtime s -> (SearchStats -> SearchStats) -> TCM ()
 modify (Runtime _ ref _ _ _ _ _ _ _) f = liftIO $ atomicModifyIORef' ref $ \s -> (f s, ())
@@ -437,8 +488,10 @@ rankDescribed runtime@(Runtime _ ref _ models mode native emit namespace _) clas
             Object fields -> Object $ KM.insert "structural_classification" (toJSON classification) fields
             other -> other
       liftIO $ emit view
-      pure [(P.candidateValue candidate, if length candidates > 1 then [(decision, P.candidateId candidate)] else [])
-            | candidate <- P.rankedCandidates batch]
+      rankCompatible runtime P.ProofTerms goal
+        [(0, F.termTokens goal <$> PolicyViews.termView expression,
+          (seed, if length candidates > 1 then [(decision, P.candidateId candidate)] else []))
+        | candidate <- P.rankedCandidates batch, let seed@(Seed expression _ _) = P.candidateValue candidate]
 
 -- Continuations implement the AND part: if a later argument or final check
 -- fails, search revisits earlier argument choices with the original TCState.

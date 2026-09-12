@@ -29,12 +29,10 @@ from ..budget import SearchBudget
 from ..contracts import ProverResult, StepResult, TaskSpec, task_identity
 from ..kernel.p0 import AgdaBridgeError, open_kernel_session
 from ..kernel.protocol import KernelSessionFactory
-from ..nnue import NNUEModel
 from ..observability.policy_trace import validated_proof_evidence
 from ..offline import assert_offline_configuration
 from ..principal_variation import PrincipalVariationObserver
 from ..project import choose_goal, choose_goal_prefix, require_agda_source_file
-from ..ranking.bundled import FOCUSED_MODEL, OR_MODEL
 from ..reconstruction import reconstruct_native_batch
 from ..resource_budget import ResourceLimitError, ResourceScope
 from ..validation import (
@@ -43,6 +41,7 @@ from ..validation import (
     validate_standalone_module,
 )
 from ..verifier_budget import VerifierCallLimitExceeded, VerifierCallScope
+from .native_models import load_native_models
 from .native_receipts import NativeReceipts
 from .native_refutation import (
     CERTIFICATE_SCHEMA,
@@ -174,11 +173,6 @@ class NativeProofEngine:
                 raise ValueError(
                     "native search does not yet implement an explicit legacy max_depth"
                 )
-            if task.action_model_path is not None:
-                raise ValueError(
-                    "native search does not yet consume the legacy refinement model; "
-                    "use policy_model for an OR-decision model"
-                )
             if prefix and self.controller != "agenda":
                 raise ValueError(
                     "the evidence-only controller does not implement joint solving"
@@ -216,39 +210,24 @@ class NativeProofEngine:
                 "completion_known": False,
                 "final_search_cost": None,
             }
-            model_path = None
-            focused_model_path = None
-            if task.ranker == "nnue":
-                policy_model = self.policy_model
-                model_path = policy_model or OR_MODEL.path
-                model = (
-                    NNUEModel.load(
-                        model_path,
-                        expected_role="or-decision-ranking",
-                        deadline=budget.deadline,
-                    )
-                    if policy_model
-                    else OR_MODEL.load(deadline=budget.deadline)
-                )
-                result.action_model_id = model.model_id
-                focused_model_path = task.model_path or FOCUSED_MODEL.path
-                focused_model = (
-                    NNUEModel.load(
-                        focused_model_path,
-                        expected_role="focused-search-branch-policy",
-                        deadline=budget.deadline,
-                    )
-                    if task.model_path
-                    else FOCUSED_MODEL.load(deadline=budget.deadline)
-                )
-                result.model_id = focused_model.model_id
+            models = load_native_models(
+                task,
+                one_move=one_move,
+                policy_override=self.policy_model,
+                deadline=budget.deadline,
+            )
+            result.action_model_id = models.or_id
+            result.model_id = models.primary_id
+            result.search_stats["primary_model_role"] = models.primary_role
             identity = task_identity(
                 task,
                 result.source_hash,
                 mode=f"native-{self.controller}-{'step' if one_move else 'prefix' if prefix else 'single'}",
                 policy_profile=result.policy_profile,
                 toolchain_id=result.toolchain_id,
-                model_ids={"or": result.action_model_id, "focused": result.model_id},
+                model_ids={
+                    role: identity for role, identity in models.identities.items()
+                },
                 project_inputs_id=inputs.identity,
             )
             result.task_id = hashlib.sha256(
@@ -284,9 +263,10 @@ class NativeProofEngine:
             arguments: dict[str, Any] = dict(
                 budget=BridgeBudget.for_run(budget.require_time("native search")),
                 work_units=work_units,
-                ranker=task.ranker,
-                model_path=model_path,
-                focused_model_path=focused_model_path,
+                ranker=models.mode,
+                model_path=models.or_path,
+                focused_model_path=None,
+                primary_model_path=models.primary_path,
                 focused_search=self.focused_search,
                 native_path=self.native_scorer,
                 cancellation=cancellation or CancellationToken(),
@@ -331,6 +311,7 @@ class NativeProofEngine:
                     if self.controller == "evidence" and (
                         outcome.get("model_id") != result.action_model_id
                         or outcome.get("focused_model_id") != result.model_id
+                        or outcome.get("primary_model_role") != models.primary_role
                     ):
                         raise SymbolicProtocolError(
                             "native evidence uses unpinned models"

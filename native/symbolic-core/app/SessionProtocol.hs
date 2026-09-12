@@ -103,6 +103,13 @@ parseRequest = withObject "session request" $ \o -> do
         limit <- o .:? "action_limit"
         unless (maybe True (> (0 :: Integer)) limit) $ fail "action limit must be positive or null"
         pure limit
+      primaryPath = do
+        primary <- o .:? "primary_model_path"
+        legacy <- o .:? "focused_model_path"
+        case (primary, legacy) of
+          (Just _, Just _) -> fail "specify primary_model_path or focused_model_path, not both"
+          (Just path, _) -> pure $ Just path
+          (_, path) -> pure path
   op <- case operation of
     "pending" -> fields ["state"] >> Pending <$> o .: "state"
     "observe" -> do
@@ -140,15 +147,16 @@ parseRequest = withObject "session request" $ \o -> do
       (if opName == "export-goals" then ExportGoals else ReconstructGoals) <$> o .: "state"
         <*> goals <*> o .: "descendant"
     opName | opName `elem` ["start-search", "start-step"] -> do
-      fields $ ["state", "limits", "ranker", "model_path", "focused_model_path",
-        "native_path", "focused_search", "exclude_names"] ++ filter (`KM.member` o) ["scheduling", "goal_ids", "action_limit"]
+      fields $ ["state", "limits", "ranker", "model_path",
+        "native_path", "focused_search", "exclude_names"] ++ filter (`KM.member` o)
+          ["scheduling", "goal_ids", "action_limit", "primary_model_path", "focused_model_path"]
       mode <- o .: "ranker" >>= \case
         ("nnue" :: String) -> pure Policy.Learned
         "symbolic" -> pure Policy.Symbolic
         _ -> fail "unknown ranker"
       scheduling <- if KM.member "scheduling" o then o .: "scheduling" else pure $ Scheduling 2 8 64 True True
       StartSearch (opName == "start-step") <$> o .: "state" <*> o .: "limits" <*> pure mode <*> o .: "model_path"
-        <*> o .: "focused_model_path" <*> o .: "native_path" <*> o .: "focused_search"
+        <*> primaryPath <*> o .: "native_path" <*> o .: "focused_search"
         <*> o .: "exclude_names" <*> pure scheduling
         <*> (if KM.member "goal_ids" o then Just <$> goals else pure Nothing)
         <*> actionLimit
@@ -169,13 +177,13 @@ parseRequest = withObject "session request" $ \o -> do
         <*> o .: "model_path" <*> o .: "native_path" <*> pure view <*> (DraftExpression <$> o .: "application")
     "solve-evidence" -> do
       fields $ ["state", "goal_id", "limits", "ranker", "model_path", "native_path", "exclude_names"]
-        ++ filter (`KM.member` o) ["focused_model_path", "focused_search"]
+        ++ filter (`KM.member` o) ["focused_model_path", "primary_model_path", "focused_search"]
       mode <- o .: "ranker" >>= \case
         ("nnue" :: String) -> pure Policy.Learned
         "symbolic" -> pure Policy.Symbolic
         _ -> fail "unknown ranker"
       SolveEvidence <$> o .: "state" <*> goal <*> o .: "limits" <*> pure mode
-        <*> o .: "model_path" <*> o .:? "focused_model_path" <*> o .: "native_path"
+        <*> o .: "model_path" <*> primaryPath <*> o .: "native_path"
         <*> (if KM.member "focused_search" o then o .: "focused_search" else pure True)
         <*> o .: "exclude_names"
     "evict" -> fields ["state"] >> Evict <$> o .: "state"
@@ -284,12 +292,22 @@ serve output session root = do
   cost <- S.work session
   emit $ event "session-end" ["cost" .= cost]
 
+loadPrimary :: Bool -> Maybe FilePath -> IO (Either String [Model.Model])
+loadPrimary _ Nothing = pure $ Right []
+loadPrimary oneMove (Just path) = do
+  loaded <- Model.loadModel Nothing path
+  pure $ do
+    model <- loaded
+    unless (Model.modelRole model `elem` if oneMove then [Model.OneStep]
+      else [Model.FocusedBranch, Model.ProofTerm]) $ Left "primary-model-role-mismatch"
+    pure [model]
+
 perform :: S.Session s -> Run.Store s -> (Value -> IO ()) -> (Value -> IO ()) -> Operation -> IO Value
 perform session runs emit emitRun operation = case operation of
   StartSearch oneMove key limits mode modelPath focusedPath nativePath focused excluded (Scheduling structural macro initial enabled dependenciesEnabled) selection actionLimit ->
     resolved key $ \root -> do
       loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
-      focusedModel <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.FocusedBranch)) focusedPath
+      focusedModel <- loadPrimary oneMove focusedPath
       case ((++) <$> loaded <*> focusedModel) >>= Policy.models of
         Left reason -> pure $ failureView $ KernelFailure ("model-configuration:" ++ reason)
         Right models -> Run.start oneMove runs root (G.Settings limits mode models focused excluded structural macro initial enabled actionLimit dependenciesEnabled) nativePath selection
@@ -339,7 +357,7 @@ perform session runs emit emitRun operation = case operation of
         "entries" .= values, "proof_authority" .= False]
   solve key goal limits mode modelPath focusedPath nativePath enableFocused excluded helper = resolvedGoal key goal $ \ref -> do
     loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
-    focused <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.FocusedBranch)) focusedPath
+    focused <- loadPrimary False focusedPath
     case ((++) <$> loaded <*> focused) >>= Policy.models of
       Left reason -> pure $ failureView $ KernelFailure ("model-configuration:" ++ reason)
       Right models -> withNativeScorer nativePath $ \native -> do
@@ -358,6 +376,7 @@ perform session runs emit emitRun operation = case operation of
               "candidate" .= value, "selected_choices" .= selected,
               "model_id" .= either (const Nothing) (fmap Model.modelId . safeHead) loaded,
               "focused_model_id" .= either (const Nothing) (fmap Model.modelId . safeHead) focused,
+              "primary_model_role" .= either (const Nothing) (fmap (Model.roleName . Model.modelRole) . safeHead) focused,
               "proof_authority" .= False]
   resolved key action = either (pure . failureView) action (S.restoreReference session key)
   resolvedGoal key goal action = either (pure . failureView) action (S.restoreGoalReference session key goal)

@@ -79,14 +79,14 @@ Each operation permits only its listed additional fields:
 | `reconstruct-goal` | `state`, `goal_id`, `descendant` | Assemble native drafts from a descendant, recheck from the original goal's parent, return a provisional checked transition |
 | `reconstruct-goals` | `state`, `goal_ids`, `descendant` | Reconstruct a nonempty ordered selection into one new coupled branch; return all entries and final pending obligations |
 | `export-goals` | `state`, `goal_ids`, `descendant` | The same checked batch with native source presentations, including required hidden-clause binders |
-| `start-search` | `state`, `limits`, `ranker`, `model_path`, `focused_model_path`, `native_path`, `focused_search`, `exclude_names`; optional `scheduling`, `goal_ids`, `action_limit` | Create a retained autonomous run over all or selected pending source goals |
+| `start-search` | `state`, `limits`, `ranker`, `model_path`, `native_path`, `focused_search`, `exclude_names`; optional `primary_model_path`, `focused_model_path`, `scheduling`, `goal_ids`, `action_limit` | Create a retained autonomous run over all or selected pending source goals |
 | `start-step` | Same fields; exactly one `goal_ids` entry is required | Retain one-move root alternatives; yield each checked transition without solving its children |
 | `advance-search` | `run`, `steps`, `limits`; optional `action_limit` | Advance a scheduling slice; return a new run revision or terminal finite exhaustion |
 | `search-cost` | `run` | Retained run cost snapshot |
 | `discard-search` | `run` | Retire the run handle/frontier, retaining its cost receipt |
 | `infer-helper` | `state`, `goal_id`, `mode`, `application` | Parent-bound native helper signature, not a proof transition |
 | `solve-helper` | `state`, `goal_id`, `mode`, `application`, `limits`, `ranker`, `model_path`, `native_path` | Finite native helper search with the ordinary provisional candidate/cost result |
-| `solve-evidence` | `state`, `goal_id`, `limits`, `ranker`, `model_path`, `native_path`, `exclude_names`; optional `focused_model_path`, `focused_search` | Search status, provisional child/evidence, cumulative search cost, selected policy choices |
+| `solve-evidence` | `state`, `goal_id`, `limits`, `ranker`, `model_path`, `native_path`, `exclude_names`; optional `primary_model_path`, `focused_model_path`, `focused_search` | Search status, provisional child/evidence, cumulative search cost, selected policy choices |
 | `propose-refutation` | `state`, `goal_id`, `work_units` | Source-bound negative recipe for the existing abstract implication fragment; no proof authority |
 | `evict` | `state` | Drop child snapshot; preserve replay ancestry |
 | `replay` | `state` | Rechecked state key (resident states are returned unchanged) |
@@ -536,12 +536,25 @@ external CPU/memory/I/O and cancellation supervision; depth widens. `ranker` is
 uses symbolic order and is reported as unavailable, not as learned inference.
 The application normally supplies the pinned bundled OR artifact. The response
 includes its loaded hash, checked against the application's pinned model.
-`focused_model_path` optionally supplies the role-checked focused APNNUE, with
-its hash returned separately as `focused_model_id`. Missing or null means that
-family retains symbolic order, not that the OR model substitutes for it. The
-application normally supplies both bundled artifacts. `focused_search` is an
+`primary_model_path` optionally supplies a focused-branch or proof-term APNNUE
+for proof search, or a one-step APNNUE for `start-step`. The old
+`focused_model_path` field is a compatibility alias; two non-null paths are
+rejected. Wrong operation/model roles are rejected before advancing the run.
+The evidence-only response retains `focused_model_id` as the primary hash field
+and adds `primary_model_role`; agenda costs use a role-to-hash map. Missing or
+null means that role retains symbolic order, not that the OR model substitutes
+for it. The application normally supplies both bundled artifacts and separately
+interprets primary opt-out and explicit OR opt-in before selecting the native
+ranking mode. `focused_search` is an
 optional boolean, default true; false provides a local ablation without changing
 other evidence search. Null is not a boolean and is rejected.
+
+Proof-term and one-step scoring use native syntax to recognize the existing
+feature vocabulary. Unrepresented syntax keeps its original slot, supported
+alternatives are ranked only within structural tiers, and all alternatives
+remain present. These compatibility views do not determine types, name identity,
+generation, pruning or proof validity. Model identities and scored item counts
+remain checked against the application's role-specific pins.
 
 `exclude_names` lists visible global aliases to exclude after Agda resolution.
 The current and inherited source owner's mutual groups are excluded automatically

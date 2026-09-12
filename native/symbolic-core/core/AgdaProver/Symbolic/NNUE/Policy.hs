@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Symbolic.NNUE.Policy
-  ( Models, models, modelIdentities, RankingDomain (..), RankingMode (..), Candidate (..)
+  ( Models, models, modelIdentities, hasDomain, RankingDomain (..), RankingMode (..), Candidate (..)
   , RankedBatch (..), DecisionTrace, traceView, traceItemsScored, traceModelNanoseconds, rankBatch ) where
 
 import Control.Monad (unless)
@@ -54,6 +54,9 @@ roleFor ProofTerms = ProofTerm
 roleFor Refinements = OneStep
 roleFor FocusedBranches = FocusedBranch
 roleFor (ORFamily _) = ORDecision
+hasDomain :: Models -> RankingDomain -> Bool
+hasDomain (Models table) domain' = M.member (roleFor domain') table
+
 familyName :: RankingDomain -> Text
 familyName ProofTerms = "proof-term-v2"
 familyName Refinements = "one-step-refinement-v2"
