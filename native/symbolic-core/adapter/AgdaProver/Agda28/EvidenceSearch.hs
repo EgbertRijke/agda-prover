@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.EvidenceSearch (run, runHelper, primitiveProposals, Result (..)) where
+module AgdaProver.Agda28.EvidenceSearch (run, runHelper, primitiveProposals, clauseProposals, Result (..)) where
 
 import Control.Monad (forM)
 import Control.Monad.Except (catchError, runExceptT, throwError)
@@ -50,6 +50,7 @@ import AgdaProver.Agda28.Focused qualified as NativeFocused
 import AgdaProver.Agda28.HelperConstruction qualified as Helper
 import AgdaProver.Symbolic.Focused qualified as Focused
 import AgdaProver.Symbolic.Classification qualified as Classification
+import AgdaProver.Symbolic.Clause qualified as Clause
 import AgdaProver.Symbolic.NNUE.Features qualified as F
 import AgdaProver.Symbolic.NNUE.Native (NativeScorer)
 import AgdaProver.Symbolic.NNUE.Policy qualified as P
@@ -212,6 +213,56 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
     _ -> pure []
   pure $ if Classification.constructionFirst classification
     then introduction ++ record ++ heads else heads ++ introduction ++ record
+
+-- Clause subjects come from native context identities and datatype/record
+-- metadata. Agda's operation resolves their local spelling and decides whether
+-- splitting, hidden-binder exposure, coverage and without-K are admissible.
+clauseProposals :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
+                -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> I.Type
+                -> TCM [(Clause.ClauseAction, [(T.Text, T.Text)])]
+clauseProposals stats limits models mode native emit namespace target = do
+  pruned <- liftIO $ newIORef False
+  let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
+  context <- getContext
+  observed <- fmap catMaybes $ forM (zip [0..] context) $ \(index, entry) -> attempt runtime $ do
+    allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+    if not allowed then pure Nothing else do
+      ty <- typeOfBV index
+      reducible <- reduce ty >>= \case
+        I.El _ (I.Def name _) -> getConstInfo name >>= \definition -> pure $ case theDef definition of
+          Datatype{} -> True
+          RecordDefn record -> _recInduction record /= Just CoInductive
+          _ -> False
+        _ -> pure False
+      rendered <- prettyShow <$> prettyTCM ty
+      let name = prettyShow $ A.nameConcrete $ ctxEntryName entry
+          subject = case Clause.splitSubjects [name] of
+            Right action | reducible -> Just (name, rendered, action)
+            _ -> Nothing
+      pure $ Just (rendered, subject)
+  targetText <- T.pack . prettyShow <$> prettyTCM target
+  let subjects = catMaybes $ map snd observed
+      goal = F.GoalView targetText (map (T.pack . fst) observed) Nothing
+      decision = T.pack namespace <> ":case"
+      candidates = [P.Candidate (T.pack $ show index) (T.pack name) 0
+        (Right $ F.candidateTokens goal $ F.CandidateView "case-variable" "split"
+          (T.pack ty) (T.pack name) 1 []) action
+        | (index, (name, ty, action)) <- zip [0 :: Int ..] subjects]
+  ordered <- if null candidates then pure [] else do
+    ranked <- liftIO $ P.rankBatch native models mode (P.ORFamily "case-variable") decision
+      (F.policyStateTokens goal Classification.unknownClassification) candidates
+    case ranked of
+      Left reason -> genericError $ "native-policy-batch:" ++ reason
+      Right batch -> do
+        modify runtime $ \s -> s { policyDecisions = policyDecisions s + 1,
+          modelItems = modelItems s + fromIntegral (P.traceItemsScored $ P.decisionTrace batch),
+          modelNanoseconds = modelNanoseconds s + P.traceModelNanoseconds (P.decisionTrace batch) }
+        liftIO $ emit $ P.traceView $ P.decisionTrace batch
+        pure [(P.candidateValue candidate, [(decision, P.candidateId candidate)])
+          | candidate <- P.rankedCandidates batch]
+  -- Result splitting also exposes binders that are absent from the local
+  -- context. Keep that Agda operation; do not guess a telescope from text.
+  pure $ (Clause.splitResult, []):ordered
 
 modify :: Runtime s -> (SearchStats -> SearchStats) -> TCM ()
 modify (Runtime _ ref _ _ _ _ _ _ _) f = liftIO $ atomicModifyIORef' ref $ \s -> (f s, ())

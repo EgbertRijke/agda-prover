@@ -14,6 +14,7 @@ module AgdaProver.Agda28.Session
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal
   , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, proposeTerms, applyTerm
+  , ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
   , evict, replay, close, cancel, work, evidenceView
@@ -102,6 +103,9 @@ type role TermProposal nominal
 data TermProposal s = TermProposal (GoalRef s) Draft [(T.Text, T.Text)]
 
 data TermProposals s = CompleteTerms [TermProposal s] | CensoredTerms [TermProposal s]
+
+data ClauseProposals = CompleteClauses [(ClauseAction, [(T.Text, T.Text)])]
+  | CensoredClauses [(ClauseAction, [(T.Text, T.Text)])]
 
 termProposalGoal :: TermProposal s -> GoalRef s
 termProposalGoal (TermProposal goal _ _) = goal
@@ -413,6 +417,27 @@ proposeTerms session goal limits models mode native excluded emit = do
 applyTerm :: Session s -> TermProposal s -> IO (Either Failure (Transition s))
 applyTerm session (TermProposal goal draft _) = request session (goalState goal) $ \owner state ->
   check session owner (goalState goal) state (DraftAction (goalId goal) draft) False
+
+proposeClauseActions :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
+                     -> Policy.RankingMode -> Maybe (NativeScorer n) -> (Value -> IO ())
+                     -> IO (Search.SearchStats, Either Failure ClauseProposals)
+proposeClauseActions session goal limits models mode native emit = do
+  stats <- newIORef Search.emptyStats
+  outcome <- request session (goalState goal) $ \owner state -> do
+    ledger <- work session
+    let point = goalId goal
+        namespace = show (stateKey $ goalState goal) ++ ":clauses:" ++ show (requests ledger)
+    (result, _) <- kernel session state $ do
+      exists <- elem point <$> openInteractionPoints
+      if not exists then pure $ Left UnknownGoal else withInteractionId point $ do
+        target <- getMetaTypeInContext =<< lookupInteractionId point
+        Right <$> Search.clauseProposals stats limits models mode native emit namespace target
+    pure (owner, result >>= id)
+  observed <- readIORef stats
+  charge (sessionWork session) $ \w -> w
+    { checkingAttempts = checkingAttempts w + Search.workUnits observed
+    , rejectedChecks = rejectedChecks w + Search.rejectedQueries observed }
+  pure (observed, (if Search.workExhausted observed then CensoredClauses else CompleteClauses) <$> outcome)
 
 runGoalSearch :: Session s -> GoalRef s
               -> (IORef Search.SearchStats -> String -> InteractionId -> Maybe Recursion.Owner

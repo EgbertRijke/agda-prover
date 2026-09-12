@@ -4,7 +4,7 @@ This is the experimental typed Haskell core. It supports resident checking and
 autonomous evidence/application, focused logic, structural-construction and recursive-call fragments, including
 the bundled NNUE.
 It does **not** replace AgdaProver's current search engine. A default-engine
-switch requires autonomous clause search, joint-search and qualification work.
+switch requires joint-search, application integration and qualification work.
 
 ## Build and inspect
 
@@ -66,14 +66,14 @@ silently changing the meaning of old checked evidence.
 result splitting and ellipsis expansion to Agda. It retains native clauses and
 generation state internally, rendering with Agda's own interaction printer.
 Generation is not acceptance: no source is edited, no child is issued, and no
-proof is claimed. Autonomous use of these proposals is still migration work.
+proof is claimed.
 
 `apply-clause` executes an admissible action through a checked local dependent
 helper. Agda generates the helper's native clauses and checks the final draft;
 new goals retain their dependent types and can be split or filled in subsequent
 branches. The original global definitions and parent remain intact. Rejections,
 cancellation and replay preserve the same transaction/cost rules as `give`.
-This is not yet autonomous clause search or full source export: displayed
+This is not yet full source export: displayed
 evidence can require exposing hidden parent binders before insertion. Full
 proof-plan reconstruction and fresh workflow qualification remain required.
 
@@ -109,8 +109,8 @@ carry all dependent pending goals, metas and constraints together. Exhausted
 coarse evidence attempts retain the queue as censored work, not refuted branches.
 Retrying such an attempt repeats and charges its work; fine-grained inner
 suspension is still pending. Planners supply moves through the typed adapter
-API; autonomous generation, source export and workflow qualification remain
-migration work. Neither layer confers proof acceptance.
+API; source export and workflow qualification remain migration work.
+Neither layer confers proof acceptance.
 
 `proposeTerms`/`applyTerm` provide native one-move evidence, application prefixes,
 lambdas and record literals through the Haskell session API. Application arity
@@ -118,7 +118,24 @@ comes from Agda's telescope and is not capped at ten arguments. Explicit operand
 holes and inferred hidden parameters remain coupled in the checked child;
 partial applications retain their structure. Catalogue censorship is a distinct
 typed result, not an empty completed search. Existing NNUE head ranking and
-shared structural ordering apply. Autonomous controller wiring is still pending.
+shared structural ordering apply.
+
+`AgendaSearch` provides an autonomous Haskell controller over these primitive
+term moves, native case proposals and clause-generated local helpers. Datatype
+and inductive-record subjects come from Agda's context/metadata; shared NNUE
+ranking orders eligible choices. Case analysis may generalize captured module
+or lambda variables into checked local helpers, while Agda still enforces
+coverage, modalities and without-K. Hidden-binder exposure retains Agda's
+original source-clause operation.
+
+Scheduling slices keep the queue and alternatives after provisional solutions.
+Coarse evidence search runs in soft, increasing work slices and yields to other
+branches; retries are charged, not treated as free continuation inside Agda.
+Increasing a run's work allowance does not reset accumulated work. Typed
+catalogue censorship pauses the run rather than discarding unexplored moves.
+The Haskell API exposes generic agenda events and cost snapshots. Autonomous
+helper-application invention, joint/source selection, protocol controls and full
+OS-resource integration are not implied by this controller checkpoint.
 
 - `core/`: compiler-independent protocol, feature views and NNUE inference; no Agda internals.
 - `adapter/`: Agda 2.8 types, scoped snapshots, and structural codecs.

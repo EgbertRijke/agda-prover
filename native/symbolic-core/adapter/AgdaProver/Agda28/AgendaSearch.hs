@@ -1,0 +1,125 @@
+{-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+-- SPDX-License-Identifier: GPL-3.0-or-later
+-- Native controller. All source obligations remain coupled; source selection
+-- and final independent validation belong to the application boundary.
+module AgdaProver.Agda28.AgendaSearch
+  ( Run, Settings (..), Result (..), PauseReason (..), begin, advance, withLimits, cost ) where
+
+import Control.Concurrent (MVar, newMVar, withMVar)
+import Data.Aeson (Value, object, (.=))
+import Data.IORef
+import Numeric.Natural (Natural)
+import AgdaProver.Agda28.Session qualified as S
+import AgdaProver.Agda28.AgendaExecution qualified as N
+import AgdaProver.Symbolic.Agenda qualified as A
+import AgdaProver.Symbolic.Evidence qualified as E
+import AgdaProver.Symbolic.NNUE.Native (NativeScorer)
+import AgdaProver.Symbolic.NNUE.Policy qualified as P
+import AgdaProver.Symbolic.SessionTypes
+
+data Settings = Settings
+  { limits :: E.SearchLimits, ranking :: P.RankingMode, models :: P.Models
+  , focused :: Bool, excluded :: [String]
+  -- Soft priorities, not cutoffs: structural and macro alternatives stay queued.
+  , structuralDelay :: Natural, macroDelay :: Natural
+  , initialMacroWork :: Natural, evidenceMacro :: Bool }
+
+data Metrics = Metrics Integer Integer Integer
+data Run s = Run (S.Session s) Settings (N.Queue s) Integer
+  (IORef Metrics) (MVar ()) (Value -> IO ()) (S.Transition s -> IO ())
+data PauseReason = SliceEnded | AllowanceSpent | CancelledByCaller deriving (Eq, Show)
+data Result s = Paused PauseReason (Run s) | Candidate (S.StateRef s) (Run s)
+  | Exhausted | Failed Failure (Run s)
+
+-- The initial pending query checks the source epoch. The controller never
+-- accepts a malformed/stale wire key on the strength of its numeric branch ID.
+begin :: S.Session s -> S.StateRef s -> Settings -> (Value -> IO ())
+      -> (S.Transition s -> IO ()) -> IO (Either Failure (Run s))
+begin session state settings trace accepted = S.pending session state >>= \case
+  Left failure -> pure $ Left failure
+  Right _ -> do
+    baseline <- checkingAttempts <$> S.work session
+    metrics <- newIORef $ Metrics 0 0 0
+    owner <- newMVar ()
+    pure $ Right $ Run session settings (N.start state) baseline metrics owner trace accepted
+
+-- Raising an allowance never resets accumulated work or restores spent budget.
+withLimits :: E.SearchLimits -> Run s -> Run s
+withLimits allowance (Run session settings queue baseline metrics owner trace accepted) =
+  Run session settings { limits = allowance } queue baseline metrics owner trace accepted
+
+cost :: Run s -> IO Value
+cost (Run session _ _ baseline metrics _ _ _) = do
+  physical <- S.work session
+  Metrics steps items nanos <- readIORef metrics
+  pure $ object ["schema_version" .= ("agdaprover.symbolic-agenda-cost.v1" :: String),
+    "scheduler_steps" .= steps, "work_units" .= (steps + checkingAttempts physical - baseline),
+    "model_items_scored" .= items, "model_elapsed_ns" .= nanos, "session_cost" .= physical]
+
+-- A slice ends between native operations, retaining the exact queue. A coarse
+-- evidence attempt remains atomic: its censored retry is explicitly charged
+-- again. No pause claims to checkpoint the interior of an Agda checker call.
+advance :: Maybe (NativeScorer n) -> Natural -> Run s -> IO (Result s)
+advance native count run@(Run session settings initial baseline metrics owner trace accepted) =
+  withMVar owner $ \_ -> go count initial
+ where
+  saved queue = case run of
+    Run s cfg _ base meter lock emit accept -> Run s cfg queue base meter lock emit accept
+  allowance = do
+    physical <- S.work session
+    Metrics steps _ _ <- readIORef metrics
+    pure $ fmap (\limit -> max 0 $ limit - steps - checkingAttempts physical + baseline) $
+      E.workUnitLimit $ limits settings
+  moveAllowance = E.SearchLimits . fmap (max 1) <$> allowance
+  recordSearch stats = modifyIORef' metrics $ \(Metrics steps items nanos) ->
+    Metrics steps (items + E.modelItems stats) (nanos + E.modelNanoseconds stats)
+  planner state obligations = allowance >>= \left ->
+    if left == Just 0 then pure $ Right N.PlanningCensored else planReady state obligations
+  planReady state obligations = case pendingGoals obligations of
+    [] -> pure $ Right $ N.Moves []
+    point:_ -> case S.restoreGoalReference session (S.stateKey state) (fromIntegral point) of
+      Left failure -> pure $ Left failure
+      Right goal -> do
+        budget <- moveAllowance
+        (termCost, terms) <- S.proposeTerms session goal budget (models settings)
+          (ranking settings) native (excluded settings) trace
+        recordSearch termCost
+        case terms of
+          Left failure -> pure $ Left failure
+          Right S.CensoredTerms{} -> pure $ Right N.PlanningCensored
+          Right (S.CompleteTerms termMoves) -> do
+            remaining <- allowance
+            if remaining == Just 0 then pure $ Right N.PlanningCensored else do
+              nextBudget <- moveAllowance
+              (clauseCost, clauses) <- S.proposeClauseActions session goal nextBudget
+                (models settings) (ranking settings) native trace
+              recordSearch clauseCost
+              pure $ case clauses of
+                Left failure -> Left failure
+                Right S.CensoredClauses{} -> Right N.PlanningCensored
+                Right (S.CompleteClauses clauseMoves) -> Right $ N.Moves $
+                  [A.Proposal (N.Term proposal) 0 | proposal <- termMoves]
+                  ++ [A.Proposal (N.Clause goal action) (structuralDelay settings) | (action, _) <- clauseMoves]
+                  ++ [A.Proposal (N.SlicedEvidence goal $ initialMacroWork settings)
+                        (macroDelay settings) | evidenceMacro settings]
+  go 0 queue = pure $ Paused SliceEnded $ saved queue
+  go remaining queue = do
+    budget <- moveAllowance
+    let config = N.Config budget (models settings) (ranking settings) native
+          (focused settings) (excluded settings) planner
+          (allowance >>= \left -> if left == Just 0 then pure False else
+            modifyIORef' metrics (\(Metrics steps items nanos) -> Metrics (steps+1) items nanos) >> pure True)
+          (\event -> trace $ object ["schema_version" .= ("agdaprover.symbolic-agenda-event.v1" :: String),
+            "event" .= show event]) trace recordSearch accepted
+    N.step session config queue >>= \case
+      N.Progress next -> go (remaining-1) next
+      N.Candidate state next -> pure $ Candidate state $ saved next
+      N.Exhausted -> pure Exhausted
+      N.Paused next -> pure $ Paused AllowanceSpent $ saved next
+      N.Interrupted reason next -> pure $ case reason of
+        N.PlanningAllowanceExhausted -> Paused AllowanceSpent $ saved next
+        N.MoveAllowanceExhausted{} -> Paused AllowanceSpent $ saved next
+        N.SessionFailure Cancelled -> Paused CancelledByCaller $ saved next
+        N.SessionFailure failure -> Failed failure $ saved next

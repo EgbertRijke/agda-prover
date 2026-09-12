@@ -4,17 +4,18 @@
 module AgdaProver.Agda28.ClauseExecution (PreparationStep (..), prepare, registerDraft, patternLocals) where
 
 import Control.Monad (forM, void, when)
+import Control.Monad.Except (catchError, throwError)
 import Data.List (elemIndex)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Maybe (isNothing)
 
-import Agda.Interaction.BasicOps (give_)
+import Agda.Interaction.BasicOps (give_, parseExprIn)
 import Agda.Interaction.Base (UseForce (WithoutForce))
 import Agda.Interaction.MakeCase (makeCase, parseVariables, recheckAbstractClause)
 import Agda.Syntax.Abstract qualified as A
 import Agda.Syntax.Abstract.Name (Name, nameConcrete, qualify)
 import Agda.Syntax.Abstract.Pattern (lhsToSpine)
-import Agda.Syntax.Abstract.Views (traverseExpr)
+import Agda.Syntax.Abstract.Views (deepUnscope, traverseExpr)
 import Agda.Syntax.Common
 import Agda.Syntax.Common.Pretty (prettyShow)
 import Agda.Syntax.Concrete.Name qualified as C
@@ -36,9 +37,6 @@ data PreparationStep = GenerateClauses | CheckContext | CheckScaffold
 -- syntax. Ordinary give checks the final draft again from the unsplit parent.
 prepare :: (PreparationStep -> TCM ()) -> InteractionId -> ClauseAction -> TCM A.Expr
 prepare chargeStep point action = withInteractionId point $ do
-  interaction <- lookupInteractionPoint point
-  chargeStep GenerateClauses
-  _ <- makeCase point (ipRange interaction) (command action)
   context <- getContext
   target <- getMetaTypeInContext =<< lookupInteractionId point
   telescope <- getContextTelescope
@@ -103,7 +101,28 @@ subjects :: (PreparationStep -> TCM ()) -> InteractionId -> ClauseAction -> [Nam
 subjects chargeStep point action originals renamed
   | command action `elem` ["", "."] = pure $ command action
   | otherwise = do
+      -- A generalized helper can eliminate module parameters and lambda-bound
+      -- variables that make_case cannot split in the original source clause.
+      -- Resolve Agda binding identities first; the helper's make_case remains
+      -- the authority on admissibility. Missing hidden binders still use Agda's
+      -- source-clause exposure operation below.
+      chargeStep CheckContext
+      direct <- localTCState $ (do
+        expressions <- mapM (parseExprIn point noRange) (words $ command action)
+        pure $ traverse (\expression -> case deepUnscope expression of
+          A.Var name -> elemIndex name originals
+          _ -> Nothing) expressions) `catchError` \err -> case err of
+            TypeError{} -> pure Nothing
+            PatternErr{} -> pure Nothing
+            _ -> throwError err
+      case direct of
+        Just indices -> unwords <$> mapM (fmap showName . (`at` renamed)) indices
+        Nothing -> originalSubjects
+ where
+  originalSubjects = do
       interaction <- lookupInteractionPoint point
+      chargeStep GenerateClauses
+      _ <- makeCase point (ipRange interaction) (command action)
       case ipClause interaction of
         IPNoClause -> genericError "native-clause-execution-no-clause"
         IPClause function _ ty sub clause closure -> do
@@ -119,7 +138,6 @@ subjects chargeStep point action originals renamed
                 Nothing -> genericError "native-clause-execution-missing-subject"
                 Just i -> (:[]) . showName <$> at i renamed
           pure $ case concat mapped of [] -> "."; values -> unwords values
- where
   showName = prettyShow . nameConcrete
   at :: Int -> [a] -> TCM a
   at index values = case drop index values of
