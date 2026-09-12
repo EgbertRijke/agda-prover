@@ -414,6 +414,26 @@ Agda abstract/internal structure. NNUE presentation features do not decide
 typing or scope. A failed later argument can revisit earlier argument choices
 with the full checker state restored.
 
+The primitive catalogue also hands checked contextual applications to the
+shared operand generator. A function-valued field can consume another field
+from the same record; the resulting value can then be an explicit operand of
+an available lemma. Scoped functions and locals use the same path. Leading
+hidden arguments are inferred by Agda, while trailing hidden binders remain
+available for later expected-type inference. The shortcut requires a positive
+native domain-shape match; unknown matches retain ordinary application search.
+It does not eagerly guess implicit carrier/type arguments or recursively
+saturate the inventory. Recursive-result generalization retains its existing
+separate descent checks.
+
+Known complete inhabitants are checked before unconstrained refinements of
+their heads, preserving NNUE order within each class. The readiness probe
+freezes existing metas and permits inference of fresh implicit arguments, with
+no deferred constraints. All applications, probes and rejected checks are
+charged. Proposals keep native source syntax and provenance in their exact
+context; there is no cross-branch fact cache or new proof authority. The
+existing `contextual_evidence` switch disables this additional handoff and
+readiness preference. The coarse fallback still synthesizes operands on demand.
+
 The structural extension adds scoped datatype constructors, dependent record
 literals (including records without a named constructor), and absurd elimination.
 Field types come from Agda's instantiated telescope; later fields can infer

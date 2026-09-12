@@ -574,6 +574,25 @@ phase reuses locals only; subsequent contextual composition can use hypotheses
 in the resulting context. Complete cross-procedure/resumable integration remains
 separate work, and resident closure never replaces fresh validation.
 
+With `contextual_evidence`, the primitive inventory specializes authorized
+heads by available locals and dependent record projections, retaining only
+meta-free application values/types. Non-projection heads require a positive
+native domain-shape match for this eager shortcut. These applications feed the
+existing operand generator at explicit, positively matching domains; hidden
+carriers and endpoints remain inferred, not guessed from a pool of types.
+Partial applications retain trailing hidden binders. Unknown matches and
+incomplete applications keep ordinary refinement/AND alternatives. This is
+one inventory handoff, not recursive forward saturation or cross-state caching.
+
+The same switch enables readiness ordering of known complete inhabitants
+before unconstrained head refinements. Agda checks them with existing metas
+frozen, fresh implicit inference allowed, and no postponed constraints. The
+normal transition rechecks them. Existing NNUE roles preserve ordering within
+the class, proof provenance remains attached, and all preparation work is
+charged. Recursive-result generalization is unchanged. The coarse evidence
+fallback continues generating its operands on demand rather than multiplying
+the eager inventory at every recursive search node.
+
 The adapter computes redexes while retaining named neutral calls, rather than
 re-elaborating normalized private case-function implementations. It proposes
 strictly size-decreasing steps (or a step reaching the requested endpoint),
