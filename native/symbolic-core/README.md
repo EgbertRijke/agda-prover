@@ -296,6 +296,41 @@ Existing production library support is unchanged. Complete native joint and
 editor workflow integration remain later milestones, not implied by
 `search_available`.
 
+The autonomous controller is also available through the explicit application
+API (not yet a default or editor backend):
+
+```python
+from agdaprover.application.native import NativeAgendaEngine
+from agdaprover.application.service import ProverApplication
+
+application = ProverApplication(engine=NativeAgendaEngine(path))
+result = application.prove(task)          # Exactly the selected goal.
+result = application.prove_prefix(task)   # Existing cursor/prefix semantics.
+```
+
+`test_entries` on this application uses the same native engine for independent
+virtual-entry tests. The original file stays unchanged between tests. Native
+single and prefix candidates share immutable project preparation, source export,
+resource supervision and the ordinary fresh validator. A rejected candidate
+resumes the retained native frontier, not a new search or a Python fallback.
+
+For this controller, `work_units=None` uses `task.max_candidates` (including the
+standard/deep frontend numeric presets); an explicit engine `work_units` wins.
+The recorded unit is one scheduler step or native checking attempt, not the
+legacy Python action unit. Coarse generated/attempted moves and native checking
+are reported separately. Wall/CPU/memory/I/O/temporary and physical request
+budgets remain shared across slices and validation. No wall cap or source-size
+multiplier is introduced. The bounded evidence-only API retains its original
+allowance behavior described below.
+
+One-step and principal-variation publication are not yet qualified for the
+selected native application and are explicitly refused, not silently delegated.
+Explicit legacy depth limits and refinement-model overrides are also refused
+until migrated. Use `policy_model` for a role-checked native OR model and
+`task.model_path` for focused weights. CLI/default selection, full editor
+integration and required benchmark qualification remain open. Agenda progress
+has no inferred training credit merely because a branch was visited.
+
 `focused_search=False` on `NativeEvidenceEngine` disables only the focused fast
 path for paired measurements. `task.model_path` replaces the focused weights;
 the OR-policy override remains separate. Each model is role-checked and pinned.

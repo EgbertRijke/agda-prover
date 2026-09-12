@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Symbolic.NNUE.Policy
-  ( Models, models, RankingDomain (..), RankingMode (..), Candidate (..)
+  ( Models, models, modelIdentities, RankingDomain (..), RankingMode (..), Candidate (..)
   , RankedBatch (..), DecisionTrace, traceView, traceItemsScored, traceModelNanoseconds, rankBatch ) where
 
 import Control.Monad (unless)
@@ -23,6 +23,10 @@ models :: [Model] -> Either String Models
 models values = do
   unless (S.size (S.fromList $ map modelRole values) == length values) $ Left "duplicate-model-role"
   pure $ Models $ M.fromList [(modelRole model, model) | model <- values]
+
+modelIdentities :: Models -> M.Map String String
+modelIdentities (Models table) = M.fromList
+  [(roleName role, modelId model) | (role, model) <- M.toList table]
 
 data RankingDomain = ProofTerms | Refinements | FocusedBranches | ORFamily Text deriving (Eq, Show)
 data RankingMode = Symbolic | Learned deriving (Eq, Show)

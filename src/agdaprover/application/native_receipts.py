@@ -1,0 +1,114 @@
+"""Native progress/cost provenance at the application boundary, not search policy."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from typing import Any
+
+from ..bridge.symbolic import SymbolicProtocolError
+from ..contracts import ProverResult
+
+
+@dataclass
+class NativeReceipts:
+    result: ProverResult
+    trace_bytes: int
+    retained_bytes: int = 0
+    omitted: int = 0
+
+    def publish(self, event: dict[str, Any]) -> None:
+        result = self.result
+        stats = result.search_stats = dict(result.search_stats or {})
+        kind = event["event"]
+        if kind == "operation-start":
+            stats.update(native_dispatch=event, completion_known=False)
+        if kind == "operation-result":
+            stats.update(completion_known=True, native_session_cost=event["cost"])
+            outcome = event["outcome"]
+            cost = outcome.get("search_cost", outcome.get("cost"))
+            if cost is not None:
+                self.cost(cost)
+            if result.policy_profile == "native-agenda-v1":
+                # Export/reconstruction is checked too, after the last advance.
+                result.cost.speculative_checks = event["cost"]["checking_attempts"]
+                result.cost.case_split_checks = event["cost"]["clause_queries"]
+        trace = event.get("trace") if kind == "search-policy" else event.get("payload")
+        if isinstance(trace, dict) and "model_items_scored" in trace:
+            expected_model = (
+                result.model_id
+                if trace.get("role") == "focused-search-branch-policy"
+                else result.action_model_id
+            )
+            if trace.get("model_id") not in {None, expected_model}:
+                raise SymbolicProtocolError("native trace uses an unpinned NNUE")
+            result.model_calls += trace.get("model_items_scored", 0)
+            result.cost.model_items_scored = result.cost.actions_scored = (
+                result.model_calls
+            )
+            result.model_elapsed_ms += trace.get("model_elapsed_ns", 0) / 1e6
+            size = len(json.dumps(trace).encode())
+            if size <= self.trace_bytes - self.retained_bytes:
+                result.policy_trace.append(trace)
+                self.retained_bytes += size
+            else:
+                self.omitted += 1
+            stats["policy_decisions_omitted"] = self.omitted
+
+    def cost(self, cost: dict[str, Any]) -> None:
+        result = self.result
+        schema = cost.get("schema_version")
+        if schema == "agdaprover.symbolic-agenda-cost.v1":
+            expected = {
+                role: identity
+                for role, identity in (
+                    ("or-decision-ranking", result.action_model_id),
+                    ("focused-search-branch-policy", result.model_id),
+                )
+                if identity is not None
+            }
+            if cost.get("models") != expected:
+                raise SymbolicProtocolError(
+                    "native agenda uses unpinned model identities"
+                )
+            result.cost.actions_expanded = cost["actions_attempted"]
+            result.candidates_generated = result.cost.actions_generated = cost[
+                "actions_generated"
+            ]
+            physical = cost["session_cost"]
+            result.cost.speculative_checks = physical["checking_attempts"]
+            result.cost.case_split_checks = physical["clause_queries"]
+        elif schema == "agdaprover.symbolic-evidence-cost.v2":
+            result.cost.speculative_checks = sum(
+                cost.get(key, 0)
+                for key in (
+                    "inference_queries",
+                    "checker_queries",
+                    "recursive_context_queries",
+                )
+            )
+            result.cost.candidate_terms_checked = cost.get("checker_queries", 0)
+            result.candidates_generated = result.cost.actions_generated = sum(
+                cost.get(key, 0)
+                for key in (
+                    "application_proposals",
+                    "lambda_proposals",
+                    "record_proposals",
+                    "absurd_proposals",
+                    "recursive_proposals",
+                    "focused_candidates",
+                )
+            )
+            result.cost.actions_expanded = cost.get("nodes", 0) + cost.get(
+                "focused_nodes", 0
+            )
+        else:
+            raise SymbolicProtocolError("unsupported native search cost schema")
+        result.model_calls = result.cost.actions_scored = (
+            result.cost.model_items_scored
+        ) = cost["model_items_scored"]
+        result.model_elapsed_ms = cost["model_elapsed_ns"] / 1e6
+        assert result.search_stats is not None
+        result.search_stats.update(
+            cost, final_search_cost=cost, policy_decisions_omitted=self.omitted
+        )

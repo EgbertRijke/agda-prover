@@ -500,6 +500,49 @@ def reconstruct_joint_completion(
     return edit
 
 
+def reconstruct_native_batch(
+    source: str, goals: tuple[GoalInfo, ...], entries: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """One atomic patch from native exports against the unchanged source."""
+    if (
+        not isinstance(entries, list)
+        or any(
+            not isinstance(e, dict)
+            or type(e.get("goal_id")) is not int
+            or not isinstance(e.get("source"), dict)
+            for e in entries
+        )
+        or [entry.get("goal_id") for entry in entries] != [g.goal_id for g in goals]
+    ):
+        raise ValueError("native export changed the selected goal order")
+    edits = [
+        reconstruct_native_completion(source, goal, entry["source"])
+        for goal, entry in zip(goals, entries, strict=True)
+    ]
+    if len(edits) == 1:
+        return edits[0]
+    edits.sort(key=lambda edit: edit["source_range"][0])
+    if not edits or any(
+        a["source_range"][1] > b["source_range"][0]
+        for a, b in zip(edits, edits[1:], strict=False)
+    ):
+        raise ValueError("native source exports overlap or are empty")
+    start, end = edits[0]["source_range"][0] - 1, edits[-1]["source_range"][1] - 1
+    candidate = source
+    for edit in reversed(edits):
+        candidate = apply_source_edit(candidate, edit)
+    delta = sum(len(e["replacement"]) - len(e["original"]) for e in edits)
+    return reconstruct_joint_completion(
+        source,
+        start_offset=start,
+        end_offset=end,
+        replacement=candidate[start : end + delta],
+        target_goal_count=len(goals),
+        cutoff_position=end,
+        steps=reversed(edits),
+    )
+
+
 def apply_source_edit(source: str, edit: dict[str, Any]) -> str:
     """Apply EDIT only when its version, range, and original text all match."""
 

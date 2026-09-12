@@ -30,7 +30,9 @@ data Settings = Settings
   , structuralDelay :: Natural, macroDelay :: Natural
   , initialMacroWork :: Natural, evidenceMacro :: Bool }
 
-data Metrics = Metrics Integer Integer Integer
+data Metrics = Metrics
+  { schedulerSteps :: !Integer, modelItems :: !Integer, modelNanoseconds :: !Integer
+  , generatedMoves :: !Integer, attemptedMoves :: !Integer, acceptedMoves :: !Integer }
 data Run s = Run (S.Session s) Settings (N.Queue s) Integer
   (IORef Metrics) (MVar ()) (Value -> IO ()) (S.Transition s -> IO ())
 data PauseReason = SliceEnded | AllowanceSpent | CancelledByCaller deriving (Eq, Show)
@@ -53,7 +55,7 @@ beginSelection selection session state settings trace accepted = S.pending sessi
     pure $ Left UnknownGoal
   Right pending -> do
     baseline <- checkingAttempts <$> S.work session
-    metrics <- newIORef $ Metrics 0 0 0
+    metrics <- newIORef $ Metrics 0 0 0 0 0 0
     owner <- newMVar ()
     let queue = maybe (N.start state)
           (\points -> N.startSelected state (map interactionId $ NE.toList points) (pendingGoals pending)) selection
@@ -71,12 +73,16 @@ withObservers trace accepted (Run session settings queue baseline metrics owner 
   Run session settings queue baseline metrics owner trace accepted
 
 cost :: Run s -> IO Value
-cost (Run session _ _ baseline metrics _ _ _) = do
+cost (Run session settings _ baseline metrics _ _ _) = do
   physical <- S.work session
-  Metrics steps items nanos <- readIORef metrics
+  measured <- readIORef metrics
+  let steps = schedulerSteps measured
   pure $ object ["schema_version" .= ("agdaprover.symbolic-agenda-cost.v1" :: String),
     "scheduler_steps" .= steps, "work_units" .= (steps + checkingAttempts physical - baseline),
-    "model_items_scored" .= items, "model_elapsed_ns" .= nanos, "session_cost" .= physical]
+    "actions_generated" .= generatedMoves measured, "actions_attempted" .= attemptedMoves measured,
+    "actions_accepted" .= acceptedMoves measured,
+    "model_items_scored" .= modelItems measured, "model_elapsed_ns" .= modelNanoseconds measured,
+    "models" .= P.modelIdentities (models settings), "session_cost" .= physical]
 
 -- A slice ends between native operations, retaining the exact queue. A coarse
 -- evidence attempt remains atomic: its censored retry is explicitly charged
@@ -89,12 +95,22 @@ advance native count run@(Run session settings initial baseline metrics owner tr
     Run s cfg _ base meter lock emit accept -> Run s cfg queue base meter lock emit accept
   allowance = do
     physical <- S.work session
-    Metrics steps _ _ <- readIORef metrics
+    steps <- schedulerSteps <$> readIORef metrics
     pure $ fmap (\limit -> max 0 $ limit - steps - checkingAttempts physical + baseline) $
       E.workUnitLimit $ limits settings
   moveAllowance = E.SearchLimits . fmap (max 1) <$> allowance
-  recordSearch stats = modifyIORef' metrics $ \(Metrics steps items nanos) ->
-    Metrics steps (items + E.modelItems stats) (nanos + E.modelNanoseconds stats)
+  recordSearch stats = modifyIORef' metrics $ \m -> m
+    { modelItems = modelItems m + E.modelItems stats
+    , modelNanoseconds = modelNanoseconds m + E.modelNanoseconds stats }
+  recordEvent event = do
+    modifyIORef' metrics $ \m -> case event of
+      A.Expanded count' -> m { generatedMoves = generatedMoves m + toInteger count' }
+      A.Attempted -> m { attemptedMoves = attemptedMoves m + 1 }
+      A.Resumed -> m { attemptedMoves = attemptedMoves m + 1 }
+      A.AdvancedState -> m { acceptedMoves = acceptedMoves m + 1 }
+      _ -> m
+    trace $ object ["schema_version" .= ("agdaprover.symbolic-agenda-event.v1" :: String),
+      "event" .= show event]
   planner state obligations = allowance >>= \left ->
     if left == Just 0 then pure $ Right N.PlanningCensored else planReady state obligations
   planReady state obligations = case pendingGoals obligations of
@@ -130,9 +146,8 @@ advance native count run@(Run session settings initial baseline metrics owner tr
     let config = N.Config budget (models settings) (ranking settings) native
           (focused settings) (excluded settings) planner
           (allowance >>= \left -> if left == Just 0 then pure False else
-            modifyIORef' metrics (\(Metrics steps items nanos) -> Metrics (steps+1) items nanos) >> pure True)
-          (\event -> trace $ object ["schema_version" .= ("agdaprover.symbolic-agenda-event.v1" :: String),
-            "event" .= show event]) trace recordSearch accepted
+            modifyIORef' metrics (\m -> m { schedulerSteps = schedulerSteps m + 1 }) >> pure True)
+          recordEvent trace recordSearch accepted
     N.step session config queue >>= \case
       N.Progress next -> go (remaining-1) next
       N.Candidate state next -> pure $ Candidate state $ saved next

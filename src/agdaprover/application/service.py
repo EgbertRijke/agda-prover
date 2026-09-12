@@ -17,6 +17,7 @@ from ..kernel.protocol import KernelSessionFactory
 from ..principal_variation import PrincipalVariationObserver
 from ..search import prove
 from ..step import propose_step
+from .engine import SymbolicEngine
 from .entry_testing import test_entries
 from .evidence import NativeEvidenceEngine
 from .inspection import CommandResult
@@ -27,8 +28,11 @@ class ProverApplication:
     """Composition root for proof, prefix, step, and independent entry tests."""
 
     session_factory: KernelSessionFactory = default_session_factory
+    engine: SymbolicEngine | None = None
 
     def prove(self, task: TaskSpec, *, include_attempts: bool = True) -> ProverResult:
+        if self.engine is not None:
+            return self.engine.prove(task, session_factory=self.session_factory)
         return prove(
             task,
             include_attempts=include_attempts,
@@ -41,6 +45,12 @@ class ProverApplication:
         *,
         progress_observer: PrincipalVariationObserver | None = None,
     ) -> ProverResult:
+        if self.engine is not None:
+            if progress_observer is not None:
+                raise ValueError(
+                    "selected engine has not qualified principal-variation publication"
+                )
+            return self.engine.prove_prefix(task, session_factory=self.session_factory)
         return prove_joint_prefix(
             task,
             session_factory=self.session_factory,
@@ -54,6 +64,8 @@ class ProverApplication:
         return engine.prove(task, session_factory=self.session_factory)
 
     def step(self, task: TaskSpec, *, collect_all: bool = False) -> StepResult:
+        if self.engine is not None:
+            raise ValueError("selected engine has not qualified one-step operations")
         return propose_step(
             task,
             collect_all=collect_all,

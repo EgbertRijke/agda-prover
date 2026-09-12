@@ -332,6 +332,11 @@ diagnostic/progress hooks, not source edits or accepted proof certificates.
 No retained callback writes events under the old start-request ID.
 
 Costs include scheduler steps, model work and the native session ledger.
+The agenda receipt includes a `models` mapping from loaded model role to model
+identity, plus coarse `actions_generated`, `actions_attempted` and
+`actions_accepted` counters. Native evidence macro internals are not falsely
+counted as individual agenda moves. Application counters retain the physical
+checking receipt separately, including later export/reconstruction checks.
 `work_units` charges native checking since this run was started plus its own
 scheduler steps. Other work deliberately performed in the same session during
 a pause also consumes that shared-session allowance; do not sum overlapping
