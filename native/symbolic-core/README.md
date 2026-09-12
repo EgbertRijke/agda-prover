@@ -348,7 +348,12 @@ propose owner calls without claiming inductive descent. Every move still passes
 the same owner-group termination/productivity check. The recursive head is not
 made an ordinary premise, and explicit exclusions apply before generation.
 Native descent facts feed the existing scheduling/NNUE boundary. These moves
-complement the coarse search for wrapped and more elaborate recursive operands;
+also rebuild shallow wrappers from single-constructor argument families,
+including named and anonymous inductive records. Agda's constructor arity
+separates fields from uniform parameters; inferred and supplied hidden forms
+remain available. Scope/exclusions apply to constructors and record fields,
+and coinductive records are not inductive wrappers. These finite proposals
+complement the coarse search for more elaborate recursive operands;
 they do not establish whole-benchmark coverage or promote the native default.
 
 Recursive templates can also propose a completed call when their coupled

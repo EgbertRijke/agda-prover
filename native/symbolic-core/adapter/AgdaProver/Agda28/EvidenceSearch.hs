@@ -267,37 +267,57 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
     Nothing -> pure []
     Just context -> do
       observed <- localTCState $ attempt runtime $
-        queryInferWith DontExpandLast runtime (Recursion.callHead context) $ \(_, ty) ->
-          Just <$> signature ty
+        queryInferWith DontExpandLast runtime (Recursion.callHead context) $ \(_, ty) -> do
+          callSignature <- signature ty
+          wrappers <- Construction.argumentWrappers
+            (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }) forbidden ty
+          pure $ Just (callSignature, wrappers)
       subjects <- Recursion.callSubjects context
       operands <- fmap concat $ forM subjects $ \subject -> do
         observedSubject <- localTCState $ attempt runtime $
           queryInferWith DontExpandLast runtime subject $ \(_, ty) -> Just <$> signature ty
         variants <- applications Nothing scope subject $ maybe [] snd observedSubject
         pure $ subject:variants
+      let fill supplyHidden anchor index info = case anchor of
+            Just (position, subject) | position == index -> pure subject
+            _ | visible info || supplyHidden -> freshHole scope
+              | otherwise -> Construction.omittedField (getHiding info)
+          build headExpression anchor infos = forM
+            (False : [True | any (notVisible . fst) infos]) $ \supplyHidden -> do
+              arguments' <- forM (zip [0 :: Int ..] infos) $ \(index, (info, _)) ->
+                Arg info . unnamed <$> fill supplyHidden anchor index info
+              pure $ A.app headExpression arguments'
+      wrapped <- fmap concat $ forM (maybe [] snd observed) $ \(position, wrapper) -> do
+        expressions <- case wrapper of
+          Construction.ConstructorWrapper name arity -> do
+            let headExpression = A.Con $ I.AmbQ (name :| [])
+            constructor <- localTCState $ attempt runtime $
+              queryInferWith DontExpandLast runtime headExpression $ \(_, ty) -> Just <$> signature ty
+            let infos = maybe [] snd constructor
+                fields = [index | length infos >= arity, index <- [length infos - arity .. length infos - 1]]
+            -- The inferred constructor telescope includes uniform parameters.
+            -- Only its actual fields may contain a descendant anchor.
+            fmap concat $ forM [(index, subject) | index <- fields, subject <- operands] $ \anchor ->
+              build headExpression (Just anchor) infos
+          Construction.RecordWrapper fields -> fmap concat $ forM
+            [(index, subject) | index <- [0 .. length fields - 1], subject <- operands] $ \anchor -> forM
+              (False : [True | any (notVisible . snd) fields]) $ \supplyHidden -> Construction.recordExpression <$> forM
+              (zip [0 :: Int ..] fields) (\(index, (name, info)) -> do
+                operand <- fill supplyHidden (Just anchor) index info
+                pure (name, operand))
+        pure [(position, expression) | expression <- expressions]
       -- A sealed recursive head is never an ordinary premise. Offer complete
       -- spines anchored by a native descendant (or a real copattern context),
       -- leaving coupled operands to the shared AND agenda. Checking the move
       -- invokes Agda's owner-group termination check, just as a complete call
       -- does; no open operand is evidence of decrease or productivity.
-      let build supplyHidden anchor infos = do
-            arguments' <- forM (zip [0 :: Int ..] infos) $ \(index, (info, _)) -> do
-              operand <- case anchor of
-                Just (position, subject) | position == index -> pure subject
-                _ | visible info || supplyHidden -> freshHole scope
-                  | otherwise -> Construction.omittedField (getHiding info)
-              pure $ Arg info $ unnamed operand
-            pure $ A.app (Recursion.callHead context) arguments'
       expressions <- case observed of
-        Just (result, infos)
+        Just ((result, infos), _)
           | let terminal = case reverse infos of (_, shape):_ -> shape; [] -> result
           , compatible expected terminal -> fmap concat $ forM
               ([Nothing | Recursion.copatternCall context] ++
-               [Just (index, subject) | index <- [0 .. length infos - 1], subject <- operands]) $ \anchor -> do
-                inferred <- build False anchor infos
-                supplied <- if any (notVisible . fst) infos
-                  then (:[]) <$> build True anchor infos else pure []
-                pure $ inferred:supplied
+               map Just ([(index, subject) | index <- [0 .. length infos - 1], subject <- operands] ++ wrapped)) $ \anchor ->
+                build (Recursion.callHead context) anchor infos
         _ -> pure []
       completed <- fmap catMaybes $ forM expressions $ \expression -> attempt runtime $
         Construction.completeLocalOperands

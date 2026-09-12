@@ -3,7 +3,8 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.Construction
   ( recordPlan, recordExpression, projectedEvidence, omittedField, absurdLambda, eliminateEmpty
-  , constructorClosures, constructionScaffold, emptyResultApplication, completeLocalOperands ) where
+  , constructorClosures, constructionScaffold, emptyResultApplication, completeLocalOperands
+  , ArgumentWrapper (..), argumentWrappers ) where
 
 import Control.Monad (filterM, forM)
 import Control.Monad.Except (catchError, throwError)
@@ -36,6 +37,45 @@ import Agda.TypeChecking.Reduce (instantiateFull, reduce)
 import Agda.TypeChecking.Rules.Term (checkExpr, inferExpr')
 import Agda.TypeChecking.Substitute (apply, absApp, raise)
 import Agda.Utils.Null (empty)
+
+-- A shallow constructor context for an actual argument domain. Only native
+-- names and field metadata escape telescope inspection, never types containing
+-- the temporary binders introduced by underAbstraction.
+data ArgumentWrapper
+  = ConstructorWrapper QName Int
+  | RecordWrapper [(C.Name, ArgInfo)]
+
+argumentWrappers :: TCM Bool -> Set.Set QName -> I.Type -> TCM [(Int, ArgumentWrapper)]
+argumentWrappers charge forbidden = domains 0
+ where
+  domains :: Int -> I.Type -> TCM [(Int, ArgumentWrapper)]
+  domains index ty = charge >>= \allowed ->
+    if not allowed then pure [] else reduce ty >>= \case
+      I.El _ (I.Pi domain body) -> do
+        wrapper <- inspect $ I.unDom domain
+        rest <- underAbstraction domain body $ domains (index + 1)
+        pure $ maybe rest (\value -> (index, value):rest) wrapper
+      _ -> pure []
+  inspect :: I.Type -> TCM (Maybe ArgumentWrapper)
+  inspect ty = charge >>= \allowed ->
+    if not allowed then pure Nothing else reduce ty >>= \case
+      I.El _ (I.Def family _) -> do
+        definition <- getConstInfo family
+        scope <- getScope
+        let available name = isNameInScope name scope && not (Set.member name forbidden)
+        case theDef definition of
+          Datatype { dataCons = [name] } | available name ->
+            getConstInfo name >>= \entry -> pure $ case theDef entry of
+              Constructor { conArity = arity } | arity > 0 -> Just $ ConstructorWrapper name arity
+              _ -> Nothing
+          RecordDefn record
+            | _recInduction record /= Just CoInductive
+            , not $ Set.member (I.conName $ _recConHead record) forbidden
+            , all (available . I.unDom) (_recFields record) ->
+                pure $ Just $ RecordWrapper
+                  [(I.unDom field, getArgInfo field) | field <- recordFieldNames record]
+          _ -> pure Nothing
+      _ -> pure Nothing
 
 -- Focused introductions ending in a visible nullary constructor. These are
 -- proposals, not assertions that a dependent result index matches. Checking
