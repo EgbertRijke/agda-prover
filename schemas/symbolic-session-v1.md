@@ -543,6 +543,16 @@ application contexts admit constructors, definitions and local functions;
 lifting and composition require actual supplied operations. No particular
 relation, datatype, constructor or theorem name is distinguished.
 
+The same endpoint-path machinery can adapt a ground hypothesis to the target.
+For supplied evidence `h : R a b`, paths `R a x` and `R b y` may yield an
+explicit proposal for `R x y`. Reversing the source path requires a supplied
+symmetry operation, and joining paths requires supplied composition. An
+unchanged endpoint requires neither a path nor a reflexivity operation.
+The actual relation, carrier arguments and endpoints remain native terms in
+the current context. Direct proof alternatives and their premise provenance
+remain distinct; the finite decreasing-path hint is not exhaustive relation
+search. No hypothesis changes type without a checked proof term.
+
 In whole-search mode, this switch also enables a checked local-closure handoff
 for new obligations created by clause execution. Before rebuilding the broad
 catalogue, the adapter tests existing local inhabitants by Agda conversion
@@ -559,8 +569,9 @@ All probes, scoring, retries and applications share cumulative accounting;
 source changes, stale handles and cancellation use the normal session boundary.
 The cost receipt records the derived `local_closure_handoffs` boolean. Disabling
 `contextual_evidence` or whole-search macros disables this handoff. Explicit
-clause commands and one-step mode remain unchanged. This first phase reuses
-locals only; general clause-state and evidence-composition integration remain
+clause commands and one-step mode retain their semantics. This local-closure
+phase reuses locals only; subsequent contextual composition can use hypotheses
+in the resulting context. Complete cross-procedure/resumable integration remains
 separate work, and resident closure never replaces fresh validation.
 
 The adapter computes redexes while retaining named neutral calls, rather than

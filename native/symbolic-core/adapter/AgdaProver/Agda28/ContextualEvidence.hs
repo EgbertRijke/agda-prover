@@ -1,7 +1,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- Target-directed use of supplied evidence inside native application contexts.
+-- Goal-directed use of supplied evidence and its native endpoint contexts.
 -- This is a proposal generator, not an equality solver or a rewriting axiom.
 module AgdaProver.Agda28.ContextualEvidence (propose, Event (..)) where
 
@@ -10,7 +10,7 @@ import Control.Monad.Except (catchError, throwError)
 import Data.Foldable (toList)
 import Data.IntSet qualified as IntSet
 import Data.List (nubBy)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, maybeToList)
 import Data.Monoid (Any (..))
 import Data.Set qualified as Set
 import Agda.Syntax.Abstract qualified as A
@@ -76,7 +76,7 @@ headAt depth (I.Var index _) | index >= depth = Just $ LocalHead $ index - depth
 headAt _ _ = Nothing
 
 -- Only result-determined applications belong in this accelerator. Every
--- explicit operand must occur in the source endpoint; proofs requiring other
+-- explicit operand must occur in the selected endpoint; proofs requiring other
 -- premises retain the ordinary application/AND search. No arity restriction.
 template :: TCM Bool -> Side -> I.Type -> TCM (Maybe Template)
 template inspect side = go []
@@ -223,6 +223,7 @@ propose excluded observe inspect check supplied seeds = do
             pure (expression, provenance, found)
           let maps = [(e,p) | (e,p,Just Algebra.Congruence) <- roles]
               joins = [(e,p) | (e,p,Just Algebra.Transitivity) <- roles]
+              inverses = [(e,p) | (e,p,Just Algebra.Symmetry) <- roles]
           observe $ Inventory (length seeds) (length maps) (length joins)
           templates <- if null maps && null joins then pure [] else fmap catMaybes $
             forM [(seed, side) | seed <- seeds, side <- [Source, Destination]] $ \(seed@(_, ty, _), side) -> do
@@ -233,7 +234,7 @@ propose excluded observe inspect check supplied seeds = do
           -- duplicate discoveries (for example from opposite endpoints).
           let uniqueSteps = map (\(_,e,t,p) -> (e,t,p)) .
                 nubBy (\(v,_,_,_) (w,_,_,_) -> v == w)
-              steps current = fmap (uniqueSteps . concat) $
+              steps destination current = fmap (uniqueSteps . concat) $
                forM templates $ \((expression, _, provenance), side, Template sourceHead) ->
                fmap concat $ forM (sites current) $ \(_, source) -> do
                 if maybe False (\h -> headAt 0 source /= Just h) sourceHead
@@ -248,7 +249,7 @@ propose excluded observe inspect check supplied seeds = do
                           observe Grounded
                           let changed = replaceAt path replacement current
                           next <- traverse (contextView inspect) changed
-                          if not (maybe False (\t -> t == right || I.termSize t < I.termSize current) next)
+                          if not (maybe False (\t -> t == destination || I.termSize t < I.termSize current) next)
                             then pure [] else do
                               lifted <- if null path then pure [(proof, [])] else
                                 case replaceAt path (I.Var 0 []) $ raise 1 current of
@@ -282,19 +283,53 @@ propose excluded observe inspect check supplied seeds = do
               -- terms terminate it; every intermediate check consumes the same
               -- caller allowance. If it stalls, all one-step alternatives below
               -- still enter the ordinary AND/OR agenda.
-              complete [] = pure Nothing
-              complete ((edge, next, picked):_)
-                | next == right = pure $ Just (edge, picked)
+              complete _ [] = pure Nothing
+              complete destination ((edge, next, picked):_)
+                | next == destination = pure $ Just (edge, picked)
                 | otherwise = case joins of
                     [] -> pure Nothing
                     (join, provenance):_ -> do
-                      suffix <- steps next >>= complete
+                      suffix <- steps destination next >>= complete destination
                       pure $ fmap (\(proof, used) ->
                         (app join [edge, proof], picked ++ provenance:used)) suffix
-          initial <- steps left
+              -- Evidence endpoints can hide the useful redex even when the
+              -- target is already atomic. Adapt a supplied proof through
+              -- checked endpoint paths, rather than changing its type for
+              -- free or asking application search to rediscover those paths.
+              -- Direct alternatives keep distinct proofs; the decreasing lane
+              -- remains an extra hint, not an exhaustive replacement search.
+              toward destination current
+                | current == destination = pure [(Nothing, [])]
+                | otherwise = do
+                    options <- steps destination current
+                    let direct = [(Just edge, picked) | (edge, next, picked) <- options,
+                          next == destination]
+                    if not (null direct) then pure direct else do
+                      path <- complete destination options
+                      pure [(Just edge, picked) | (edge, picked) <- maybeToList path]
+              adapt (proof, ty, provenance) = do
+                factType <- contextType inspect ty
+                case Algebra.binary $ I.unEl factType of
+                  Just (r, a, b) | r == relation, noMetas factType,
+                    (a /= left || b /= right), a == left || not (null inverses) -> do
+                    prefixes <- toward left a
+                    suffixes <- if null prefixes then pure [] else toward right b
+                    pure $ concat
+                      [ let starts = case before of
+                              Nothing -> [(proof, [provenance])]
+                              Just edge -> [(app join [app inverse [edge], proof],
+                                usedBefore ++ [reverseLabel, joinLabel, provenance])
+                                | (inverse, reverseLabel) <- inverses, (join, joinLabel) <- joins]
+                        in case after of
+                          Nothing -> starts
+                          Just edge -> [(app join [start, edge], used ++ joinLabel:usedAfter)
+                            | (start, used) <- starts, (join, joinLabel) <- joins]
+                      | (before, usedBefore) <- prefixes, (after, usedAfter) <- suffixes]
+                  _ -> pure []
+          initial <- steps right left
           completed <- case initial of
             (_, next, _):_ | next == right -> pure Nothing -- already a one-step alternative
-            _ -> complete initial
+            _ -> complete right initial
           case completed of
             Nothing -> pure ()
             Just _ -> observe Completed
@@ -305,6 +340,8 @@ propose excluded observe inspect check supplied seeds = do
               let hole = A.QuestionMark (Info.emptyMetaInfo { Info.metaScope = scope }) point
               observe Drafted
               pure (app join [edge, hole], p:picked)
-          pure $ maybe [] pure completed ++ alternatives
+          adapted <- if null joins then pure [] else concat <$> mapM adapt seeds
+          mapM_ (const $ observe Completed) adapted
+          pure $ maybe [] pure completed ++ alternatives ++ adapted
  where
   attemptList action = maybe [] id <$> attempt (Just <$> action)

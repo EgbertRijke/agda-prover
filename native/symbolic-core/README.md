@@ -270,6 +270,16 @@ ablation disables this whole-search phase; the cost receipt records
 `local_closure_handoffs`. This is the first checked procedure handoff, not
 complete native workflow qualification or a replacement for fresh validation.
 
+Contextual composition also adapts the endpoints of an existing hypothesis,
+including one just exposed by elimination. Supplied laws produce checked paths
+from its endpoints to the goal's endpoints. A changed source endpoint requires
+a supplied symmetry operation; changed endpoints are joined using supplied
+composition. Unchanged endpoints need no invented reflexivity proof. The
+result is an explicit proof proposal, not a silent conversion of the hypothesis.
+This applies to abstract relations as well as inductive ones, retains distinct
+direct proof alternatives, and shares the existing contextual-evidence switch,
+NNUE ordering, resource ledger and final validation boundary.
+
 Scheduling slices keep the queue and alternatives after provisional solutions.
 Coarse evidence search runs in soft, increasing work slices and yields to other
 branches. It retains pending alternatives, dependent operand substitutions and
