@@ -311,6 +311,12 @@ or growing families do not cause unbounded scaffold generation. This is a
 proposal termination guard, not an assertion about Agda termination or logical
 impossibility. Original alternatives remain available.
 
+Each generated function binder extends both Agda's typed context and its local
+syntactic scope with the same native identity. Nested holes therefore retain
+usable explicit, hidden and instance names, including function-valued record
+fields. Replay restores that scope; it does not recover bindings from display
+text or conflate equally typed alternatives.
+
 Types containing native metavariables also remain ordinary obligations instead
 of being eagerly expanded. This avoids multiplying postponed substitutions
 while building a compound proposal. Atomic refinement and dependent elimination

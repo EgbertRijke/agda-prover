@@ -23,7 +23,7 @@ import Agda.Syntax.Info qualified as Info
 import Agda.Syntax.Internal qualified as I
 import Agda.Syntax.Internal.MetaVars (noMetas)
 import Agda.Syntax.Position (noRange)
-import Agda.Syntax.Scope.Base (isNameInScope)
+import Agda.Syntax.Scope.Base (isNameInScope, LocalVar (..), BindingSource (..), scopeLocals)
 import Agda.Syntax.Translation.InternalToAbstract (reify)
 import Agda.Interaction.BasicOps (give_)
 import Agda.Interaction.Base (UseForce (WithoutForce))
@@ -97,8 +97,12 @@ constructionScaffold inspect charge forbidden target = do
       I.El _ (I.Pi domain body) -> do
         let hint = if I.absName body `elem` ["", "_"] then "x" else I.absName body
         withFreshName noRange hint $ \name -> do
+          -- Adding a typed binder does not add it to Agda's syntactic scope.
+          -- Every nested hole must see the same native name as its enclosing
+          -- lambda, including hidden/instance binders and captured prefixes.
           (expression, _) <- addContext (name, domain) $
-            build seen (absApp (raise 1 body) $ I.Var 0 [])
+            locallyScope scopeLocals ((A.nameConcrete name, LocalVar name LambdaBound []) :) $
+              build seen (absApp (raise 1 body) $ I.Var 0 [])
           pure (A.Lam exprNoRange
             (A.mkDomainFree $ Arg (getArgInfo domain) $ unnamed $ A.mkBinder_ name) expression, True)
       normalHead@(I.El _ (I.Def family _))
