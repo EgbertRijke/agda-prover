@@ -63,8 +63,14 @@ a proof-term or focused-branch model for proof search, and a one-step model for
 Native actions outside a model's feature vocabulary retain symbolic ordering;
 this is a distinction between action shapes, not libraries or filenames.
 
-Explicit legacy `--max-depth` is not yet qualified and fails clearly.
-Use `--engine python` for that setting until native qualification finishes.
+Native `--max-depth N` limits accepted transitions along a branch (zero allows
+no transitions). Reaching it reports resource exhaustion, never impossibility.
+Native and Python depth units differ: a compound native move is one transition,
+but all its internal checking/search work is still charged to the physical and
+work allowances. This is not a proof-term size bound. Time and depth remain
+unset by default; `--deep` increases the action allowance as usual.
+`--max-term-size` pertains to Python's small term enumerator, not native syntax
+proposals; use native depth, action or physical limits to bound native work.
 
 ## Deep search
 

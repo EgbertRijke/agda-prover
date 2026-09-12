@@ -5,7 +5,7 @@
 -- Native controller. All source obligations remain coupled; source selection
 -- and final independent validation belong to the application boundary.
 module AgdaProver.Agda28.AgendaSearch
-  ( Run, Settings (..), Result (..), PauseReason (..), begin, beginSelection, beginStep, advance, withLimits, withActionLimit, withObservers, cost, frontier ) where
+  ( Run, Settings (..), Result (..), PauseReason (..), begin, beginSelection, beginStep, advance, withLimits, withActionLimit, withDepthLimit, withObservers, cost, frontier ) where
 
 import Control.Concurrent (MVar, newMVar, withMVar)
 import Data.Aeson (Value, object, (.=))
@@ -29,14 +29,15 @@ data Settings = Settings
   -- Soft priorities, not cutoffs: structural and macro alternatives stay queued.
   , structuralDelay :: Natural, macroDelay :: Natural
   , initialMacroWork :: Natural, evidenceMacro :: Bool, actionLimit :: Maybe Integer
-  , dependencyOrdering :: Bool }
+  , dependencyOrdering :: Bool, depthLimit :: Maybe Natural }
 
 data Metrics = Metrics
   { schedulerSteps :: !Integer, modelItems :: !Integer, modelNanoseconds :: !Integer
-  , generatedMoves :: !Integer, attemptedMoves :: !Integer, acceptedMoves :: !Integer }
+  , generatedMoves :: !Integer, attemptedMoves :: !Integer, acceptedMoves :: !Integer
+  , depthDeferred :: !Integer }
 data Run s = Run (S.Session s) Settings (N.Queue s) Integer
   (IORef Metrics) (MVar ()) (Value -> IO ()) (S.Transition s -> IO ()) (Maybe (S.GoalRef s, Natural))
-data PauseReason = SliceEnded | AllowanceSpent | ActionsSpent | CancelledByCaller deriving (Eq, Show)
+data PauseReason = SliceEnded | AllowanceSpent | ActionsSpent | DepthSpent | CancelledByCaller deriving (Eq, Show)
 data Result s = Paused PauseReason (Run s) | Candidate (S.StateRef s) (Run s)
   | Refutation (S.RefutationProposal s) (Run s) | Exhausted | Failed Failure (Run s)
 
@@ -66,7 +67,7 @@ beginWithStep oneMove selection session state supplied trace accepted = S.pendin
     pure $ Left UnknownGoal
   Right pending -> do
     baseline <- nativeWork <$> S.work session
-    metrics <- newIORef $ Metrics 0 0 0 0 0 0
+    metrics <- newIORef $ Metrics 0 0 0 0 0 0 0
     owner <- newMVar ()
     let settings = if oneMove then supplied { evidenceMacro = False } else supplied
         queue = case selection of
@@ -89,6 +90,10 @@ withActionLimit :: Maybe Integer -> Run s -> Run s
 withActionLimit limit (Run session settings queue baseline metrics owner trace accepted refutationGoal) =
   Run session settings { actionLimit = limit } queue baseline metrics owner trace accepted refutationGoal
 
+withDepthLimit :: Maybe Natural -> Run s -> Run s
+withDepthLimit limit (Run session settings queue baseline metrics owner trace accepted refutationGoal) =
+  Run session settings { depthLimit = limit } queue baseline metrics owner trace accepted refutationGoal
+
 -- A resumed protocol request has a new response channel/request ID. Do not
 -- retain the callback of the request that originally created this frontier.
 withObservers :: (Value -> IO ()) -> (S.Transition s -> IO ()) -> Run s -> Run s
@@ -105,6 +110,8 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "actions_generated" .= generatedMoves measured, "actions_attempted" .= attemptedMoves measured,
     "actions_accepted" .= acceptedMoves measured,
     "action_limit" .= actionLimit settings,
+    "depth_limit" .= depthLimit settings, "depth_deferred" .= depthDeferred measured,
+    "depth_unit" .= ("accepted-native-branch-transition" :: String),
     "model_items_scored" .= modelItems measured, "model_elapsed_ns" .= modelNanoseconds measured,
     "models" .= P.modelIdentities (models settings), "session_cost" .= physical]
 
@@ -145,6 +152,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
     modifyIORef' metrics $ \m -> case event of
       A.Expanded count' -> m { generatedMoves = generatedMoves m + toInteger count' }
       A.AdvancedState -> m { acceptedMoves = acceptedMoves m + 1 }
+      A.DepthDeferred -> m { depthDeferred = depthDeferred m + 1 }
       _ -> m
     trace $ object ["schema_version" .= ("agdaprover.symbolic-agenda-event.v1" :: String),
       "event" .= show event]
@@ -200,7 +208,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
           (allowance >>= \left -> if left == Just 0 then pure False else
             modifyIORef' metrics (\m -> m { schedulerSteps = schedulerSteps m + 1 }) >> pure True)
           chargeAction recordEvent trace recordSearch accepted
-    N.step session config queue >>= \case
+    N.stepWithDepth (depthLimit settings) session config queue >>= \case
       N.Progress next -> go refutation (remaining-1) next
       N.Candidate state next -> pure $ Candidate state $ saved refutation next
       -- A censored refutation task remains available even when the positive
@@ -209,6 +217,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
         Nothing -> Exhausted
         Just _ -> Paused SliceEnded $ saved refutation queue
       N.Paused next -> pure $ Paused AllowanceSpent $ saved refutation next
+      N.DepthPaused next -> pure $ Paused DepthSpent $ saved refutation next
       N.Interrupted reason next -> pure $ case reason of
         N.PlanningAllowanceExhausted -> Paused AllowanceSpent $ saved refutation next
         N.ActionAllowanceExhausted -> Paused ActionsSpent $ saved refutation next

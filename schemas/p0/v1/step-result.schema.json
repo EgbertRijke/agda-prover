@@ -17,7 +17,7 @@
     "task_id": { "type": "string", "minLength": 1 },
     "status": { "enum": ["accepted-step", "unsolved", "resource-exhausted", "invalid-task", "toolchain-error", "internal-error"] },
     "source_file": { "type": "string", "minLength": 1 },
-    "source_hash": { "type": "string", "minLength": 1 },
+    "source_hash": { "type": "string", "minLength": 1, "description": "Source digest, or unavailable when preparation failed before reading the source; never unavailable for an accepted step." },
     "ranker": { "type": "string", "minLength": 1 },
     "goal": { "type": ["object", "null"] },
     "action": { "type": ["object", "null"] },
@@ -39,6 +39,10 @@
     "diagnostics": { "type": "array", "items": { "type": "object", "additionalProperties": { "type": "string" } } }
   },
   "allOf": [
+    {
+      "if": { "properties": { "source_hash": { "const": "unavailable" } } },
+      "then": { "properties": { "status": { "enum": ["invalid-task", "toolchain-error", "internal-error", "resource-exhausted"] } } }
+    },
     {
       "if": {
         "required": ["resource_budget"],

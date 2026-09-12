@@ -79,9 +79,9 @@ Each operation permits only its listed additional fields:
 | `reconstruct-goal` | `state`, `goal_id`, `descendant` | Assemble native drafts from a descendant, recheck from the original goal's parent, return a provisional checked transition |
 | `reconstruct-goals` | `state`, `goal_ids`, `descendant` | Reconstruct a nonempty ordered selection into one new coupled branch; return all entries and final pending obligations |
 | `export-goals` | `state`, `goal_ids`, `descendant` | The same checked batch with native source presentations, including required hidden-clause binders |
-| `start-search` | `state`, `limits`, `ranker`, `model_path`, `native_path`, `focused_search`, `exclude_names`; optional `primary_model_path`, `focused_model_path`, `scheduling`, `goal_ids`, `action_limit` | Create a retained autonomous run over all or selected pending source goals |
+| `start-search` | `state`, `limits`, `ranker`, `model_path`, `native_path`, `focused_search`, `exclude_names`; optional `primary_model_path`, `focused_model_path`, `scheduling`, `goal_ids`, `action_limit`, `depth_limit` | Create a retained autonomous run over all or selected pending source goals |
 | `start-step` | Same fields; exactly one `goal_ids` entry is required | Retain one-move root alternatives; yield each checked transition without solving its children |
-| `advance-search` | `run`, `steps`, `limits`; optional `action_limit` | Advance a scheduling slice; return a new run revision or terminal finite exhaustion |
+| `advance-search` | `run`, `steps`, `limits`; optional `action_limit`, `depth_limit` | Advance a scheduling slice; return a new run revision or terminal finite exhaustion |
 | `search-cost` | `run` | Retained run cost snapshot |
 | `discard-search` | `run` | Retire the run handle/frontier, retaining its cost receipt |
 | `infer-helper` | `state`, `goal_id`, `mode`, `application` | Parent-bound native helper signature, not a proof transition |
@@ -441,9 +441,23 @@ denied attempt does not increment it. `limits.work_units` still counts scheduler
 steps and native checks independently; neither allowance overrides the other.
 The application maps `task.max_candidates` to `action_limit`, not to work units.
 
+Optional `depth_limit` accepts a nonnegative integer or null. Start omission/null
+means no depth cap; advance omission preserves it and explicit null removes it.
+Depth counts accepted native branch transitions, not expression size or inner
+checker work. A candidate at the exact bound can still be exported. A branch
+requiring further transitions is parked, while shallower alternatives continue.
+If only parked work remains, the run reports `paused: depth-limit-reached`, not
+`unsolved`. Changing the limit restores the exact queued priority/serial order.
+Blocked work is moved once per limit setting, rather than repeatedly scanned;
+parking itself is charged scheduler work. Costs report `depth_limit`, cumulative
+`depth_deferred`, and `depth_unit: accepted-native-branch-transition`.
+Compound evidence moves count as one transition but still charge all their
+internal search/checking work. Native and Python depth/action units are not
+interchangeable performance measurements. No implicit depth cap is introduced.
+
 Advancement returns:
 
-- `paused` with `reason: slice-ended|allowance-spent|action-allowance-spent|cancelled` and a new `run`;
+- `paused` with `reason: slice-ended|allowance-spent|action-allowance-spent|depth-limit-reached|cancelled` and a new `run`;
 - `candidate` with a provisional native `state` and a retained `run` containing
   alternatives, suitable for reconstruction and subsequent fresh validation;
 - `failed` with precise `failure` and a retained `run`;

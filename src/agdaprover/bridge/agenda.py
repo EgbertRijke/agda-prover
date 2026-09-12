@@ -31,6 +31,7 @@ def search_agenda(
     principal_variations: bool = False,
     one_move: bool = False,
     primary_model_path: Path | None = None,
+    depth_limit: int | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield provisional exports, resuming after caller rejection.
 
@@ -40,6 +41,8 @@ def search_agenda(
     """
     if type(quantum) is not int or quantum <= 0:
         raise ValueError("native scheduling quantum must be positive")
+    if depth_limit is not None and (type(depth_limit) is not int or depth_limit < 0):
+        raise ValueError("native depth limit must be nonnegative or None")
     if type(principal_variations) is not bool:
         raise ValueError("native principal-variation switch must be boolean")
     if type(one_move) is not bool or (one_move and len(goal_ids) != 1):
@@ -59,6 +62,7 @@ def search_agenda(
                 "goal_ids": list(goal_ids),
                 "limits": limits,
                 "action_limit": action_limit,
+                "depth_limit": depth_limit,
                 "ranker": ranker,
                 "model_path": str(model_path.resolve()) if model_path else None,
                 "focused_model_path": str(focused_model_path.resolve())

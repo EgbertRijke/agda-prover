@@ -43,8 +43,8 @@ data Operation = Pending StateKey | Observe StateKey InteractionId P.Observation
   | ReconstructGoals StateKey (NonEmpty InteractionId) StateKey
   | ExportGoals StateKey (NonEmpty InteractionId) StateKey
   | StartSearch Bool StateKey Search.SearchLimits Policy.RankingMode (Maybe FilePath)
-      (Maybe FilePath) (Maybe FilePath) Bool [String] Scheduling (Maybe (NonEmpty InteractionId)) (Maybe Integer)
-  | AdvanceSearch Run.Key Natural Search.SearchLimits (Maybe (Maybe Integer))
+      (Maybe FilePath) (Maybe FilePath) Bool [String] Scheduling (Maybe (NonEmpty InteractionId)) (Maybe Integer) (Maybe Natural)
+  | AdvanceSearch Run.Key Natural Search.SearchLimits (Maybe (Maybe Integer)) (Maybe (Maybe Natural))
   | RunCost Run.Key | DiscardSearch Run.Key
   | InferHelper StateKey InteractionId P.ObservationMode DraftExpression
   | ProposeRefutation StateKey InteractionId (Maybe Integer)
@@ -149,7 +149,7 @@ parseRequest = withObject "session request" $ \o -> do
     opName | opName `elem` ["start-search", "start-step"] -> do
       fields $ ["state", "limits", "ranker", "model_path",
         "native_path", "focused_search", "exclude_names"] ++ filter (`KM.member` o)
-          ["scheduling", "goal_ids", "action_limit", "primary_model_path", "focused_model_path"]
+          ["scheduling", "goal_ids", "action_limit", "depth_limit", "primary_model_path", "focused_model_path"]
       mode <- o .: "ranker" >>= \case
         ("nnue" :: String) -> pure Policy.Learned
         "symbolic" -> pure Policy.Symbolic
@@ -160,10 +160,12 @@ parseRequest = withObject "session request" $ \o -> do
         <*> o .: "exclude_names" <*> pure scheduling
         <*> (if KM.member "goal_ids" o then Just <$> goals else pure Nothing)
         <*> actionLimit
+        <*> o .:? "depth_limit"
     "advance-search" -> do
-      fields $ ["run", "steps", "limits"] ++ filter (`KM.member` o) ["action_limit"]
+      fields $ ["run", "steps", "limits"] ++ filter (`KM.member` o) ["action_limit", "depth_limit"]
       AdvanceSearch <$> o .: "run" <*> o .: "steps" <*> o .: "limits"
         <*> (if KM.member "action_limit" o then Just <$> actionLimit else pure Nothing)
+        <*> (if KM.member "depth_limit" o then Just <$> o .:? "depth_limit" else pure Nothing)
     "search-cost" -> fields ["run"] >> RunCost <$> o .: "run"
     "discard-search" -> fields ["run"] >> DiscardSearch <$> o .: "run"
     "solve-helper" -> do
@@ -304,14 +306,14 @@ loadPrimary oneMove (Just path) = do
 
 perform :: S.Session s -> Run.Store s -> (Value -> IO ()) -> (Value -> IO ()) -> Operation -> IO Value
 perform session runs emit emitRun operation = case operation of
-  StartSearch oneMove key limits mode modelPath focusedPath nativePath focused excluded (Scheduling structural macro initial enabled dependenciesEnabled) selection actionLimit ->
+  StartSearch oneMove key limits mode modelPath focusedPath nativePath focused excluded (Scheduling structural macro initial enabled dependenciesEnabled) selection actionLimit depthLimit ->
     resolved key $ \root -> do
       loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
       focusedModel <- loadPrimary oneMove focusedPath
       case ((++) <$> loaded <*> focusedModel) >>= Policy.models of
         Left reason -> pure $ failureView $ KernelFailure ("model-configuration:" ++ reason)
-        Right models -> Run.start oneMove runs root (G.Settings limits mode models focused excluded structural macro initial enabled actionLimit dependenciesEnabled) nativePath selection
-  AdvanceSearch key steps limits actionLimit -> Run.advance runs key steps limits actionLimit emitRun
+        Right models -> Run.start oneMove runs root (G.Settings limits mode models focused excluded structural macro initial enabled actionLimit dependenciesEnabled depthLimit) nativePath selection
+  AdvanceSearch key steps limits actionLimit depthLimit -> Run.advance runs key steps limits actionLimit depthLimit emitRun
   RunCost key -> Run.snapshot runs key
   DiscardSearch key -> Run.discard runs key
   Pending key -> resolved key $ \ref -> result toJSON <$> S.pending session ref

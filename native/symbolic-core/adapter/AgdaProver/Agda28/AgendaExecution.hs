@@ -4,7 +4,7 @@
 -- Coupled native moves beneath single/joint scheduling. The planner supplies
 -- alternatives; it never supplies a replacement typechecker or proof authority.
 module AgdaProver.Agda28.AgendaExecution
-  ( Move (..), Planning (..), Config (..), Queue, Outcome (..), Interruption (..), start, startSelected, startOneMove, frontier, step ) where
+  ( Move (..), Planning (..), Config (..), Queue, Outcome (..), Interruption (..), start, startSelected, startOneMove, frontier, step, stepWithDepth ) where
 
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
@@ -57,7 +57,7 @@ data Interruption = SessionFailure Failure | MoveAllowanceExhausted E.SearchStat
   deriving (Eq, Show)
 data Outcome s
   = Progress (Queue s) | Candidate (S.StateRef s) (Queue s)
-  | Paused (Queue s) | Interrupted Interruption (Queue s) | Exhausted
+  | Paused (Queue s) | DepthPaused (Queue s) | Interrupted Interruption (Queue s) | Exhausted
 
 start :: S.StateRef s -> Queue s
 start state = A.start $ SearchState state Nothing [] Nothing
@@ -79,12 +79,16 @@ frontier queue = (A.pending queue, fmap unwrap $ A.principal queue)
   unwrap (SearchState state _ _ _, priority, depth) = (state, priority, depth)
 
 step :: S.Session s -> Config s n -> Queue s -> IO (Outcome s)
-step session config queue = runExceptT (A.step hooks queue) >>= \case
+step = stepWithDepth Nothing
+
+stepWithDepth :: Maybe Natural -> S.Session s -> Config s n -> Queue s -> IO (Outcome s)
+stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hooks queue) >>= \case
   Left problem -> pure $ Interrupted problem queue
   Right outcome -> pure $ case outcome of
     A.Progress next -> Progress next
     A.Found state next -> Candidate state next
     A.Censored next -> Paused next
+    A.DepthCensored next -> DepthPaused next
     A.Exhausted -> Exhausted
  where
   hooks = A.Hooks

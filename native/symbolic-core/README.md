@@ -176,7 +176,13 @@ The Python bridge exposes a supervised resident connection for these coarse
 requests. One prepared overlay, process and resource/output envelope cover all
 slices; resuming does not reset them. The existing single evidence operation
 uses this same transport. Symbolic choices remain native, and user-facing
-engine selection and full interactive workflow wiring are still pending.
+engine selection and interactive controls use the shared application API.
+Native search remains opt-in pending full benchmark qualification.
+
+An optional `depth_limit` counts accepted branch transitions. Blocked items are
+parked, not discarded; `advance-search` can increase or remove the limit on the
+same retained run. Depth is not a measure of expression size or checker work
+inside a compound move. Those costs remain supervised and fully charged.
 
 - `core/`: compiler-independent protocol, feature views and NNUE inference; no Agda internals.
 - `adapter/`: Agda 2.8 types, scoped snapshots, and structural codecs.

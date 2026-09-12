@@ -142,15 +142,22 @@ class NativeProofEngine:
     ) -> ProverResult | StepResult:
         started = time.monotonic()
         source = task.source_file.resolve()
+        profile = "native-step-v1" if one_move else f"native-{self.controller}-v1"
+        mode = f"native-{self.controller}-{'step' if one_move else 'prefix' if prefix else 'single'}"
         result: ProverResult | StepResult = (StepResult if one_move else ProverResult)(
-            "",
+            task_identity(
+                task,
+                "unavailable",
+                mode=f"{mode}-preparation",
+                policy_profile=profile,
+                toolchain_id=None,
+                model_ids={},
+            ),
             "internal-error",
             str(source),
-            "",
+            "unavailable",
             task.ranker,
-            policy_profile="native-step-v1"
-            if one_move
-            else f"native-{self.controller}-v1",
+            policy_profile=profile,
         )
         scope = ResourceScope(task.resources, memory_sample=current_process_rss)
         calls = VerifierCallScope()
@@ -169,9 +176,13 @@ class NativeProofEngine:
                 raise ValueError("trace_bytes must be nonnegative")
             if type(self.focused_search) is not bool:
                 raise ValueError("focused_search must be a boolean")
-            if task.max_depth is not None:
+            if task.max_depth is not None and (
+                type(task.max_depth) is not int or task.max_depth < 0
+            ):
+                raise ValueError("native max_depth must be nonnegative or None")
+            if task.max_depth is not None and self.controller != "agenda":
                 raise ValueError(
-                    "native search does not yet implement an explicit legacy max_depth"
+                    "explicit depth limits require the native agenda controller"
                 )
             if prefix and self.controller != "agenda":
                 raise ValueError(
@@ -222,7 +233,7 @@ class NativeProofEngine:
             identity = task_identity(
                 task,
                 result.source_hash,
-                mode=f"native-{self.controller}-{'step' if one_move else 'prefix' if prefix else 'single'}",
+                mode=mode,
                 policy_profile=result.policy_profile,
                 toolchain_id=result.toolchain_id,
                 model_ids={
@@ -280,6 +291,7 @@ class NativeProofEngine:
                         project,
                         tuple(g.goal_id for g in targets),
                         action_limit=task.max_candidates,
+                        depth_limit=task.max_depth,
                         principal_variations=progress_observer is not None,
                         one_move=one_move,
                         **arguments,
@@ -336,6 +348,7 @@ class NativeProofEngine:
                     if status == "paused" and outcome.get("reason") in {
                         "allowance-spent",
                         "action-allowance-spent",
+                        "depth-limit-reached",
                         "cancelled",
                     }:
                         if isinstance(result, StepResult) and result.action is not None:

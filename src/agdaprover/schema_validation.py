@@ -164,6 +164,13 @@ def _validate_common(value: Mapping[str, Any], schema: str) -> None:
         raise ValueError(f"unsupported result schema: {value['schema_version']!r}")
     for field in ("task_id", "source_file", "source_hash", "ranker", "policy_profile"):
         _string(value[field], field)
+    if value["source_hash"] == "unavailable" and value["status"] not in {
+        "invalid-task",
+        "toolchain-error",
+        "internal-error",
+        "resource-exhausted",
+    }:
+        raise ValueError("an unread source cannot authorize a search result")
     for field in ("model_id", "toolchain_id"):
         _optional_string(value[field], field)
     for field in ("candidates_generated", "verifier_calls", "model_calls"):

@@ -19,7 +19,7 @@
       "enum": ["verified", "impossible", "needs-clarification", "unsolved", "resource-exhausted", "invalid-task", "policy-rejected", "toolchain-error", "internal-error"]
     },
     "source_file": { "type": "string", "minLength": 1 },
-    "source_hash": { "type": "string", "minLength": 1 },
+    "source_hash": { "type": "string", "minLength": 1, "description": "Source digest, or unavailable when preparation failed before reading the source; never unavailable for a verified result." },
     "ranker": { "type": "string", "minLength": 1 },
     "goal": { "type": ["object", "null"] },
     "joint_goals": { "type": "array", "items": { "type": "object" } },
@@ -132,6 +132,10 @@
     }
   },
   "allOf": [
+    {
+      "if": { "properties": { "source_hash": { "const": "unavailable" } } },
+      "then": { "properties": { "status": { "enum": ["invalid-task", "toolchain-error", "internal-error", "resource-exhausted"] } } }
+    },
     {
       "if": {
         "required": ["resource_budget"],
