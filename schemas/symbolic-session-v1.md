@@ -71,8 +71,8 @@ Each operation permits only its listed additional fields:
 | `reconstruct-goal` | `state`, `goal_id`, `descendant` | Assemble native drafts from a descendant, recheck from the original goal's parent, return a provisional checked transition |
 | `reconstruct-goals` | `state`, `goal_ids`, `descendant` | Reconstruct a nonempty ordered selection into one new coupled branch; return all entries and final pending obligations |
 | `export-goals` | `state`, `goal_ids`, `descendant` | The same checked batch with native source presentations, including required hidden-clause binders |
-| `start-search` | `state`, `limits`, `ranker`, `model_path`, `focused_model_path`, `native_path`, `focused_search`, `exclude_names`; optional `scheduling`, `goal_ids` | Create a retained autonomous run over all or selected pending source goals |
-| `advance-search` | `run`, `steps`, `limits` | Advance a scheduling slice; return a new run revision or terminal finite exhaustion |
+| `start-search` | `state`, `limits`, `ranker`, `model_path`, `focused_model_path`, `native_path`, `focused_search`, `exclude_names`; optional `scheduling`, `goal_ids`, `action_limit` | Create a retained autonomous run over all or selected pending source goals |
+| `advance-search` | `run`, `steps`, `limits`; optional `action_limit` | Advance a scheduling slice; return a new run revision or terminal finite exhaustion |
 | `search-cost` | `run` | Retained run cost snapshot |
 | `discard-search` | `run` | Retire the run handle/frontier, retaining its cost receipt |
 | `infer-helper` | `state`, `goal_id`, `mode`, `application` | Parent-bound native helper signature, not a proof transition |
@@ -308,9 +308,20 @@ Foreign sessions and changed source epochs cannot resume the frontier.
 
 `steps` is a nonnegative scheduling quantum; zero advances no search steps.
 Each `advance-search` supplies the total work allowance for the run, not an
-additional grant. Raising it retains all already spent work. It returns:
+additional grant. Raising it retains all already spent work.
 
-- `paused` with `reason: slice-ended|allowance-spent|cancelled` and a new `run`;
+An independent optional `action_limit` bounds total attempted native moves,
+including rejected moves and coarse evidence retries. It accepts a positive
+integer or null, not booleans or fractional values. On start, omission/null adds
+no action cap. On advance, omission preserves the cap; explicit null removes it;
+a positive value replaces the cap without resetting the attempted count. A
+denied attempt does not increment it. `limits.work_units` still counts scheduler
+steps and native checks independently; neither allowance overrides the other.
+The application maps `task.max_candidates` to `action_limit`, not to work units.
+
+Advancement returns:
+
+- `paused` with `reason: slice-ended|allowance-spent|action-allowance-spent|cancelled` and a new `run`;
 - `candidate` with a provisional native `state` and a retained `run` containing
   alternatives, suitable for reconstruction and subsequent fresh validation;
 - `failed` with precise `failure` and a retained `run`;
@@ -334,7 +345,7 @@ No retained callback writes events under the old start-request ID.
 Costs include scheduler steps, model work and the native session ledger.
 The agenda receipt includes a `models` mapping from loaded model role to model
 identity, plus coarse `actions_generated`, `actions_attempted` and
-`actions_accepted` counters. Native evidence macro internals are not falsely
+`actions_accepted` counters and the nullable `action_limit`. Native evidence macro internals are not falsely
 counted as individual agenda moves. Application counters retain the physical
 checking receipt separately, including later export/reconstruction checks.
 `work_units` charges native checking since this run was started plus its own

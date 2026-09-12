@@ -314,11 +314,13 @@ single and prefix candidates share immutable project preparation, source export,
 resource supervision and the ordinary fresh validator. A rejected candidate
 resumes the retained native frontier, not a new search or a Python fallback.
 
-For this controller, `work_units=None` uses `task.max_candidates` (including the
-standard/deep frontend numeric presets); an explicit engine `work_units` wins.
-The recorded unit is one scheduler step or native checking attempt, not the
-legacy Python action unit. Coarse generated/attempted moves and native checking
-are reported separately. Wall/CPU/memory/I/O/temporary and physical request
+For this controller, `task.max_candidates` limits native move attempts (including
+the standard/deep frontend numeric presets). An independent engine `work_units`
+limit optionally bounds scheduler steps plus native checking attempts; `None`
+adds no such limit. Raising one allowance never overrides the other. A native
+move can include several checker calls; it is not identical in granularity to
+a legacy Python action. Generated/attempted moves and native checking are
+reported separately. Wall/CPU/memory/I/O/temporary and physical request
 budgets remain shared across slices and validation. No wall cap or source-size
 multiplier is introduced. The bounded evidence-only API retains its original
 allowance behavior described below.

@@ -19,6 +19,7 @@ def search_agenda(
     *,
     budget: BridgeBudget,
     work_units: int | None,
+    action_limit: int | None,
     ranker: str,
     model_path: Path | None,
     focused_model_path: Path | None,
@@ -50,6 +51,7 @@ def search_agenda(
                 "state": connection.root_state,
                 "goal_ids": list(goal_ids),
                 "limits": limits,
+                "action_limit": action_limit,
                 "ranker": ranker,
                 "model_path": str(model_path.resolve()) if model_path else None,
                 "focused_model_path": str(focused_model_path.resolve())

@@ -43,8 +43,8 @@ data Operation = Pending StateKey | Observe StateKey InteractionId P.Observation
   | ReconstructGoals StateKey (NonEmpty InteractionId) StateKey
   | ExportGoals StateKey (NonEmpty InteractionId) StateKey
   | StartSearch StateKey Search.SearchLimits Policy.RankingMode (Maybe FilePath)
-      (Maybe FilePath) (Maybe FilePath) Bool [String] Scheduling (Maybe (NonEmpty InteractionId))
-  | AdvanceSearch Run.Key Natural Search.SearchLimits
+      (Maybe FilePath) (Maybe FilePath) Bool [String] Scheduling (Maybe (NonEmpty InteractionId)) (Maybe Integer)
+  | AdvanceSearch Run.Key Natural Search.SearchLimits (Maybe (Maybe Integer))
   | RunCost Run.Key | DiscardSearch Run.Key
   | InferHelper StateKey InteractionId P.ObservationMode DraftExpression
   | SolveHelper StateKey InteractionId Search.SearchLimits Policy.RankingMode (Maybe FilePath) (Maybe FilePath)
@@ -94,6 +94,10 @@ parseRequest = withObject "session request" $ \o -> do
         case ids of
           [] -> fail "empty goal selection"
           first:rest -> pure $ fmap fromInteger $ first :| rest
+      actionLimit = do
+        limit <- o .:? "action_limit"
+        unless (maybe True (> (0 :: Integer)) limit) $ fail "action limit must be positive or null"
+        pure limit
   op <- case operation of
     "pending" -> fields ["state"] >> Pending <$> o .: "state"
     "observe" -> do
@@ -122,7 +126,7 @@ parseRequest = withObject "session request" $ \o -> do
         <*> goals <*> o .: "descendant"
     "start-search" -> do
       fields $ ["state", "limits", "ranker", "model_path", "focused_model_path",
-        "native_path", "focused_search", "exclude_names"] ++ filter (`KM.member` o) ["scheduling", "goal_ids"]
+        "native_path", "focused_search", "exclude_names"] ++ filter (`KM.member` o) ["scheduling", "goal_ids", "action_limit"]
       mode <- o .: "ranker" >>= \case
         ("nnue" :: String) -> pure Policy.Learned
         "symbolic" -> pure Policy.Symbolic
@@ -132,9 +136,11 @@ parseRequest = withObject "session request" $ \o -> do
         <*> o .: "focused_model_path" <*> o .: "native_path" <*> o .: "focused_search"
         <*> o .: "exclude_names" <*> pure scheduling
         <*> (if KM.member "goal_ids" o then Just <$> goals else pure Nothing)
+        <*> actionLimit
     "advance-search" -> do
-      fields ["run", "steps", "limits"]
+      fields $ ["run", "steps", "limits"] ++ filter (`KM.member` o) ["action_limit"]
       AdvanceSearch <$> o .: "run" <*> o .: "steps" <*> o .: "limits"
+        <*> (if KM.member "action_limit" o then Just <$> actionLimit else pure Nothing)
     "search-cost" -> fields ["run"] >> RunCost <$> o .: "run"
     "discard-search" -> fields ["run"] >> DiscardSearch <$> o .: "run"
     "solve-helper" -> do
@@ -265,14 +271,14 @@ serve output session root = do
 
 perform :: S.Session s -> Run.Store s -> (Value -> IO ()) -> (Value -> IO ()) -> Operation -> IO Value
 perform session runs emit emitRun operation = case operation of
-  StartSearch key limits mode modelPath focusedPath nativePath focused excluded (Scheduling structural macro initial enabled) selection ->
+  StartSearch key limits mode modelPath focusedPath nativePath focused excluded (Scheduling structural macro initial enabled) selection actionLimit ->
     resolved key $ \root -> do
       loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
       focusedModel <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.FocusedBranch)) focusedPath
       case ((++) <$> loaded <*> focusedModel) >>= Policy.models of
         Left reason -> pure $ failureView $ KernelFailure ("model-configuration:" ++ reason)
-        Right models -> Run.start runs root (G.Settings limits mode models focused excluded structural macro initial enabled) nativePath selection
-  AdvanceSearch key steps limits -> Run.advance runs key steps limits emitRun
+        Right models -> Run.start runs root (G.Settings limits mode models focused excluded structural macro initial enabled actionLimit) nativePath selection
+  AdvanceSearch key steps limits actionLimit -> Run.advance runs key steps limits actionLimit emitRun
   RunCost key -> Run.snapshot runs key
   DiscardSearch key -> Run.discard runs key
   Pending key -> resolved key $ \ref -> result toJSON <$> S.pending session ref

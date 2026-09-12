@@ -35,7 +35,7 @@ data Config s n = Config
   , models :: P.Models, ranking :: P.RankingMode, scorer :: Maybe (NativeScorer n)
   , focused :: Bool, excluded :: [String]
   , plan :: S.StateRef s -> Pending -> IO (Either Failure (Planning s))
-  , chargeStep :: IO Bool, observe :: A.Event -> IO ()
+  , chargeStep :: IO Bool, chargeMove :: IO Bool, observe :: A.Event -> IO ()
   , policyTrace :: Value -> IO ()
   , searchCost :: E.SearchStats -> IO ()
   , accepted :: S.Transition s -> IO () }
@@ -50,6 +50,7 @@ type Queue s = A.Agenda (SearchState s) (Move s) (Continuation s)
 -- Its queue is retained. This API does not claim to resume inside that attempt:
 -- fine-grained checker/search continuations are the separate slicing layer.
 data Interruption = SessionFailure Failure | MoveAllowanceExhausted E.SearchStats | PlanningAllowanceExhausted
+  | ActionAllowanceExhausted
   deriving (Eq, Show)
 data Outcome s
   = Progress (Queue s) | Candidate (S.StateRef s) (Queue s)
@@ -95,6 +96,8 @@ step session config queue = runExceptT (A.step hooks queue) >>= \case
     , A.sameState = \(SearchState a sa _) (SearchState b sb _) ->
         pure $ S.stateKey a == S.stateKey b && sa == sb }
   execute current@(SearchState state selected _) move = do
+    allowed <- liftIO $ chargeMove config
+    if not allowed then throwError ActionAllowanceExhausted else pure ()
     let goal = case move of
           Evidence g -> g
           SlicedEvidence g _ -> g

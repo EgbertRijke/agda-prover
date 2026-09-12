@@ -5,7 +5,7 @@
 -- Native controller. All source obligations remain coupled; source selection
 -- and final independent validation belong to the application boundary.
 module AgdaProver.Agda28.AgendaSearch
-  ( Run, Settings (..), Result (..), PauseReason (..), begin, beginSelection, advance, withLimits, withObservers, cost ) where
+  ( Run, Settings (..), Result (..), PauseReason (..), begin, beginSelection, advance, withLimits, withActionLimit, withObservers, cost ) where
 
 import Control.Concurrent (MVar, newMVar, withMVar)
 import Data.Aeson (Value, object, (.=))
@@ -28,14 +28,14 @@ data Settings = Settings
   , focused :: Bool, excluded :: [String]
   -- Soft priorities, not cutoffs: structural and macro alternatives stay queued.
   , structuralDelay :: Natural, macroDelay :: Natural
-  , initialMacroWork :: Natural, evidenceMacro :: Bool }
+  , initialMacroWork :: Natural, evidenceMacro :: Bool, actionLimit :: Maybe Integer }
 
 data Metrics = Metrics
   { schedulerSteps :: !Integer, modelItems :: !Integer, modelNanoseconds :: !Integer
   , generatedMoves :: !Integer, attemptedMoves :: !Integer, acceptedMoves :: !Integer }
 data Run s = Run (S.Session s) Settings (N.Queue s) Integer
   (IORef Metrics) (MVar ()) (Value -> IO ()) (S.Transition s -> IO ())
-data PauseReason = SliceEnded | AllowanceSpent | CancelledByCaller deriving (Eq, Show)
+data PauseReason = SliceEnded | AllowanceSpent | ActionsSpent | CancelledByCaller deriving (Eq, Show)
 data Result s = Paused PauseReason (Run s) | Candidate (S.StateRef s) (Run s)
   | Exhausted | Failed Failure (Run s)
 
@@ -66,6 +66,10 @@ withLimits :: E.SearchLimits -> Run s -> Run s
 withLimits allowance (Run session settings queue baseline metrics owner trace accepted) =
   Run session settings { limits = allowance } queue baseline metrics owner trace accepted
 
+withActionLimit :: Maybe Integer -> Run s -> Run s
+withActionLimit limit (Run session settings queue baseline metrics owner trace accepted) =
+  Run session settings { actionLimit = limit } queue baseline metrics owner trace accepted
+
 -- A resumed protocol request has a new response channel/request ID. Do not
 -- retain the callback of the request that originally created this frontier.
 withObservers :: (Value -> IO ()) -> (S.Transition s -> IO ()) -> Run s -> Run s
@@ -81,6 +85,7 @@ cost (Run session settings _ baseline metrics _ _ _) = do
     "scheduler_steps" .= steps, "work_units" .= (steps + checkingAttempts physical - baseline),
     "actions_generated" .= generatedMoves measured, "actions_attempted" .= attemptedMoves measured,
     "actions_accepted" .= acceptedMoves measured,
+    "action_limit" .= actionLimit settings,
     "model_items_scored" .= modelItems measured, "model_elapsed_ns" .= modelNanoseconds measured,
     "models" .= P.modelIdentities (models settings), "session_cost" .= physical]
 
@@ -105,12 +110,13 @@ advance native count run@(Run session settings initial baseline metrics owner tr
   recordEvent event = do
     modifyIORef' metrics $ \m -> case event of
       A.Expanded count' -> m { generatedMoves = generatedMoves m + toInteger count' }
-      A.Attempted -> m { attemptedMoves = attemptedMoves m + 1 }
-      A.Resumed -> m { attemptedMoves = attemptedMoves m + 1 }
       A.AdvancedState -> m { acceptedMoves = acceptedMoves m + 1 }
       _ -> m
     trace $ object ["schema_version" .= ("agdaprover.symbolic-agenda-event.v1" :: String),
       "event" .= show event]
+  chargeAction = atomicModifyIORef' metrics $ \m ->
+    if maybe False (attemptedMoves m >=) (actionLimit settings) then (m, False)
+    else (m { attemptedMoves = attemptedMoves m + 1 }, True)
   planner state obligations = allowance >>= \left ->
     if left == Just 0 then pure $ Right N.PlanningCensored else planReady state obligations
   planReady state obligations = case pendingGoals obligations of
@@ -147,7 +153,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
           (focused settings) (excluded settings) planner
           (allowance >>= \left -> if left == Just 0 then pure False else
             modifyIORef' metrics (\m -> m { schedulerSteps = schedulerSteps m + 1 }) >> pure True)
-          recordEvent trace recordSearch accepted
+          chargeAction recordEvent trace recordSearch accepted
     N.step session config queue >>= \case
       N.Progress next -> go (remaining-1) next
       N.Candidate state next -> pure $ Candidate state $ saved next
@@ -155,6 +161,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
       N.Paused next -> pure $ Paused AllowanceSpent $ saved next
       N.Interrupted reason next -> pure $ case reason of
         N.PlanningAllowanceExhausted -> Paused AllowanceSpent $ saved next
+        N.ActionAllowanceExhausted -> Paused ActionsSpent $ saved next
         N.MoveAllowanceExhausted{} -> Paused AllowanceSpent $ saved next
         N.SessionFailure Cancelled -> Paused CancelledByCaller $ saved next
         N.SessionFailure failure -> Failed failure $ saved next

@@ -59,8 +59,8 @@ start (Store session identity store) root settings nativePath selection = modify
 -- a native call restores the prior queue; its shared ledger still charges work.
 -- Successful advancement issues a new revision, preventing accidental replay
 -- of a stale frontend request against a different frontier.
-advance :: Store s -> Key -> Natural -> E.SearchLimits -> (Value -> IO ()) -> IO Value
-advance (Store session identity store) key@(Key nonce epoch number revision) quantum limits emit =
+advance :: Store s -> Key -> Natural -> E.SearchLimits -> Maybe (Maybe Integer) -> (Value -> IO ()) -> IO Value
+advance (Store session identity store) key@(Key nonce epoch number revision) quantum limits actionLimit emit =
   modifyMVar store $ \(serial, entries) -> case resolve identity entries key of
     Left reason -> pure ((serial, entries), rejected reason)
     Right (Entry _ root nativePath chosen run) -> S.pending session root >>= \case
@@ -71,7 +71,8 @@ advance (Store session identity store) key@(Key nonce epoch number revision) qua
                "state" .= S.stateKey (S.transitionState t), "pending" .= S.transitionPending t,
                "goal_ids" .= chosen,
                "status" .= kindName (S.transitionKind t), "proof_authority" .= False]
-            current = G.withObservers emit progress $ G.withLimits limits run
+            current = G.withObservers emit progress $ G.withLimits limits $
+              maybe run (`G.withActionLimit` run) actionLimit
         outcome <- withNativeScorer nativePath $ \native -> G.advance native quantum current
         measured <- G.cost current
         let nextKey = Key nonce epoch number (revision+1)
@@ -121,6 +122,7 @@ resolve identity entries (Key nonce epoch number revision)
 pauseName :: G.PauseReason -> String
 pauseName G.SliceEnded = "slice-ended"
 pauseName G.AllowanceSpent = "allowance-spent"
+pauseName G.ActionsSpent = "action-allowance-spent"
 pauseName G.CancelledByCaller = "cancelled"
 
 rejected :: String -> Value

@@ -128,8 +128,6 @@ class NativeProofEngine:
                     "the evidence-only controller does not implement joint solving"
                 )
             work_units = self.work_units
-            if work_units is None and self.controller == "agenda":
-                work_units = task.max_candidates
             assert_offline_configuration(task, deadline=budget.deadline)
             require_agda_source_file(source)
             result.source_hash = file_sha256(source, deadline=budget.deadline)
@@ -151,6 +149,9 @@ class NativeProofEngine:
                 "engine": "haskell",
                 "native_executable_sha256": binary_hash,
                 "native_work_limit": work_units,
+                "native_action_limit": task.max_candidates
+                if self.controller == "agenda"
+                else None,
                 "native_work_unit": "scheduler-step-or-checking-attempt",
                 "completion_known": False,
                 "final_search_cost": None,
@@ -237,6 +238,7 @@ class NativeProofEngine:
                         self.executable,
                         project,
                         tuple(g.goal_id for g in targets),
+                        action_limit=task.max_candidates,
                         **arguments,
                     )
                 else:
@@ -273,6 +275,7 @@ class NativeProofEngine:
                     status = outcome.get("status")
                     if status == "paused" and outcome.get("reason") in {
                         "allowance-spent",
+                        "action-allowance-spent",
                         "cancelled",
                     }:
                         raise ResourceLimitError(f"native search {outcome['reason']}")
