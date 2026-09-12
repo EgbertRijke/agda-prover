@@ -461,7 +461,15 @@ inspect session goal mode = request session (goalState goal) $ \owner state -> d
 -- that is a fallback observation, never proof of absent dependencies.
 dependencies :: Session s -> StateRef s -> Maybe Integer -> IO (Either Failure (DependencySnapshot s))
 dependencies session parent limit = request session parent $ \owner state -> do
-  used <- newIORef (0 :: Integer)
+  (result, _) <- kernel session state $ observeDependencies session limit
+  pure (owner, DependencySnapshot parent <$> result)
+
+-- Shared observation/accounting for search and reconstruction. A positive
+-- dependency has the same meaning at both boundaries; neither one certifies
+-- independence from a missing edge.
+observeDependencies :: Session s -> Maybe Integer -> TCM Dependencies.Snapshot
+observeDependencies session limit = do
+  used <- liftIO $ newIORef (0 :: Integer)
   let step kind = liftIO $ do
         allowed <- atomicModifyIORef' used $ \n ->
           if maybe False (n >=) limit then (n, False) else (n+1, True)
@@ -471,8 +479,7 @@ dependencies session parent limit = request session parent $ \owner state -> do
           Dependencies.WalkDependency -> w { symbolicActions = symbolicActions w + 1,
             dependencyNodes = dependencyNodes w + 1 }
         pure allowed
-  (result, _) <- kernel session state $ Dependencies.observe step
-  pure (owner, DependencySnapshot parent <$> result)
+  Dependencies.observe step
 
 -- Negative certificates are only proposed for an original source obligation,
 -- never an assigned prefix, a case branch or a speculative helper. The command
@@ -929,17 +936,30 @@ reconstructWith present session parent points descendant = request session paren
           open <- openInteractionPoints
           pure $ if Set.size (Set.fromList $ NE.toList points) /= length points
             then Left $ KernelRejected "native-reconstruction-duplicate-goals"
-            else if all (`elem` open) points then Right () else Left UnknownGoal
+            else if all (`elem` open) points then Right open else Left UnknownGoal
         case valid >>= id of
           Left failure -> pure (owner, Left failure)
-          Right () -> do
-            let allocation = foldr maximumAllocation
-                  (Allocation (initial ^. stFreshNameId) (initial ^. stFreshInteractionId)) allocations
-            (next, result) <- go allocation owner parent initial $ NE.toList assembled
-            case result of
+          Right open -> do
+            let omitted = Set.difference
+                  (Set.intersection (Set.fromList open) $ Set.fromList $ map fst expressions)
+                  (Set.fromList $ NE.toList points)
+            (available, _) <- kernel session initial $
+              if Set.null omitted then pure [] else do
+                snapshot <- observeDependencies session Nothing
+                pure $ Dependencies.omittedPrerequisites snapshot
+                  (map interactionId $ NE.toList points) (Set.map interactionId omitted)
+            case available of
               Left failure -> pure (owner, Left failure)
-              Right [] -> pure (owner, Left $ KernelFailure "native-reconstruction-empty-batch")
-              Right (first:rest) -> pure (next, Right $ first :| rest)
+              Right missing@(_:_) -> pure (owner, Left $ KernelBlocked $
+                "native-reconstruction-omitted-prerequisites: " ++ show missing)
+              Right [] -> do
+                let allocation = foldr maximumAllocation
+                      (Allocation (initial ^. stFreshNameId) (initial ^. stFreshInteractionId)) allocations
+                (next, result) <- go allocation owner parent initial $ NE.toList assembled
+                case result of
+                  Left failure -> pure (owner, Left failure)
+                  Right [] -> pure (owner, Left $ KernelFailure "native-reconstruction-empty-batch")
+                  Right (first:rest) -> pure (next, Right $ first :| rest)
  where
   go _ owner _ _ [] = pure (owner, Right [])
   go allocation owner current state ((point, expression):rest) = do

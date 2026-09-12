@@ -393,6 +393,22 @@ assignments, foreign/stale references and unrelated descendants are rejected.
 On failure none of the intermediate states is published; spent checking work
 is retained. Existing parent and descendant branches are unchanged.
 
+When the descendant explicitly assigned other original goals that the export
+omits, reconstruction consults the parent's native dependency observation.
+Positive dependencies on those omitted assignments return `kernel-blocked`
+with `native-reconstruction-omitted-prerequisites: [(goal,[prerequisites]),...]`
+before rendering or checking any entry. Include the prerequisites in a coupled,
+ordered batch, or reconstruct relative to a parent that already owns them.
+This never expands the authorized edit selection or copies the descendant's
+metas/signature into the parent. The observation is charged to the same ledger;
+batches with no omitted assignments need no extra dependency traversal.
+
+This is a conservative reuse boundary, not a theorem about necessary premises:
+another proof might work without the chosen prerequisite definitions. It also
+does not certify independence from absent edges or analyze every future
+elaboration effect. Ordinary parent-relative checking and independent source
+validation remain mandatory. Unrelated omitted assignments do not block export.
+
 Success returns `state`, `status`, `pending`, `proof_authority: false` and
 `entries: [{goal_id, evidence}, ...]` in requested order. Each evidence value
 belongs to its checked prefix; the top-level state/pending describe the final

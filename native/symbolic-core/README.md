@@ -125,6 +125,11 @@ patching and hidden-binder exposure belong to the separate export operation.
 
 `reconstruct-goals` rechecks an ordered batch in one new branch. Later entries
 can depend on earlier reconstructed definitions; unselected goals stay open.
+When a proof has observed dependencies on prerequisite assignments omitted from
+that batch, the adapter reports those goals as a blocker. Include them in the
+batch or use a parent that already owns them; the adapter never silently imports
+another branch's helpers or enlarges the source edit. This conservative reuse
+check does not rule out a different, independent proof.
 `export-goals` adds a native source presentation to each checked entry. Hidden
 clause binders referenced by the proof are exposed by Agda and mapped by native
 binding identity. Relative helper layout is retained. The application anchors

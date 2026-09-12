@@ -4,7 +4,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.Dependencies
-  ( Snapshot, Step (..), observe, view, orderGoals, constrainingGoals ) where
+  ( Snapshot, Step (..), observe, view, orderGoals, constrainingGoals, omittedPrerequisites ) where
 
 import Control.Monad (forM, unless)
 import Control.Monad.State.Strict
@@ -125,6 +125,19 @@ constrainingGoals snapshot selected =
       Map.findWithDefault Set.empty point edges]
  where
   chosen = Set.fromList selected
+  edges = goalEdges snapshot
+
+-- A descendant's assignments are not available in an earlier reconstruction
+-- parent. Positive native dependencies on omitted assignments require a coupled
+-- export, not silent copying of their metas or generated helper definitions.
+-- Empty output is not an independence certificate: the assembled proof still
+-- has to be rechecked in the requested parent and freshly validated as source.
+omittedPrerequisites :: Snapshot -> [Int] -> Set.Set Int -> [(Int, [Int])]
+omittedPrerequisites snapshot selected omitted =
+  [(point, Set.toAscList missing) | point <- selected,
+    let missing = Set.intersection omitted $ Map.findWithDefault Set.empty point edges,
+    not $ Set.null missing]
+ where
   edges = goalEdges snapshot
 
 goalEdges :: Snapshot -> Map.Map Int (Set.Set Int)
