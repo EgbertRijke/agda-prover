@@ -5,7 +5,6 @@ module AgdaProver.Agda28.ClauseExecution (Intent (..), PreparationStep (..), pre
 
 import Control.Monad (forM, void, when)
 import Control.Monad.Except (catchError, throwError)
-import Data.IntSet qualified as IntSet
 import Data.List (elemIndex)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
@@ -29,8 +28,7 @@ import Agda.Syntax.Scope.Base
 import Agda.Syntax.Translation.InternalToAbstract (reify)
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Constraints (reallyNoConstraints)
-import Agda.TypeChecking.Free (allFreeVars)
-import Agda.TypeChecking.Reduce (instantiateFull, reduce)
+import Agda.TypeChecking.Reduce (instantiateFull)
 import Agda.TypeChecking.Rules.Term (checkExpr)
 import Agda.TypeChecking.Substitute (telePi)
 import Agda.TypeChecking.Telescope (splitTelescopeAt)
@@ -98,7 +96,7 @@ prepare chargeStep point action = withInteractionId point $ do
   names <- forM (zip [0 :: Int ..] context) $ \(i, _) ->
     freshName_ $ "argument" ++ show i
   (selected, indices) <- subjects chargeStep point action (map ctxEntryName context) names
-  width <- abstractionWidth chargeStep indices
+  let width = maximum $ 0 : map (+ 1) indices
   before <- getTC
   let build count = do
         let (_, suffix) = splitTelescopeAt (length context - count) telescope
@@ -110,30 +108,16 @@ prepare chargeStep point action = withInteractionId point $ do
         let entries = reverse $ take count $ zip context names
         prepareHelper chargeStep point originalScope signature selected
           [(getArgInfo entry, name, A.Var $ ctxEntryName entry) | (entry, name) <- entries]
-  if width >= length context then build (length context) else
-    build width `catchError` \err -> case err of
-      TypeError{} -> restoreAllocations before >> build (length context)
-      PatternErr{} -> restoreAllocations before >> build (length context)
-      _ -> throwError err
-
--- Abstract the subjects and the variables in their datatype indices, plus the
--- intervening dependent suffix. Datatype parameters stay in the ambient
--- context. Generalizing that context wholesale on every nested split copies
--- unrelated binders into the helper while Agda also captures their originals.
--- The native coverage checker remains authoritative: unusual dependencies
--- which need more generalization retry the original full telescope.
-abstractionWidth :: (PreparationStep -> TCM ()) -> [Int] -> TCM Int
-abstractionWidth chargeStep selectedIndices = do
-  dependencies <- forM selectedIndices $ \index -> do
-    chargeStep CheckContext
-    typeOfBV index >>= reduce >>= \case
-      I.El _ (I.Def family eliminations) -> getConstInfo family >>= \definition ->
-        pure $ case theDef definition of
-          Datatype { dataPars = parameters } ->
-            IntSet.toList $ allFreeVars $ drop parameters eliminations
-          _ -> []
-      _ -> pure []
-  pure $ maximum $ 0 : map (+ 1) (selectedIndices ++ concat dependencies)
+      -- Start with just the subjects and their dependent suffix. Free-variable
+      -- scans of indices also include hidden carrier arguments of local
+      -- operations, incorrectly pulling ambient types into the helper.
+      -- Let Agda determine which older binders must actually be generalized.
+      attempt count = build count `catchError` \err -> case err of
+        TypeError{} | count < length context -> retry count
+        PatternErr{} | count < length context -> retry count
+        _ -> throwError err
+      retry count = restoreAllocations before >> attempt (count + 1)
+  attempt $ min width $ length context
 
 -- A with-helper has an Agda-inferred closed telescope and an application in
 -- the current context. Reuse the same checked clause preparation as ordinary

@@ -321,6 +321,16 @@ or its compiled clauses. The final native helper is checked through non-forced
 Dependent field/branch obligations live in Agda's shared child state; they are
 not independent text placeholders.
 
+Helper abstraction starts with the selected subjects and their dependent
+context suffix. If Agda rejects that telescope, preparation restores the parent
+and tries the next older binder, up to the actual full context. Agda determines
+which parameters and indices need generalization: scanning free variables in
+an index can incorrectly include hidden carrier arguments of locally specialized
+operations. Every attempted scaffold/case check is charged; cancellation and
+non-elaboration failures propagate. An accepted suffix retains its ambient
+parameters, and the final draft still passes the ordinary check from the
+original parent. No numerical context-width or attempt ceiling is introduced.
+
 Autonomous clause proposals retain native binding identities in opaque,
 session/parent/goal-branded `ClauseMove` values. Printed local names are ranking
 features only, not split addresses. User-supplied `apply-clause` commands keep
