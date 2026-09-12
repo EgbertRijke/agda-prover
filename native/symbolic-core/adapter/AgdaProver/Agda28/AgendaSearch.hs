@@ -5,11 +5,15 @@
 -- Native controller. All source obligations remain coupled; source selection
 -- and final independent validation belong to the application boundary.
 module AgdaProver.Agda28.AgendaSearch
-  ( Run, Settings (..), Result (..), PauseReason (..), begin, advance, withLimits, withObservers, cost ) where
+  ( Run, Settings (..), Result (..), PauseReason (..), begin, beginSelection, advance, withLimits, withObservers, cost ) where
 
 import Control.Concurrent (MVar, newMVar, withMVar)
 import Data.Aeson (Value, object, (.=))
 import Data.IORef
+import Data.List.NonEmpty (NonEmpty)
+import Data.List.NonEmpty qualified as NE
+import Data.Set qualified as Set
+import Agda.Syntax.Common (InteractionId, interactionId)
 import Numeric.Natural (Natural)
 import AgdaProver.Agda28.Session qualified as S
 import AgdaProver.Agda28.AgendaExecution qualified as N
@@ -37,13 +41,23 @@ data Result s = Paused PauseReason (Run s) | Candidate (S.StateRef s) (Run s)
 -- accepts a malformed/stale wire key on the strength of its numeric branch ID.
 begin :: S.Session s -> S.StateRef s -> Settings -> (Value -> IO ())
       -> (S.Transition s -> IO ()) -> IO (Either Failure (Run s))
-begin session state settings trace accepted = S.pending session state >>= \case
+begin = beginSelection Nothing
+
+beginSelection :: Maybe (NonEmpty InteractionId) -> S.Session s -> S.StateRef s -> Settings
+               -> (Value -> IO ()) -> (S.Transition s -> IO ()) -> IO (Either Failure (Run s))
+beginSelection selection session state settings trace accepted = S.pending session state >>= \case
   Left failure -> pure $ Left failure
-  Right _ -> do
+  Right pending | Just points <- selection,
+      let ids = map interactionId $ NE.toList points,
+      Set.size (Set.fromList ids) /= length ids || not (all (`elem` pendingGoals pending) ids) ->
+    pure $ Left UnknownGoal
+  Right pending -> do
     baseline <- checkingAttempts <$> S.work session
     metrics <- newIORef $ Metrics 0 0 0
     owner <- newMVar ()
-    pure $ Right $ Run session settings (N.start state) baseline metrics owner trace accepted
+    let queue = maybe (N.start state)
+          (\points -> N.startSelected state (map interactionId $ NE.toList points) (pendingGoals pending)) selection
+    pure $ Right $ Run session settings queue baseline metrics owner trace accepted
 
 -- Raising an allowance never resets accumulated work or restores spent budget.
 withLimits :: E.SearchLimits -> Run s -> Run s

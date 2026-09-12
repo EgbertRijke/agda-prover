@@ -11,6 +11,9 @@ import Control.Monad (unless)
 import Data.Aeson hiding (Key)
 import Data.Aeson.KeyMap qualified as KM
 import Data.Map.Strict qualified as Map
+import Data.List.NonEmpty (NonEmpty)
+import Data.List.NonEmpty qualified as NE
+import Agda.Syntax.Common (InteractionId, interactionId)
 import Data.Set qualified as Set
 import Numeric.Natural (Natural)
 import AgdaProver.Agda28.AgendaSearch qualified as G
@@ -20,7 +23,7 @@ import AgdaProver.Symbolic.NNUE.Native (withNativeScorer)
 import AgdaProver.Symbolic.SessionTypes
 
 data Key = Key String Integer Integer Integer
-data Entry s = Entry Integer (S.StateRef s) (Maybe FilePath) (G.Run s)
+data Entry s = Entry Integer (S.StateRef s) (Maybe FilePath) (Maybe [Int]) (G.Run s)
 data Store s = Store (S.Session s) StateKey (MVar (Integer, Map.Map Integer (Entry s)))
 
 instance FromJSON Key where
@@ -40,16 +43,17 @@ instance ToJSON Key where
 newStore :: S.Session s -> S.StateRef s -> IO (Store s)
 newStore session root = Store session (S.stateKey root) <$> newMVar (0, Map.empty)
 
-start :: Store s -> S.StateRef s -> G.Settings -> Maybe FilePath -> IO Value
-start (Store session identity store) root settings nativePath = modifyMVar store $ \(serial, entries) ->
-  G.begin session root settings (const $ pure ()) (const $ pure ()) >>= \case
+start :: Store s -> S.StateRef s -> G.Settings -> Maybe FilePath -> Maybe (NonEmpty InteractionId) -> IO Value
+start (Store session identity store) root settings nativePath selection = modifyMVar store $ \(serial, entries) ->
+  G.beginSelection selection session root settings (const $ pure ()) (const $ pure ()) >>= \case
     Left failure -> pure ((serial, entries), failureView failure)
     Right run -> do
       measured <- G.cost run
       let key = Key (keySession identity) (keyEpoch $ S.stateKey root) serial 0
-      pure ((serial+1, Map.insert serial (Entry 0 root nativePath run) entries),
+          chosen = fmap (map interactionId . NE.toList) selection
+      pure ((serial+1, Map.insert serial (Entry 0 root nativePath chosen run) entries),
         object ["status" .= ("ready" :: String), "run" .= key, "cost" .= measured,
-          "proof_authority" .= False])
+          "goal_ids" .= chosen, "proof_authority" .= False])
 
 -- Consume a revision only when the operation returns. An interruption outside
 -- a native call restores the prior queue; its shared ledger still charges work.
@@ -59,44 +63,51 @@ advance :: Store s -> Key -> Natural -> E.SearchLimits -> (Value -> IO ()) -> IO
 advance (Store session identity store) key@(Key nonce epoch number revision) quantum limits emit =
   modifyMVar store $ \(serial, entries) -> case resolve identity entries key of
     Left reason -> pure ((serial, entries), rejected reason)
-    Right (Entry _ root nativePath run) -> S.pending session root >>= \case
+    Right (Entry _ root nativePath chosen run) -> S.pending session root >>= \case
       Left failure -> pure ((serial, entries), failureView failure)
       Right _ -> do
         let progress t = emit $ object
               ["schema_version" .= ("agdaprover.symbolic-progress.v1" :: String),
                "state" .= S.stateKey (S.transitionState t), "pending" .= S.transitionPending t,
+               "goal_ids" .= chosen,
                "status" .= kindName (S.transitionKind t), "proof_authority" .= False]
             current = G.withObservers emit progress $ G.withLimits limits run
         outcome <- withNativeScorer nativePath $ \native -> G.advance native quantum current
         measured <- G.cost current
         let nextKey = Key nonce epoch number (revision+1)
             retained next status extra =
-              ((serial, Map.insert number (Entry (revision+1) root nativePath next) entries),
+              ((serial, Map.insert number (Entry (revision+1) root nativePath chosen next) entries),
                object (["status" .= (status :: String), "run" .= nextKey,
-                 "cost" .= measured, "proof_authority" .= False] ++ extra))
-        pure $ case outcome of
-          G.Candidate state next -> retained next "candidate" ["state" .= S.stateKey state]
-          G.Paused reason next -> retained next "paused" ["reason" .= pauseName reason]
-          G.Failed failure next -> retained next "failed" ["failure" .= failureView failure]
-          G.Exhausted -> ((serial, Map.delete number entries), object
-            ["status" .= ("unsolved" :: String), "cost" .= measured, "proof_authority" .= False])
+                 "cost" .= measured, "goal_ids" .= chosen, "proof_authority" .= False] ++ extra))
+        case outcome of
+          G.Candidate state next -> S.pending session state >>= \case
+            Left failure -> pure $ retained next "failed" ["failure" .= failureView failure]
+            Right pending -> pure $ retained next "candidate"
+              ["state" .= S.stateKey state, "pending" .= pending]
+          G.Paused reason next -> pure $ retained next "paused" ["reason" .= pauseName reason]
+          G.Failed failure next -> pure $ retained next "failed" ["failure" .= failureView failure]
+          G.Exhausted -> pure ((serial, Map.delete number entries), object
+            ["status" .= ("unsolved" :: String), "cost" .= measured,
+             "goal_ids" .= chosen, "proof_authority" .= False])
 
 snapshot :: Store s -> Key -> IO Value
 snapshot (Store _ identity store) key = withMVar store $ \(_, entries) ->
   case resolve identity entries key of
     Left reason -> pure $ rejected reason
-    Right (Entry _ _ _ run) -> do
+    Right (Entry _ _ _ chosen run) -> do
       measured <- G.cost run
-      pure $ object ["status" .= ("retained" :: String), "run" .= key, "cost" .= measured]
+      pure $ object ["status" .= ("retained" :: String), "run" .= key,
+        "goal_ids" .= chosen, "cost" .= measured]
 
 discard :: Store s -> Key -> IO Value
 discard (Store _ identity store) key@(Key _ _ number _) = modifyMVar store $ \(serial, entries) ->
   case resolve identity entries key of
     Left reason -> pure ((serial, entries), rejected reason)
-    Right (Entry _ _ _ run) -> do
+    Right (Entry _ _ _ chosen run) -> do
       measured <- G.cost run
       pure ((serial, Map.delete number entries), object
-        ["status" .= ("discarded" :: String), "cost" .= measured, "proof_authority" .= False])
+        ["status" .= ("discarded" :: String), "cost" .= measured,
+         "goal_ids" .= chosen, "proof_authority" .= False])
 
 resolve :: StateKey -> Map.Map Integer (Entry s) -> Key -> Either String (Entry s)
 resolve identity entries (Key nonce epoch number revision)
@@ -104,7 +115,7 @@ resolve identity entries (Key nonce epoch number revision)
   | epoch /= keyEpoch identity = Left "stale-epoch"
   | otherwise = case Map.lookup number entries of
       Nothing -> Left "unknown-run"
-      Just entry@(Entry current _ _ _) | revision == current -> Right entry
+      Just entry@(Entry current _ _ _ _) | revision == current -> Right entry
       _ -> Left "stale-run"
 
 pauseName :: G.PauseReason -> String

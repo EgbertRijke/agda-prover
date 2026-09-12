@@ -71,7 +71,7 @@ Each operation permits only its listed additional fields:
 | `reconstruct-goal` | `state`, `goal_id`, `descendant` | Assemble native drafts from a descendant, recheck from the original goal's parent, return a provisional checked transition |
 | `reconstruct-goals` | `state`, `goal_ids`, `descendant` | Reconstruct a nonempty ordered selection into one new coupled branch; return all entries and final pending obligations |
 | `export-goals` | `state`, `goal_ids`, `descendant` | The same checked batch with native source presentations, including required hidden-clause binders |
-| `start-search` | `state`, `limits`, `ranker`, `model_path`, `focused_model_path`, `native_path`, `focused_search`, `exclude_names`; optional `scheduling` | Create a retained autonomous run over the source state's pending goals |
+| `start-search` | `state`, `limits`, `ranker`, `model_path`, `focused_model_path`, `native_path`, `focused_search`, `exclude_names`; optional `scheduling`, `goal_ids` | Create a retained autonomous run over all or selected pending source goals |
 | `advance-search` | `run`, `steps`, `limits` | Advance a scheduling slice; return a new run revision or terminal finite exhaustion |
 | `search-cost` | `run` | Retained run cost snapshot |
 | `discard-search` | `run` | Retire the run handle/frontier, retaining its cost receipt |
@@ -268,6 +268,22 @@ unchanged.
 ## Resident search runs
 
 `start-search` creates a native controller without advancing its frontier.
+Optional `goal_ids` is a nonempty, duplicate-free list of currently pending
+interaction IDs. Omission retains whole-state solving. Empty, duplicate,
+negative, noninteger and unknown IDs are rejected; explicit null is not omission.
+Selection is caller authority, not an independence claim. Other source goals,
+metas and constraints remain in the same checking state. New interaction goals
+created by selected moves are selected AND obligations too. Existing unselected
+goals are not scheduled, although their constraints may affect checking.
+
+Run results echo `goal_ids` (null for whole-state solving). A selected candidate
+means no selected interactions remain; it may still have global obligations.
+Every candidate reports the complete `pending` state. Reconstruction and fresh
+validation must reject unresolved selected evidence or unsupported dependency
+requirements. It is never permissible to equate a selected candidate with a
+globally closed or independently verified proof. Whole-state candidate detection
+still requires no interactions, open metas or constraints.
+
 `limits` has the same `{ "work_units": positive-integer-or-null }` format as
 evidence search. `ranker` is `nnue` or `symbolic`; model/native paths are explicit
 nullable paths. Models are loaded once for this run. `focused_search` is boolean

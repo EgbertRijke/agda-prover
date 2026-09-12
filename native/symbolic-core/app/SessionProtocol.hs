@@ -43,7 +43,7 @@ data Operation = Pending StateKey | Observe StateKey InteractionId P.Observation
   | ReconstructGoals StateKey (NonEmpty InteractionId) StateKey
   | ExportGoals StateKey (NonEmpty InteractionId) StateKey
   | StartSearch StateKey Search.SearchLimits Policy.RankingMode (Maybe FilePath)
-      (Maybe FilePath) (Maybe FilePath) Bool [String] Scheduling
+      (Maybe FilePath) (Maybe FilePath) Bool [String] Scheduling (Maybe (NonEmpty InteractionId))
   | AdvanceSearch Run.Key Natural Search.SearchLimits
   | RunCost Run.Key | DiscardSearch Run.Key
   | InferHelper StateKey InteractionId P.ObservationMode DraftExpression
@@ -87,6 +87,13 @@ parseRequest = withObject "session request" $ \o -> do
         n <- o .: "goal_id" :: Parser Integer
         unless (n >= 0 && n <= toInteger (maxBound :: Int)) $ fail "invalid goal id"
         pure (fromInteger n)
+      goals = do
+        ids <- o .: "goal_ids" :: Parser [Integer]
+        unless (all (\n -> n >= 0 && n <= toInteger (maxBound :: Int)) ids
+                && Set.size (Set.fromList ids) == length ids) $ fail "invalid goal ids"
+        case ids of
+          [] -> fail "empty goal selection"
+          first:rest -> pure $ fmap fromInteger $ first :| rest
   op <- case operation of
     "pending" -> fields ["state"] >> Pending <$> o .: "state"
     "observe" -> do
@@ -111,16 +118,11 @@ parseRequest = withObject "session request" $ \o -> do
       ReconstructGoal <$> o .: "state" <*> goal <*> o .: "descendant"
     opName | opName `elem` ["reconstruct-goals", "export-goals"] -> do
       fields ["state", "goal_ids", "descendant"]
-      ids <- o .: "goal_ids" :: Parser [Integer]
-      unless (all (\n -> n >= 0 && n <= toInteger (maxBound :: Int)) ids
-              && Set.size (Set.fromList ids) == length ids) $ fail "invalid goal ids"
-      case ids of
-        [] -> fail "empty goal selection"
-        first:rest -> (if opName == "export-goals" then ExportGoals else ReconstructGoals) <$> o .: "state"
-          <*> pure (fmap fromInteger $ first :| rest) <*> o .: "descendant"
+      (if opName == "export-goals" then ExportGoals else ReconstructGoals) <$> o .: "state"
+        <*> goals <*> o .: "descendant"
     "start-search" -> do
       fields $ ["state", "limits", "ranker", "model_path", "focused_model_path",
-        "native_path", "focused_search", "exclude_names"] ++ filter (`KM.member` o) ["scheduling"]
+        "native_path", "focused_search", "exclude_names"] ++ filter (`KM.member` o) ["scheduling", "goal_ids"]
       mode <- o .: "ranker" >>= \case
         ("nnue" :: String) -> pure Policy.Learned
         "symbolic" -> pure Policy.Symbolic
@@ -129,6 +131,7 @@ parseRequest = withObject "session request" $ \o -> do
       StartSearch <$> o .: "state" <*> o .: "limits" <*> pure mode <*> o .: "model_path"
         <*> o .: "focused_model_path" <*> o .: "native_path" <*> o .: "focused_search"
         <*> o .: "exclude_names" <*> pure scheduling
+        <*> (if KM.member "goal_ids" o then Just <$> goals else pure Nothing)
     "advance-search" -> do
       fields ["run", "steps", "limits"]
       AdvanceSearch <$> o .: "run" <*> o .: "steps" <*> o .: "limits"
@@ -262,13 +265,13 @@ serve output session root = do
 
 perform :: S.Session s -> Run.Store s -> (Value -> IO ()) -> (Value -> IO ()) -> Operation -> IO Value
 perform session runs emit emitRun operation = case operation of
-  StartSearch key limits mode modelPath focusedPath nativePath focused excluded (Scheduling structural macro initial enabled) ->
+  StartSearch key limits mode modelPath focusedPath nativePath focused excluded (Scheduling structural macro initial enabled) selection ->
     resolved key $ \root -> do
       loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
       focusedModel <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.FocusedBranch)) focusedPath
       case ((++) <$> loaded <*> focusedModel) >>= Policy.models of
         Left reason -> pure $ failureView $ KernelFailure ("model-configuration:" ++ reason)
-        Right models -> Run.start runs root (G.Settings limits mode models focused excluded structural macro initial enabled) nativePath
+        Right models -> Run.start runs root (G.Settings limits mode models focused excluded structural macro initial enabled) nativePath selection
   AdvanceSearch key steps limits -> Run.advance runs key steps limits emitRun
   RunCost key -> Run.snapshot runs key
   DiscardSearch key -> Run.discard runs key

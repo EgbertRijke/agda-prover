@@ -154,7 +154,7 @@ branches; retries are charged, not treated as free continuation inside Agda.
 Increasing a run's work allowance does not reset accumulated work. Typed
 catalogue censorship pauses the run rather than discarding unexplored moves.
 The Haskell API exposes generic agenda events and cost snapshots. Autonomous
-helper-application invention, joint/source selection, protocol controls and full
+helper-application invention, full application routing and
 OS-resource integration are not implied by this controller checkpoint.
 
 The resident protocol exposes `start-search`, `advance-search`, `search-cost`
@@ -165,6 +165,12 @@ candidates. Allowances can be increased without erasing spent work. Existing
 run. Versioned progress events use the current request ID. The caller still
 supervises process resources and freshly validates reconstructed source.
 See the session schema for exact fields and revision/cancellation semantics.
+
+`start-search` optionally selects pending `goal_ids`. Generated dependent
+subgoals inherit that selection; unselected original goals stay in the same
+coupled state without being scheduled. Candidate replies report both the
+selection and all remaining obligations. Selected candidates need source
+reconstruction and independent validation, not a whole-file closure claim.
 
 The Python bridge exposes a supervised resident connection for these coarse
 requests. One prepared overlay, process and resource/output envelope cover all
