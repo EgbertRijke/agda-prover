@@ -34,6 +34,7 @@ data Operation = Pending StateKey | Observe StateKey InteractionId P.Observation
   | SolveEvidence StateKey InteractionId Search.SearchLimits Policy.RankingMode (Maybe FilePath) (Maybe FilePath) (Maybe FilePath) Bool [String]
   | MakeClause StateKey InteractionId ClauseAction
   | ApplyClause StateKey InteractionId ClauseAction
+  | ReconstructGoal StateKey InteractionId StateKey
   | InferHelper StateKey InteractionId P.ObservationMode DraftExpression
   | SolveHelper StateKey InteractionId Search.SearchLimits Policy.RankingMode (Maybe FilePath) (Maybe FilePath)
       P.ObservationMode DraftExpression
@@ -83,6 +84,9 @@ parseRequest = withObject "session request" $ \o -> do
     "apply-clause" -> do
       fields ["state", "goal_id", "action"]
       ApplyClause <$> o .: "state" <*> goal <*> o .: "action"
+    "reconstruct-goal" -> do
+      fields ["state", "goal_id", "descendant"]
+      ReconstructGoal <$> o .: "state" <*> goal <*> o .: "descendant"
     "solve-helper" -> do
       fields ["state", "goal_id", "limits", "ranker", "model_path", "native_path", "mode", "application"]
       mode <- o .: "ranker" >>= \case
@@ -217,6 +221,8 @@ perform session emit operation = case operation of
   ApplyClause key goal action -> resolvedGoal key goal $ \ref -> do
     answer <- S.applyClause session ref action
     checkedResult answer
+  ReconstructGoal key goal child -> resolvedGoal key goal $ \ref -> resolved child $ \descendant ->
+    S.reconstructGoal session ref descendant >>= checkedResult
   Give key goal expression -> resolvedGoal key goal $ \ref -> do
     answer <- S.tryExpression session ref expression
     checkedResult answer

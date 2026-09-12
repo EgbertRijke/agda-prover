@@ -77,6 +77,13 @@ This is not yet autonomous clause search or full source export: displayed
 evidence can require exposing hidden parent binders before insertion. Full
 proof-plan reconstruction and fresh workflow qualification remain required.
 
+`reconstruct-goal` assembles retained native drafts for an original goal along
+one descendant branch. It preserves binders, helper declarations and clause
+structure, then rechecks the expression from the original parent. Accepted text
+inputs are scoped once and retained as native drafts for replay. Partial drafts
+remain partial, and the returned evidence is not fresh verification. General
+source patches and hidden-binder exposure remain separate export work.
+
 `infer-helper` uses Agda's helper-function inference directly, including
 abstraction over compound arguments and the five observation modes. It retains
 the native signature in a parent-branded snapshot and returns Agda's rendering

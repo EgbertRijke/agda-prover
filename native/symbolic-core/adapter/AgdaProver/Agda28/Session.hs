@@ -12,6 +12,7 @@ module AgdaProver.Agda28.Session
   , inspect, pending, tryExpression
   , solveEvidence, solveHelper
   , ClauseProposal, makeClauses, clauseView, applyClause
+  , reconstructGoal
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
   , evict, replay, close, cancel, work, evidenceView
@@ -57,6 +58,7 @@ import AgdaProver.Agda28.Clauses qualified as Clauses
 import AgdaProver.Agda28.Helpers qualified as Helpers
 import AgdaProver.Agda28.ClauseExecution qualified as ClauseExecution
 import AgdaProver.Agda28.Recursion qualified as Recursion
+import AgdaProver.Agda28.DraftAssembly qualified as Assembly
 import AgdaProver.Symbolic.Clause (ClauseAction)
 import AgdaProver.Symbolic.Evidence qualified as Search
 import AgdaProver.Symbolic.NNUE.Native (NativeScorer)
@@ -415,7 +417,7 @@ runGoalSearch session goal search = do
 
 check :: Session s -> Owner -> StateRef s -> TCState -> DraftAction -> Bool
       -> IO (Owner, Either Failure (Transition s))
-check session owner parent initial draft@(DraftAction point expression) isReplay = do
+check session owner parent initial (DraftAction point expression) isReplay = do
   let previous = maybe Map.empty branchOrigins $
         Map.lookup (keyBranch $ stateKey parent) (ownerBranches owner)
       origin = Map.findWithDefault Nothing point previous
@@ -442,19 +444,20 @@ check session owner parent initial draft@(DraftAction point expression) isReplay
       obligations <- pendingTC
       newWarnings <- Set.difference <$> useTC stTCWarnings <*> pure warnings
       let bad = filter (not . expectedWarning) (Set.toAscList newWarnings)
-      pure $ if null bad then Right (display, term, target, telescope, obligations)
+      pure $ if null bad then Right (scoped, display, term, target, telescope, obligations)
         else Left $ KernelRejected $ unlines (map tcWarningString bad)
   case result >>= id of
     Left failure -> do
       charge (sessionWork session) $ \w -> w { rejectedChecks = rejectedChecks w + 1 }
       pure (owner, Left failure)
-    Right (abstract, term, target, telescope, obligations) -> do
+    Right (scoped, abstract, term, target, telescope, obligations) -> do
       charge (sessionWork session) $ \w -> w { acceptedChecks = acceptedChecks w + 1 }
       let number = ownerNext owner
           ref = StateRef $ StateKey (sessionNonce session) (ownerEpoch owner) number
           origins = Map.fromList
             [(p, Map.findWithDefault origin p previous)
             | number' <- pendingGoals obligations, let p = fromIntegral number']
+          draft = DraftAction point $ nativeDraft scoped child
           branch = Branch (Just child) (Just (keyBranch $ stateKey parent, draft)) origins
           next = owner { ownerNext = number + 1,
                          ownerBranches = Map.insert number branch (ownerBranches owner) }
@@ -470,6 +473,46 @@ expectedWarning warning = case tcWarning warning of
   UnsolvedMetaVariables{} -> True
   UnsolvedConstraints{} -> True
   _ -> False
+
+-- Reconstruct one original goal from native drafts along a checked descendant
+-- branch, then check the assembled expression again from the original parent.
+-- This neither serializes TCState nor mistakes the last solved leaf for the
+-- complete source proof. Parent/descendant states and external costs survive.
+reconstructGoal :: Session s -> GoalRef s -> StateRef s
+                -> IO (Either Failure (Transition s))
+reconstructGoal session goal descendant = request session (goalState goal) $ \owner initial ->
+  case drafts owner descendant of
+    Left failure -> pure (owner, Left failure)
+    Right actions -> case nativeActions actions of
+      Left failure -> pure (owner, Left failure)
+      Right (expressions, allocations) -> case Assembly.assemble (goalId goal) expressions of
+        Left reason -> pure (owner, Left $ KernelRejected reason)
+        Right assembled -> do
+          let Allocation name point = foldr maximumAllocation
+                (Allocation (initial ^. stFreshNameId) (initial ^. stFreshInteractionId)) allocations
+          check session owner (goalState goal) initial
+            (DraftAction (goalId goal) $ NativeDraft assembled $ Allocation name point) False
+ where
+  drafts owner ref
+    | keySession key /= sessionNonce session = Left ForeignSession
+    | keyEpoch key /= ownerEpoch owner = Left StaleEpoch
+    | otherwise = walk (keyBranch key) []
+   where
+    key = stateKey ref
+    root = keyBranch $ stateKey $ goalState goal
+    walk number actions
+      | number == root = Right actions
+      | otherwise = case Map.lookup number (ownerBranches owner) of
+          Nothing -> Left UnknownState
+          Just branch -> case branchTrail branch of
+            Just (parent, action) | parent < number -> walk parent (action:actions)
+            _ -> Left $ KernelRejected "native-reconstruction-not-a-descendant"
+  nativeActions [] = Right ([], [])
+  nativeActions (DraftAction point (NativeDraft expression allocation):rest) = do
+    (expressions, allocations) <- nativeActions rest
+    pure ((point, expression):expressions, allocation:allocations)
+  nativeActions _ = Left $ KernelFailure "native-reconstruction-missing-scoped-draft"
+  maximumAllocation (Allocation a b) (Allocation c d) = Allocation (max a c) (max b d)
 
 -- Rendering is only a presentation. The native tree, telescope, and its branch
 -- brand remain in the opaque evidence for the future in-process search.

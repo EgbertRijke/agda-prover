@@ -53,6 +53,7 @@ Each operation permits only its listed additional fields:
 | `give` | `state`, `goal_id`, `expression` | Child state, native evidence view, obligations |
 | `make-clause` | `state`, `goal_id`, `action` | Parent-bound native clause proposal, not a child state |
 | `apply-clause` | `state`, `goal_id`, `action` | Checked native helper/clause child, evidence view and dependent obligations |
+| `reconstruct-goal` | `state`, `goal_id`, `descendant` | Assemble native drafts from a descendant, recheck from the original goal's parent, return a provisional checked transition |
 | `infer-helper` | `state`, `goal_id`, `mode`, `application` | Parent-bound native helper signature, not a proof transition |
 | `solve-helper` | `state`, `goal_id`, `mode`, `application`, `limits`, `ranker`, `model_path`, `native_path` | Finite native helper search with the ordinary provisional candidate/cost result |
 | `solve-evidence` | `state`, `goal_id`, `limits`, `ranker`, `model_path`, `native_path`, `exclude_names`; optional `focused_model_path`, `focused_search` | Search status, provisional child/evidence, cumulative search cost, selected policy choices |
@@ -180,6 +181,26 @@ text can mention a hidden parent binder that must first be exposed in source.
 Do not paste it blindly or interpret a closed native branch as `verified`.
 Independent fresh checking remains mandatory. Autonomous clause selection and
 full workflow integration are separate migration tasks.
+
+## Native goal reconstruction
+
+`reconstruct-goal` addresses an original goal with `state` and `goal_id`, plus
+a `descendant` state key in the same session/epoch. The descendant must actually
+descend from that parent. Evicted descendants retain native draft ancestry and
+can be reconstructed without treating their old heap snapshot as evidence.
+
+Accepted source inputs are retained as scoped native drafts. The operation
+assembles solved child expressions using native interaction identities,
+preserving helper declarations, scopes, binders and clause structure. It does
+not parse display text, fabricate a missing assignment or use another branch's
+leaf. One native traversal expands draft dependencies with cycle protection.
+
+Agda checks the assembled draft again from the original parent under the usual
+owner/termination/warning rules. The operation returns a new provisional
+transition and charges its checking work; it does not mutate either input
+branch. Remaining child goals or hidden obligations prevent apparent closure.
+Source drift invalidates the epoch. General source patches, binder exposure,
+joint reconstruction and independent fresh validation remain separate duties.
 
 ## Helper inference
 
