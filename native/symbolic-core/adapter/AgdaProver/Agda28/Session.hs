@@ -12,6 +12,7 @@ module AgdaProver.Agda28.Session
   , Configuration, pinConfiguration, pinRuntimeConfiguration, withSessionConfiguration
   , withSessionConfigurationReuse
   , inspect, pending, tryExpression
+  , DependencySnapshot, dependencies, dependencyView, orderDependentGoals
   , solveEvidence, solveHelper, RefutationProposal, proposeRefutation, refutationView, refutationKind
   , Refutation.Kind (..)
   , ClauseProposal, makeClauses, clauseView, applyClause
@@ -25,7 +26,7 @@ module AgdaProver.Agda28.Session
 
 import Control.Concurrent (MVar, ThreadId, myThreadId, newMVar, modifyMVar, readMVar)
 import Control.Exception qualified as E
-import Control.Monad (unless, forM)
+import Control.Monad (unless, when, forM)
 import Control.Monad.Except (catchError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (runStateT)
@@ -71,6 +72,7 @@ import AgdaProver.Agda28.Recursion qualified as Recursion
 import AgdaProver.Agda28.DraftAssembly qualified as Assembly
 import AgdaProver.Agda28.Source qualified as Source
 import AgdaProver.Agda28.Refutation qualified as Refutation
+import AgdaProver.Agda28.Dependencies qualified as Dependencies
 import AgdaProver.Symbolic.Clause (ClauseAction)
 import AgdaProver.Symbolic.Evidence qualified as Search
 import AgdaProver.Symbolic.NNUE.Native (NativeScorer)
@@ -112,6 +114,18 @@ data HelperProposal s = HelperProposal (GoalRef s) Helpers.Snapshot TCState
 
 type role RefutationProposal nominal
 data RefutationProposal s = RefutationProposal (GoalRef s) Refutation.Snapshot
+
+type role DependencySnapshot nominal
+data DependencySnapshot s = DependencySnapshot (StateRef s) Dependencies.Snapshot
+
+dependencyView :: DependencySnapshot s -> Value
+dependencyView (DependencySnapshot parent snapshot) = object
+  ["parent" .= stateKey parent, "dependencies" .= Dependencies.view snapshot]
+
+orderDependentGoals :: StateRef s -> DependencySnapshot s -> [Int] -> Either Failure [Int]
+orderDependentGoals parent (DependencySnapshot original snapshot) selected
+  | stateKey parent /= stateKey original = Left $ KernelFailure "dependency-parent-mismatch"
+  | otherwise = Right $ Dependencies.orderGoals snapshot selected
 
 refutationKind :: RefutationProposal s -> Refutation.Kind
 refutationKind (RefutationProposal _ snapshot) = Refutation.kind snapshot
@@ -372,6 +386,23 @@ inspect session goal mode = request session (goalState goal) $ \owner state -> d
       snapshot <- observeGoal point mode
       pure $ either (Left . KernelFailure) Right (encodeGoal snapshot)
   pure (owner, result >>= id)
+
+-- Read-only native dependencies. The bounded traversal may be incomplete;
+-- that is a fallback observation, never proof of absent dependencies.
+dependencies :: Session s -> StateRef s -> Maybe Integer -> IO (Either Failure (DependencySnapshot s))
+dependencies session parent limit = request session parent $ \owner state -> do
+  used <- newIORef (0 :: Integer)
+  let step kind = liftIO $ do
+        allowed <- atomicModifyIORef' used $ \n ->
+          if maybe False (n >=) limit then (n, False) else (n+1, True)
+        when allowed $ charge (sessionWork session) $ \w -> case kind of
+          Dependencies.ReadDependency -> w { symbolicActions = symbolicActions w + 1,
+            dependencyQueries = dependencyQueries w + 1 }
+          Dependencies.WalkDependency -> w { symbolicActions = symbolicActions w + 1,
+            dependencyNodes = dependencyNodes w + 1 }
+        pure allowed
+  (result, _) <- kernel session state $ Dependencies.observe step
+  pure (owner, DependencySnapshot parent <$> result)
 
 -- Negative certificates are only proposed for an original source obligation,
 -- never an assigned prefix, a case branch or a speculative helper. The command

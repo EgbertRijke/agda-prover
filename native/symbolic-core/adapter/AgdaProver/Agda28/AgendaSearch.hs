@@ -28,7 +28,8 @@ data Settings = Settings
   , focused :: Bool, excluded :: [String]
   -- Soft priorities, not cutoffs: structural and macro alternatives stay queued.
   , structuralDelay :: Natural, macroDelay :: Natural
-  , initialMacroWork :: Natural, evidenceMacro :: Bool, actionLimit :: Maybe Integer }
+  , initialMacroWork :: Natural, evidenceMacro :: Bool, actionLimit :: Maybe Integer
+  , dependencyOrdering :: Bool }
 
 data Metrics = Metrics
   { schedulerSteps :: !Integer, modelItems :: !Integer, modelNanoseconds :: !Integer
@@ -135,7 +136,18 @@ advance native count run@(Run session settings initial baseline metrics owner tr
     if maybe False (attemptedMoves m >=) (actionLimit settings) then (m, False)
     else (m { attemptedMoves = attemptedMoves m + 1 }, True)
   planner state obligations = allowance >>= \left ->
-    if left == Just 0 then pure $ Right N.PlanningCensored else planReady state obligations
+    if left == Just 0 then pure $ Right N.PlanningCensored
+    else if not (dependencyOrdering settings) || length (pendingGoals obligations) < 2 ||
+        maybe False (<= toInteger (initialMacroWork settings)) left
+      then planReady state obligations
+      else S.dependencies session state (Just $ toInteger $ initialMacroWork settings) >>= \case
+        Left failure -> pure $ Left failure
+        Right snapshot -> do
+          trace $ object ["schema_version" .= ("agdaprover.symbolic-agenda-event.v1" :: String),
+            "event" .= ("goal-dependencies" :: String), "observation" .= S.dependencyView snapshot]
+          case S.orderDependentGoals state snapshot (pendingGoals obligations) of
+            Left failure -> pure $ Left failure
+            Right ordered -> planReady state obligations { pendingGoals = ordered }
   planReady state obligations = case pendingGoals obligations of
     [] -> pure $ Right $ N.Moves []
     point:_ -> case S.restoreGoalReference session (S.stateKey state) (fromIntegral point) of

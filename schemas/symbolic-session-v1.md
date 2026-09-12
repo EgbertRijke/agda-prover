@@ -72,6 +72,7 @@ Each operation permits only its listed additional fields:
 | --- | --- | --- |
 | `pending` | `state` | Open goal IDs, open metas, constraints |
 | `observe` | `state`, `goal_id`, `mode` | Structured observation v1 |
+| `dependencies` | `state`, `work_units` | Parent-bound conservative native dependency observation |
 | `give` | `state`, `goal_id`, `expression` | Child state, native evidence view, obligations |
 | `make-clause` | `state`, `goal_id`, `action` | Parent-bound native clause proposal, not a child state |
 | `apply-clause` | `state`, `goal_id`, `action` | Checked native helper/clause child, evidence view and dependent obligations |
@@ -121,6 +122,52 @@ means no interaction goals remain, but hidden metas or constraints do.
 `apparently-closed` requires all three to be empty. None means `verified`.
 
 ## Resource and ownership boundaries
+
+### Native dependency observations
+
+`dependencies` accepts a positive integer or null `work_units` allowance.
+It returns `{parent, dependencies}`, where the parent is the exact issued
+state key and the inner object uses `agdaprover.symbolic-dependencies.v1`:
+
+- `status`: `observed` or `censored`; the latter is an incomplete traversal,
+  not absent dependencies or a logical failure.
+- `independence`: always `unknown`; this contract grants no splitting,
+  cross-state reuse, discarded obligation or substitution-merging authority.
+- `constraint_count`: all awake/sleeping native constraints, conservatively
+  treated as a global coupling barrier rather than flattened delayed closures.
+- `reachable_instance_metas`: native meta identities seen in reachable types,
+  declarations and assignments. This is not all possible future instance work.
+- `unknown_reasons`: opaque/blocked/postponed structures found during traversal.
+- `goals`: observed interaction/meta IDs, known prerequisite interaction IDs,
+  reachable native meta IDs, and reachable declaration count.
+- `preferred_goal_order`: stable ascending known-prerequisite count, or original
+  order when censored, constrained, instance-dependent or opaque.
+- `proof_authority`: false.
+
+Native types/telescopes, local lets, sort annotations, level terms and local
+declaration/solved-meta references retain their identities. The traversal uses
+Agda's names-and-metas operations; ordinary term folds that skip sort annotations
+are not sufficient. Imported interfaces remain pinned and are not recursively
+expanded into a full library scan. Local declarations are looked up on demand
+through Agda; summary memoization and visited native identities terminate cycles.
+The observer is read-only and does not create or assign metas.
+
+`dependency_queries` counts reached goal/meta/declaration reads;
+`dependency_nodes` counts visited graph nodes. Both contribute to cumulative
+symbolic work, including censored/repeated observations, and physical budgets
+still apply. With ordering enabled, a multi-goal planning step borrows at most
+the initial macro slice for this observation. It skips the optional pass when
+the remaining allowance would leave no room beyond that slice. Incomplete
+observations fall back to original ordering; they do not suppress ordinary
+proof search. Single-goal plans do not pay for this pass.
+
+Snapshots are parent-branded. Every accepted move still updates one coupled
+Agda state, and the next planning step observes that new state. Unselected
+goals remain pending and are never promoted into the selection by this heuristic.
+Future elaboration can introduce new dependencies; this is intentionally not
+an independence proof or a nonspecifying-theorem classifier.
+
+### Exact application reuse
 
 Exact application reuse is task-local and never merges similar goals. Its key
 contains the full issued parent/session/epoch key, the interaction ID, and either
@@ -326,16 +373,19 @@ still requires no interactions, open metas or constraints.
 evidence search. `ranker` is `nnue` or `symbolic`; model/native paths are explicit
 nullable paths. Models are loaded once for this run. `focused_search` is boolean
 and `exclude_names` is the existing list of forbidden premise names. The optional
-`scheduling` object has exactly these fields (defaults shown):
+`scheduling` object has the first four required fields below and an optional
+`dependency_ordering` boolean (defaults shown):
 
 ```json
-{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true}
+{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true}
 ```
 
 Delays are nonnegative scheduling priorities, not proof-depth restrictions.
 The initial macro slice is positive and grows on retry. `evidence_macro` is a
 feature flag for the coarse fallback; disabling it restricts the configured
 fragment and must not be confused with a general impossibility result.
+`dependency_ordering` enables the conservative read described below. It changes
+goal order, never the authorized selection or coupled-state semantics.
 
 Success returns `status: ready`, `run`, `cost`, `proof_authority: false`.
 A run key has exactly `{session, epoch, run, revision}`; all counters are

@@ -48,6 +48,7 @@ data Operation = Pending StateKey | Observe StateKey InteractionId P.Observation
   | RunCost Run.Key | DiscardSearch Run.Key
   | InferHelper StateKey InteractionId P.ObservationMode DraftExpression
   | ProposeRefutation StateKey InteractionId (Maybe Integer)
+  | Dependencies StateKey (Maybe Integer)
   | SolveHelper StateKey InteractionId Search.SearchLimits Policy.RankingMode (Maybe FilePath) (Maybe FilePath)
       P.ObservationMode DraftExpression
   | Cost | Cancel | Close
@@ -58,13 +59,16 @@ data ProtocolFailure = InvalidFrameBudget | UnterminatedFrame | FrameBudgetExhau
 instance E.Exception ProtocolFailure
 
 -- Soft ordering/slice settings, not proof-size or depth restrictions.
-data Scheduling = Scheduling Natural Natural Natural Bool
+data Scheduling = Scheduling Natural Natural Natural Bool Bool
 instance FromJSON Scheduling where
   parseJSON = withObject "scheduling" $ \o -> do
-    unless (Set.fromList (KM.keys o) == Set.fromList
-      ["structural_delay", "macro_delay", "initial_macro_work", "evidence_macro"]) $ fail "invalid scheduling fields"
-    scheduling@(Scheduling _ _ initial _) <- Scheduling <$> o .: "structural_delay"
+    let required = Set.fromList ["structural_delay", "macro_delay", "initial_macro_work", "evidence_macro"]
+        supplied = Set.fromList (KM.keys o)
+    unless (required `Set.isSubsetOf` supplied && supplied `Set.isSubsetOf` Set.insert "dependency_ordering" required) $
+      fail "invalid scheduling fields"
+    scheduling@(Scheduling _ _ initial _ _) <- Scheduling <$> o .: "structural_delay"
       <*> o .: "macro_delay" <*> o .: "initial_macro_work" <*> o .: "evidence_macro"
+      <*> (o .:? "dependency_ordering" .!= True)
     unless (initial > 0) $ fail "initial macro allowance must be positive"
     pure scheduling
 
@@ -108,6 +112,11 @@ parseRequest = withObject "session request" $ \o -> do
     "give" -> do
       fields ["state", "goal_id", "expression"]
       Give <$> o .: "state" <*> goal <*> (DraftExpression <$> o .: "expression")
+    "dependencies" -> do
+      fields ["state", "work_units"]
+      limit <- o .:? "work_units"
+      unless (maybe True (> (0 :: Integer)) limit) $ fail "dependency work must be positive or null"
+      Dependencies <$> o .: "state" <*> pure limit
     "propose-refutation" -> do
       fields ["state", "goal_id", "work_units"]
       limit <- o .:? "work_units"
@@ -137,7 +146,7 @@ parseRequest = withObject "session request" $ \o -> do
         ("nnue" :: String) -> pure Policy.Learned
         "symbolic" -> pure Policy.Symbolic
         _ -> fail "unknown ranker"
-      scheduling <- if KM.member "scheduling" o then o .: "scheduling" else pure $ Scheduling 2 8 64 True
+      scheduling <- if KM.member "scheduling" o then o .: "scheduling" else pure $ Scheduling 2 8 64 True True
       StartSearch <$> o .: "state" <*> o .: "limits" <*> pure mode <*> o .: "model_path"
         <*> o .: "focused_model_path" <*> o .: "native_path" <*> o .: "focused_search"
         <*> o .: "exclude_names" <*> pure scheduling
@@ -277,18 +286,19 @@ serve output session root = do
 
 perform :: S.Session s -> Run.Store s -> (Value -> IO ()) -> (Value -> IO ()) -> Operation -> IO Value
 perform session runs emit emitRun operation = case operation of
-  StartSearch key limits mode modelPath focusedPath nativePath focused excluded (Scheduling structural macro initial enabled) selection actionLimit ->
+  StartSearch key limits mode modelPath focusedPath nativePath focused excluded (Scheduling structural macro initial enabled dependenciesEnabled) selection actionLimit ->
     resolved key $ \root -> do
       loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
       focusedModel <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.FocusedBranch)) focusedPath
       case ((++) <$> loaded <*> focusedModel) >>= Policy.models of
         Left reason -> pure $ failureView $ KernelFailure ("model-configuration:" ++ reason)
-        Right models -> Run.start runs root (G.Settings limits mode models focused excluded structural macro initial enabled actionLimit) nativePath selection
+        Right models -> Run.start runs root (G.Settings limits mode models focused excluded structural macro initial enabled actionLimit dependenciesEnabled) nativePath selection
   AdvanceSearch key steps limits actionLimit -> Run.advance runs key steps limits actionLimit emitRun
   RunCost key -> Run.snapshot runs key
   DiscardSearch key -> Run.discard runs key
   Pending key -> resolved key $ \ref -> result toJSON <$> S.pending session ref
   Observe key goal mode -> resolvedGoal key goal $ \ref -> result id <$> S.inspect session ref mode
+  Dependencies key limit -> resolved key $ \ref -> result S.dependencyView <$> S.dependencies session ref limit
   ProposeRefutation key goal limit -> resolvedGoal key goal $ \ref ->
     result S.refutationView <$> S.proposeRefutation session ref limit
   MakeClause key goal action -> resolvedGoal key goal $ \ref ->

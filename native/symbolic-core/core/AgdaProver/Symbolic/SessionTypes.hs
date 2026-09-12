@@ -79,6 +79,7 @@ data Work = Work
   { requests :: !Integer, checkingAttempts :: !Integer, replayedActions :: !Integer
   , symbolicActions :: !Integer
   , exactReuseQueries :: !Integer, exactReuseHits :: !Integer
+  , dependencyQueries :: !Integer, dependencyNodes :: !Integer
   , refutationQueries :: !Integer, refutationAssignments :: !Integer, refutationCandidates :: !Integer
   , clauseQueries :: !Integer, helperQueries :: !Integer
   , acceptedChecks :: !Integer, rejectedChecks :: !Integer, cancelledRequests :: !Integer
@@ -90,6 +91,7 @@ emptyWork = Work
   { requests = 0, checkingAttempts = 0, replayedActions = 0, clauseQueries = 0, helperQueries = 0
   , symbolicActions = 0
   , exactReuseQueries = 0, exactReuseHits = 0
+  , dependencyQueries = 0, dependencyNodes = 0
   , refutationQueries = 0, refutationAssignments = 0, refutationCandidates = 0
   , acceptedChecks = 0, rejectedChecks = 0, cancelledRequests = 0
   , inputBytesRead = 0, elapsedNanoseconds = 0, cpuPicoseconds = 0 }
@@ -99,6 +101,7 @@ instance ToJSON Work where
     ["requests" .= requests w, "checking_attempts" .= checkingAttempts w,
      "symbolic_actions" .= symbolicActions w,
      "exact_reuse_queries" .= exactReuseQueries w, "exact_reuse_hits" .= exactReuseHits w,
+     "dependency_queries" .= dependencyQueries w, "dependency_nodes" .= dependencyNodes w,
      "refutation_queries" .= refutationQueries w,
      "refutation_assignments" .= refutationAssignments w,
      "refutation_candidates" .= refutationCandidates w,
