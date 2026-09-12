@@ -83,10 +83,10 @@ data GlobalInventory = GlobalInventory [A.Expr] (Set.Set QName) (Maybe Recursion
 -- conversion and universe comparison remain Agda's responsibility.
 data ExpectedShape = FunctionShape | SortShape | FamilyShape QName | LocalShape Int deriving Eq
 
-run :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode -> Maybe (NativeScorer s)
+run :: IterationDepth -> IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode -> Maybe (NativeScorer s)
     -> Bool -> (Value -> IO ()) -> String -> [String] -> InteractionId -> Maybe Recursion.Owner
     -> (A.Expr -> TCM ()) -> I.Type -> TCM Result
-run stats limits models mode native enableFocused emit namespace excluded point owner validate target = do
+run startDepth stats limits models mode native enableFocused emit namespace excluded point owner validate target = do
   pruned <- liftIO $ newIORef False
   let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) enableFocused
   (currentForbidden, userExcluded) <- excludedGlobals excluded
@@ -117,7 +117,7 @@ run stats limits models mode native enableFocused emit namespace excluded point 
           Nothing | workExhausted observed -> pure $ Result WorkExhausted Nothing []
           Nothing | not widened -> pure $ Result FragmentExhausted Nothing []
           Nothing -> iterateDepth (depth + 1)
-  iterateDepth 0
+  iterateDepth $ iterationDepth startDepth
 
 -- Finite typed helper proposals use the same policy/checking boundary as
 -- ordinary evidence. Scheduling which application to generalize belongs to

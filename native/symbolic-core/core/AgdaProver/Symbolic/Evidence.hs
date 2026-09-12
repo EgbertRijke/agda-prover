@@ -2,7 +2,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Symbolic.Evidence
-  ( SearchLimits (..), SearchStats (..), emptyStats, SearchStatus (..), statusName ) where
+  ( SearchLimits (..), SearchStats (..), emptyStats, SearchStatus (..), statusName
+  , IterationDepth, initialDepth, retryDepth, iterationDepth ) where
 
 import Control.Monad (unless)
 import Data.Aeson
@@ -24,6 +25,22 @@ statusName :: SearchStatus -> String
 statusName FoundCandidate = "candidate"
 statusName FragmentExhausted = "unsolved"
 statusName WorkExhausted = "resource-exhausted"
+
+-- A restarting iteration bound, not a proof or cached substitution. The
+-- unfinished iteration must run again; only earlier completed iterations are
+-- omitted. The agenda retains this value with its immutable parent and goal.
+newtype IterationDepth = IterationDepth Int deriving (Eq, Show)
+
+initialDepth :: IterationDepth
+initialDepth = IterationDepth 0
+
+iterationDepth :: IterationDepth -> Int
+iterationDepth (IterationDepth depth) = depth
+
+retryDepth :: SearchStats -> IterationDepth
+retryDepth stats
+  | workExhausted stats = IterationDepth $ max 0 $ currentDepth stats
+  | otherwise = initialDepth
 
 data SearchStats = SearchStats
   { workUnits :: !Integer, checkerQueries :: !Integer, inferenceQueries :: !Integer

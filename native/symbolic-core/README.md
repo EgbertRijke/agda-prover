@@ -181,6 +181,12 @@ unknown results keep the operation. User clause commands are unchanged.
 Scheduling slices keep the queue and alternatives after provisional solutions.
 Coarse evidence search runs in soft, increasing work slices and yields to other
 branches; retries are charged, not treated as free continuation inside Agda.
+Retries retain the last unfinished iterative-deepening level with the exact
+parent and goal, avoiding another pass over completed shallower levels. The
+unfinished level is replayed; no speculative substitution or checker stack is
+cached. `evidence_depth_reuse=false` restores restarting at depth zero. The
+setting is reported in the agenda cost receipt and does not change one-step
+operation or the direct `solve-evidence` command.
 By default, an exhausted retry's queue priority includes its measured work,
 so doubling allowances cannot monopolize search ahead of cheap alternatives.
 `retry_work_ordering=false` retains the uniform-cost ablation. No continuation

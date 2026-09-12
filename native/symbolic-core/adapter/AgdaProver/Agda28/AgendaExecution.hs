@@ -23,7 +23,7 @@ import AgdaProver.Symbolic.SessionTypes
 
 data Move s
   = Evidence (S.GoalRef s)
-  | SlicedEvidence (S.GoalRef s) Natural
+  | SlicedEvidence (S.GoalRef s) Natural E.IterationDepth
   | Term (S.TermProposal s)
   | Clause (S.GoalRef s) ClauseAction
   | PlannedClause (S.ClauseMove s)
@@ -40,7 +40,8 @@ data Config s n = Config
   , policyTrace :: Value -> IO ()
   , searchCost :: E.SearchStats -> IO ()
   , retryPenalty :: E.SearchStats -> Natural
-  , accepted :: S.Transition s -> IO () }
+  , accepted :: S.Transition s -> IO ()
+  , reuseEvidenceDepth :: Bool }
 
 -- Selection is caller authority, not an independence claim. Unselected goals
 -- remain in the same native state; newly created AND children inherit selection.
@@ -48,7 +49,7 @@ data Config s n = Config
 -- A refinement replaces one obligation with fresh identifiers, which Agda
 -- appends after unrelated source goals. Those identifiers are not priorities.
 data SearchState s = SearchState (S.StateRef s) (Maybe (Set.Set Int)) [Int] (Maybe StateKey)
-data Continuation s = RetryEvidence (SearchState s) (S.GoalRef s) Natural
+data Continuation s = RetryEvidence (SearchState s) (S.GoalRef s) Natural E.IterationDepth
 type Queue s = A.Agenda (SearchState s) (Move s) (Continuation s)
 
 -- An exhausted coarse evidence attempt is censored, not a declined branch.
@@ -127,7 +128,7 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
           Moves moves -> pure $ A.Open moves
           PlanningCensored -> throwError PlanningAllowanceExhausted
     , A.apply = execute
-    , A.resume = \(RetryEvidence state goal allowance) -> execute state $ SlicedEvidence goal allowance
+    , A.resume = \(RetryEvidence state goal allowance depth) -> execute state $ SlicedEvidence goal allowance depth
     -- Identical issued keys witness the same immutable branch only. Equal
     -- printed goals and equal endpoint types never authorize state merging.
     , A.sameState = \(SearchState a sa oa pa) (SearchState b sb ob pb) ->
@@ -137,7 +138,7 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
     if not allowed then throwError ActionAllowanceExhausted else pure ()
     let goal = case move of
           Evidence g -> g
-          SlicedEvidence g _ -> g
+          SlicedEvidence g _ _ -> g
           Term proposal -> S.termProposalGoal proposal
           Clause g _ -> g
           PlannedClause proposal -> S.clauseMoveGoal proposal
@@ -152,14 +153,17 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
         Evidence _ -> search current Nothing $ S.solveEvidence session goal (moveLimits config)
           (models config) (ranking config) (scorer config) (focused config)
           (excluded config) (policyTrace config)
-        SlicedEvidence _ allowance ->
+        SlicedEvidence _ allowance depth ->
           -- A soft scheduling slice, not an additional proof-search cutoff.
-          -- Retry from the same immutable parent with increasing allowance.
+          -- Retry the unfinished depth from the same immutable parent with an
+          -- increasing allowance. Completed earlier iterations need not rerun.
           -- Repeated work is fully charged; no inner Agda continuation is claimed.
           let slice = max 1 $ toInteger allowance
               available = maybe slice (min slice) $ E.workUnitLimit $ moveLimits config
-              again = RetryEvidence current goal (2 * max 1 allowance)
-          in search current (Just again) $ S.solveEvidence session goal (E.SearchLimits $ Just available)
+              starting = if reuseEvidenceDepth config then depth else E.initialDepth
+              again cost = RetryEvidence current goal (2 * max 1 allowance) $
+                if reuseEvidenceDepth config then E.retryDepth cost else E.initialDepth
+          in search current (Just again) $ S.solveEvidenceAtDepth starting session goal (E.SearchLimits $ Just available)
             (models config) (ranking config) (scorer config) (focused config)
             (excluded config) (policyTrace config)
         Helper _ view expression -> search current Nothing $ S.solveHelper session goal (moveLimits config)
@@ -170,7 +174,7 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
     case result of
       Left failure -> declined failure
       Right (E.WorkExhausted, _, _) -> case continuation of
-        Just again -> pure $ A.Deferred (retryPenalty config cost) again
+        Just again -> pure $ A.Deferred (retryPenalty config cost) (again cost)
         Nothing -> throwError $ MoveAllowanceExhausted cost
       Right (E.FragmentExhausted, Nothing, _) -> pure A.Declined
       Right (E.FoundCandidate, Just next, _) -> transition current $ Right next

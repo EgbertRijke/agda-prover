@@ -30,7 +30,8 @@ data Settings = Settings
   , structuralDelay :: Natural, macroDelay :: Natural
   , initialMacroWork :: Natural, evidenceMacro :: Bool, actionLimit :: Maybe Integer
   , dependencyOrdering :: Bool, depthLimit :: Maybe Natural, progressOrdering :: Bool
-  , retryWorkOrdering :: Bool, jointConstructorPropagation :: Bool, multiSubjectClauses :: Bool }
+  , retryWorkOrdering :: Bool, jointConstructorPropagation :: Bool, multiSubjectClauses :: Bool
+  , evidenceDepthReuse :: Bool }
 
 data Metrics = Metrics
   { schedulerSteps :: !Integer, modelItems :: !Integer, modelNanoseconds :: !Integer
@@ -115,6 +116,7 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "depth_unit" .= ("accepted-native-branch-transition" :: String),
     "ordering" .= (if progressOrdering settings then "cost-plus-obligations-v2" else "cost-only-v1" :: String),
     "retry_ordering" .= (if retryWorkOrdering settings then "spent-work-v1" else "uniform-v1" :: String),
+    "evidence_depth_reuse" .= evidenceDepthReuse settings,
     "joint_constructor_propagation" .= jointConstructorPropagation settings,
     "multi_subject_clauses" .= multiSubjectClauses settings,
     "model_items_scored" .= modelItems measured, "model_elapsed_ns" .= modelNanoseconds measured,
@@ -249,7 +251,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
                       ++ A.rankedProposals (structuralDelay settings)
                             [N.PlannedClause action | (action, _) <- clauseMoves,
                               multiSubjectClauses settings || not (S.clauseMoveIsBatch action)]
-                      ++ [A.Proposal (N.SlicedEvidence goal $ initialMacroWork settings)
+                      ++ [A.Proposal (N.SlicedEvidence goal (initialMacroWork settings) E.initialDepth)
                             (macroDelay settings) | evidenceMacro settings]
   constructorGoals _ [] = pure $ Right $ S.CompleteTerms []
   constructorGoals state (point:rest) =
@@ -275,7 +277,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
             modifyIORef' metrics (\m -> m { schedulerSteps = schedulerSteps m + 1 }) >> pure True)
           chargeAction recordEvent trace recordSearch
           (\stats -> if retryWorkOrdering settings then fromInteger $ max 0 $ E.workUnits stats else 0)
-          accepted
+          accepted (evidenceDepthReuse settings)
     N.stepWithDepth (depthLimit settings) session config queue >>= \case
       N.Progress next -> go refutation (remaining-1) next
       N.Candidate state next -> pure $ Candidate state $ saved refutation next

@@ -420,12 +420,12 @@ evidence search. `ranker` is `nnue` or `symbolic`; model/native paths are explic
 nullable paths. Models are loaded once for this run. `focused_search` is boolean
 and `exclude_names` is the existing list of forbidden premise names. The optional
 `scheduling` object has the first four required fields below and optional
-`dependency_ordering`, `progress_ordering`, `retry_work_ordering`,
+`dependency_ordering`, `progress_ordering`, `retry_work_ordering`, `evidence_depth_reuse`,
 `joint_constructor_propagation` and `multi_subject_clauses` booleans
 (defaults shown):
 
 ```json
-{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true,"joint_constructor_propagation":true,"multi_subject_clauses":true}
+{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true,"evidence_depth_reuse":true,"joint_constructor_propagation":true,"multi_subject_clauses":true}
 ```
 
 Delays are nonnegative scheduling priorities, not proof-depth restrictions.
@@ -452,6 +452,19 @@ continuation retains finite priority and remains available. This is scheduling
 weight only: the physical ledger is neither charged twice nor reset. The cost
 receipt reports `retry_ordering: spent-work-v1`, or `uniform-v1` for the explicit
 false ablation. One-step search has no macro retries and is unaffected.
+
+`evidence_depth_reuse` retains the unfinished iterative-deepening level after
+an evidence attempt is censored. Retrying that same immutable parent/goal starts
+at this level, rather than repeating already completed shallower iterations.
+The unfinished iteration is replayed, not skipped, and all work actually
+performed is charged. The continuation contains no speculative metavariable
+assignment, candidate proof or suspended Agda stack. Its model/visibility
+configuration is fixed by the owning run. Candidate reconstruction and fresh
+checking remain unchanged. False restarts every attempt at depth zero; the
+agenda cost receipt includes the effective boolean. This additive option does
+not change one-step behavior or the direct `solve-evidence` request, which
+continues to start at zero. Within an attempt, the initial level is recoverable
+as `current_depth - depth_iterations + 1` when at least one iteration ran.
 
 `joint_constructor_propagation` offers target-directed constructor closures for
 other selected pending goals with positively observed dependencies on selected

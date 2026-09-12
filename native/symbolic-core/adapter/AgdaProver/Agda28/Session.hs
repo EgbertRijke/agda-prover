@@ -13,7 +13,7 @@ module AgdaProver.Agda28.Session
   , withSessionConfigurationReuse
   , inspect, pending, tryExpression
   , DependencySnapshot, dependencies, dependencyView, orderDependentGoals, constrainingGoals
-  , solveEvidence, solveHelper, RefutationProposal, proposeRefutation, refutationView, refutationKind
+  , solveEvidence, solveEvidenceAtDepth, solveHelper, RefutationProposal, proposeRefutation, refutationView, refutationKind
   , Refutation.Kind (..)
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
@@ -551,9 +551,16 @@ solveEvidence :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
               -> (Value -> IO ())
               -> IO (Search.SearchStats, Either Failure
                    (Search.SearchStatus, Maybe (Transition s), [(T.Text,T.Text)]))
-solveEvidence session goal limits models mode native enableFocused excluded emit =
+solveEvidence = solveEvidenceAtDepth Search.initialDepth
+
+solveEvidenceAtDepth :: Search.IterationDepth -> Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
+                     -> Policy.RankingMode -> Maybe (NativeScorer n) -> Bool -> [String]
+                     -> (Value -> IO ())
+                     -> IO (Search.SearchStats, Either Failure
+                          (Search.SearchStatus, Maybe (Transition s), [(T.Text,T.Text)]))
+solveEvidenceAtDepth depth session goal limits models mode native enableFocused excluded emit =
   runGoalSearch session goal $ \stats namespace point origin validate target ->
-    Search.run stats limits models mode native enableFocused emit namespace excluded point origin validate target
+    Search.run depth stats limits models mode native enableFocused emit namespace excluded point origin validate target
 
 solveHelper :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
             -> Policy.RankingMode -> Maybe (NativeScorer n) -> ObservationMode -> DraftExpression
