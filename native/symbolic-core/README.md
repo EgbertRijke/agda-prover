@@ -167,6 +167,11 @@ functions and function-valued record projections share this path, including
 hidden/instance binders. One function operand is specialized per proposal;
 other operands retain ordinary holes or inference, and unspecialized applications
 remain available. Occurrence in the goal never grants premise visibility.
+The hint includes Agda's weak-head view of a named result type and of an
+already authorized callable. Thus transparent aliases can remain useful even
+when elaboration exposes their implementation in the goal. Proposals still
+use the authorized source expression, not a private implementation name;
+abstract definitions remain opaque under Agda's reduction rules.
 `target_function_operands=false` disables these additional proposals and their
 observations for ablation. The run receipt records the setting across slices.
 `application_generation_steps` counts specialized-spine construction against

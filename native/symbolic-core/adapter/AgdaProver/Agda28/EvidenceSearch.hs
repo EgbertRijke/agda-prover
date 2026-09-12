@@ -296,10 +296,17 @@ primitiveProposals options stats limits models mode native emit namespace exclud
   mentioned <- if not targetFunctions then pure Nothing else localTCState $ attempt runtime $ do
     available <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
     if not available then pure Nothing else do
-      expression <- reify =<< instantiateFull target
+      instantiated <- instantiateFull target
+      expression <- reify instantiated
+      exposed <- localTCState $ attempt runtime $ do
+        expose <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+        if expose then Just <$> (reify =<< reduce instantiated) else pure Nothing
       -- Include names used as values and both projection presentations.
+      -- Keep both the source view and Agda's weak-head view: a named result
+      -- family can hide its callable operands until the family is reduced.
       -- Reification is Agda abstract syntax, not parsing a display string.
-      pure $ Just $ foldExpr nameKeys expression
+      pure $ Just $ Set.union (foldExpr nameKeys expression)
+        (maybe Set.empty (foldExpr nameKeys) exposed)
   scope <- getScope
   (expected, _) <- localTCState $ signature target
   recursive <- case recursion of
@@ -388,17 +395,30 @@ primitiveProposals options stats limits models mode native emit namespace exclud
                 pure $ Just (syntax, shape, picked)
   headSignatures <- forM ranked $ \(Seed expression _ _, picked) -> do
     observed <- localTCState $ attempt runtime $
-      queryInferWith DontExpandLast runtime expression $ \(_, ty) -> do
+      queryInferWith DontExpandLast runtime expression $ \(value, ty) -> do
         (result, infos) <- signature ty
-        pure $ Just (result, infos, if noMetas ty then Just ty else Nothing)
+        let originalKeys = headKeys expression
+            goalKeys = maybe Set.empty id mentioned
+        -- Elaboration can expose a transparent alias's implementation in a
+        -- dependent result. Match the authorized callable's weak-head view as
+        -- well as its source identity. This never admits the implementation
+        -- as a premise: the candidate remains the original scoped expression.
+        aliasKeys <- if targetFunctions && not (null infos) && not (Set.null goalKeys)
+            && Set.disjoint originalKeys goalKeys then localTCState $ attempt runtime $ do
+          allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+          if allowed then Just . headKeys <$> (reify =<< reduce =<< instantiateFull value)
+            else pure Nothing
+          else pure Nothing
+        pure $ Just (result, infos, if noMetas ty then Just ty else Nothing,
+          Set.union originalKeys $ maybe Set.empty id aliasKeys)
     pure (expression, picked, observed)
   -- Any positively observed Pi is callable, including telescopes containing
   -- only hidden or instance binders. ExpectedShape separately models the
   -- result after omission and is not the authority for this distinction.
-  let targetOperands = [expression | (expression, _, Just (_, _:_, _)) <- headSignatures,
-        not $ Set.disjoint (headKeys expression) (maybe Set.empty id mentioned)]
+  let targetOperands = [expression | (expression, _, Just (_, _:_, _, keys)) <- headSignatures,
+        not $ Set.disjoint keys (maybe Set.empty id mentioned)]
   heads <- fmap concat $ forM headSignatures $ \(expression, picked, observed) -> do
-    let (result, infos, closedType) = maybe (Nothing, [], Nothing) id observed
+    let (result, infos, closedType, _) = maybe (Nothing, [], Nothing, Set.empty) id observed
         terminal = case reverse infos of
           shape:_ -> argumentResult shape
           [] -> result

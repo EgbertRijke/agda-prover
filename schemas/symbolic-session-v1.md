@@ -492,6 +492,14 @@ or proof authority. All hiding and modality annotations remain on the native
 application spine. This includes callables with only hidden/instance arguments,
 function-valued projections and functions supplied as values.
 
+Occurrences include both the instantiated source view and Agda's weak-head
+view of the target. Authorized callables additionally retain their weak-head
+head identities, so transparent aliases can match an implementation exposed
+by elaboration. These observations are charged inference queries and follow
+Agda's abstraction boundary. They do not add implementation names to the
+premise inventory or merge proofs: candidates retain their original scoped
+callables and require the same checked transition and fresh validation.
+
 Each proposal from this option fixes one function slot; other slots remain
 ordinary obligations or inferred arguments. Existing application prefixes remain available and
 the existing head NNUE ordering is retained. False skips the extra observations
