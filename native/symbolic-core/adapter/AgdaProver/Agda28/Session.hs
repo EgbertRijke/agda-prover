@@ -12,12 +12,12 @@ module AgdaProver.Agda28.Session
   , Configuration, pinConfiguration, pinRuntimeConfiguration, withSessionConfiguration
   , withSessionConfigurationReuse
   , inspect, pending, tryExpression
-  , DependencySnapshot, dependencies, dependencyView, orderDependentGoals
+  , DependencySnapshot, dependencies, dependencyView, orderDependentGoals, constrainingGoals
   , solveEvidence, solveHelper, RefutationProposal, proposeRefutation, refutationView, refutationKind
   , Refutation.Kind (..)
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
-  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, proposeTerms, applyTerm
+  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, proposeTerms, proposeConstructors, applyTerm
   , ClauseMove, clauseMoveGoal, applyClauseMove, ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
@@ -126,6 +126,11 @@ orderDependentGoals :: StateRef s -> DependencySnapshot s -> [Int] -> Either Fai
 orderDependentGoals parent (DependencySnapshot original snapshot) selected
   | stateKey parent /= stateKey original = Left $ KernelFailure "dependency-parent-mismatch"
   | otherwise = Right $ Dependencies.orderGoals snapshot selected
+
+constrainingGoals :: StateRef s -> DependencySnapshot s -> [Int] -> Either Failure [Int]
+constrainingGoals parent (DependencySnapshot original snapshot) selected
+  | stateKey parent /= stateKey original = Left $ KernelFailure "dependency-parent-mismatch"
+  | otherwise = Right $ Dependencies.constrainingGoals snapshot selected
 
 refutationKind :: RefutationProposal s -> Refutation.Kind
 refutationKind (RefutationProposal _ snapshot) = Refutation.kind snapshot
@@ -539,7 +544,21 @@ solveHelper session goal limits models mode native view expression emit =
 proposeTerms :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
              -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
              -> IO (Search.SearchStats, Either Failure (TermProposals s))
-proposeTerms session goal limits models mode native excluded emit = do
+proposeTerms = proposeTermsUsing Search.primitiveProposals
+
+proposeConstructors :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
+                    -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
+                    -> IO (Search.SearchStats, Either Failure (TermProposals s))
+proposeConstructors = proposeTermsUsing Search.constructorProposals
+
+type TermGenerator n = IORef Search.SearchStats -> Search.SearchLimits -> Policy.Models
+  -> Policy.RankingMode -> Maybe (NativeScorer n) -> (Value -> IO ()) -> String -> [String]
+  -> Maybe Recursion.Owner -> InteractionId -> I.Type -> TCM [(A.Expr, [(T.Text, T.Text)])]
+
+proposeTermsUsing :: TermGenerator n -> Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
+                 -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
+                 -> IO (Search.SearchStats, Either Failure (TermProposals s))
+proposeTermsUsing generate session goal limits models mode native excluded emit = do
   stats <- newIORef Search.emptyStats
   outcome <- request session (goalState goal) $ \owner state -> do
     ledger <- work session
@@ -551,7 +570,7 @@ proposeTerms session goal limits models mode native excluded emit = do
       exists <- elem point <$> openInteractionPoints
       if not exists then pure $ Left UnknownGoal else withInteractionId point $ do
         target <- getMetaTypeInContext =<< lookupInteractionId point
-        Right <$> Search.primitiveProposals stats limits models mode native emit namespace excluded origin target
+        Right <$> generate stats limits models mode native emit namespace excluded origin point target
     -- The queue deliberately leaves many proposal payloads unevaluated. Seal
     -- their small allocation watermark now: mapping nativeDraft lazily over
     -- the catalogue would retain the entire speculative TCState until the

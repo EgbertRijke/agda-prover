@@ -30,7 +30,7 @@ data Settings = Settings
   , structuralDelay :: Natural, macroDelay :: Natural
   , initialMacroWork :: Natural, evidenceMacro :: Bool, actionLimit :: Maybe Integer
   , dependencyOrdering :: Bool, depthLimit :: Maybe Natural, progressOrdering :: Bool
-  , retryWorkOrdering :: Bool }
+  , retryWorkOrdering :: Bool, jointConstructorPropagation :: Bool }
 
 data Metrics = Metrics
   { schedulerSteps :: !Integer, modelItems :: !Integer, modelNanoseconds :: !Integer
@@ -115,6 +115,7 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "depth_unit" .= ("accepted-native-branch-transition" :: String),
     "ordering" .= (if progressOrdering settings then "cost-plus-obligations-v2" else "cost-only-v1" :: String),
     "retry_ordering" .= (if retryWorkOrdering settings then "spent-work-v1" else "uniform-v1" :: String),
+    "joint_constructor_propagation" .= jointConstructorPropagation settings,
     "model_items_scored" .= modelItems measured, "model_elapsed_ns" .= modelNanoseconds measured,
     "models" .= P.modelIdentities (models settings), "session_cost" .= physical]
 
@@ -164,18 +165,25 @@ advance native count run@(Run session settings initial baseline metrics owner tr
     else (m { attemptedMoves = attemptedMoves m + 1 }, True)
   planner state obligations = allowance >>= \left ->
     if left == Just 0 then pure $ Right N.PlanningCensored
-    else if not (dependencyOrdering settings) || length (pendingGoals obligations) < 2 ||
+    else if not (dependencyOrdering settings || jointConstructorPropagation settings) || length (pendingGoals obligations) < 2 ||
         maybe False (<= toInteger (initialMacroWork settings)) left
-      then planReady state obligations
+      then planReady state [] obligations
       else S.dependencies session state (Just $ toInteger $ initialMacroWork settings) >>= \case
         Left failure -> pure $ Left failure
         Right snapshot -> do
           trace $ object ["schema_version" .= ("agdaprover.symbolic-agenda-event.v1" :: String),
             "event" .= ("goal-dependencies" :: String), "observation" .= S.dependencyView snapshot]
-          case S.orderDependentGoals state snapshot (pendingGoals obligations) of
+          let selected = pendingGoals obligations
+              selection = do
+                ordered <- if dependencyOrdering settings
+                  then S.orderDependentGoals state snapshot selected else Right selected
+                constraining <- if jointConstructorPropagation settings
+                  then S.constrainingGoals state snapshot selected else Right []
+                Right (ordered, constraining)
+          case selection of
             Left failure -> pure $ Left failure
-            Right ordered -> planReady state obligations { pendingGoals = ordered }
-  planReady state obligations = case pendingGoals obligations of
+            Right (ordered, constraining) -> planReady state constraining obligations { pendingGoals = ordered }
+  planReady state constraining obligations = case pendingGoals obligations of
     [] -> pure $ Right $ N.Moves []
     point:_ -> case S.restoreGoalReference session (S.stateKey state) (fromIntegral point) of
       Left failure -> pure $ Left failure
@@ -194,15 +202,40 @@ advance native count run@(Run session settings initial baseline metrics owner tr
               (clauseCost, clauses) <- S.proposeClauseActions session goal nextBudget
                 (models settings) (ranking settings) native trace
               recordSearch clauseCost
-              pure $ case clauses of
-                Left failure -> Left failure
-                Right S.CensoredClauses{} -> Right N.PlanningCensored
-                Right (S.CompleteClauses clauseMoves) -> Right $ N.Moves $
-                  A.rankedProposals 0 (map N.Term termMoves)
-                  ++ A.rankedProposals (structuralDelay settings)
-                        [N.PlannedClause action | (action, _) <- clauseMoves]
-                  ++ [A.Proposal (N.SlicedEvidence goal $ initialMacroWork settings)
-                        (macroDelay settings) | evidenceMacro settings]
+              case clauses of
+                Left failure -> pure $ Left failure
+                Right S.CensoredClauses{} -> pure $ Right N.PlanningCensored
+                Right (S.CompleteClauses clauseMoves) -> do
+                  -- Later selected obligations can constrain earlier definitions
+                  -- through Agda unification. Only target-directed constructor
+                  -- closures are observed here, not whole premise catalogues or
+                  -- hidden searches. Every move still owns the same parent.
+                  propagated <- constructorGoals state $
+                    filter (`elem` constraining) $ drop 1 $ pendingGoals obligations
+                  pure $ case propagated of
+                    Left failure -> Left failure
+                    Right S.CensoredTerms{} -> Right N.PlanningCensored
+                    Right (S.CompleteTerms closures) -> Right $ N.Moves $
+                      A.rankedProposals 0 (map N.Term $ closures ++ termMoves)
+                      ++ A.rankedProposals (structuralDelay settings)
+                            [N.PlannedClause action | (action, _) <- clauseMoves]
+                      ++ [A.Proposal (N.SlicedEvidence goal $ initialMacroWork settings)
+                            (macroDelay settings) | evidenceMacro settings]
+  constructorGoals _ [] = pure $ Right $ S.CompleteTerms []
+  constructorGoals state (point:rest) =
+    case S.restoreGoalReference session (S.stateKey state) (fromIntegral point) of
+      Left failure -> pure $ Left failure
+      Right goal -> do
+        budget <- moveAllowance
+        (stats, proposals) <- S.proposeConstructors session goal budget (models settings)
+          (ranking settings) native (excluded settings) trace
+        recordSearch stats
+        case proposals of
+          Left failure -> pure $ Left failure
+          Right censored@S.CensoredTerms{} -> pure $ Right censored
+          Right (S.CompleteTerms prefix) -> fmap (\case
+            S.CompleteTerms suffix -> S.CompleteTerms $ prefix ++ suffix
+            censored -> censored) <$> constructorGoals state rest
   go refutation 0 queue = pure $ Paused SliceEnded $ saved refutation queue
   go refutation remaining queue = do
     budget <- moveAllowance

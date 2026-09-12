@@ -331,6 +331,18 @@ warrant discarding an application. Hidden arguments and dependent indices are st
 inferred by Agda when the proposal is checked. This avoids queuing provably
 unrelated heads without replacing conversion with textual type comparisons.
 
+Native constructor closures introduce the expected telescope and finish with a
+visible constructor that has no fields. They retain binder hiding and native
+identities; Agda, not the generator, decides whether result indices match.
+Joint search also offers these small proposals on other selected goals with
+observed dependencies so that later laws can constrain earlier definitions.
+Missing dependency evidence retains the ordinary schedule without assuming
+independence. `joint_constructor_propagation=false`
+disables that cross-goal scheduling without changing the resource envelope.
+Source assignments inferred by Agda are retrieved through its solved-goal
+operation, then checked and recorded as ordinary reconstructible moves. No
+interaction is silently removed or accepted on the strength of a meta count.
+
 The agenda's optional `progress_ordering` uses spent cost plus sixteen units
 per remaining selected interaction. This soft estimate lets a completed prefix
 advance while retaining every alternative; it is neither a proof-cost lower

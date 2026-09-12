@@ -4,7 +4,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.Dependencies
-  ( Snapshot, Step (..), observe, view, orderGoals ) where
+  ( Snapshot, Step (..), observe, view, orderGoals, constrainingGoals ) where
 
 import Control.Monad (forM, unless)
 import Control.Monad.State.Strict
@@ -115,6 +115,18 @@ orderGoals snapshot@(Snapshot _ constraints instances' cut reasons) selected
  where
   dependencies = goalEdges snapshot
 
+-- Positive observed dependencies can motivate an early constructor probe.
+-- Missing/censored edges are not independence evidence: they leave the normal
+-- goal schedule intact rather than removing any obligation or proof method.
+constrainingGoals :: Snapshot -> [Int] -> [Int]
+constrainingGoals snapshot selected =
+  [point | point <- selected,
+    not $ Set.null $ Set.intersection chosen $
+      Map.findWithDefault Set.empty point edges]
+ where
+  chosen = Set.fromList selected
+  edges = goalEdges snapshot
+
 goalEdges :: Snapshot -> Map.Map Int (Set.Set Int)
 goalEdges (Snapshot reaches _ _ _ _) = Map.fromList
   [(interactionId point, Set.fromList
@@ -133,6 +145,7 @@ view snapshot@(Snapshot reaches constraints instances' cut reasons) = object
   , "reachable_instance_metas" .= map S.meta instances'
   , "unknown_reasons" .= map reasonName (Set.toAscList reasons)
   , "preferred_goal_order" .= orderGoals snapshot [interactionId p | Reach p _ _ <- reaches]
+  , "constructor_probe_goals" .= constrainingGoals snapshot [interactionId p | Reach p _ _ <- reaches]
   , "goals" .= [object
       ["goal_id" .= interactionId point, "meta" .= S.meta meta,
        "prerequisite_goals" .= Set.toAscList (edges Map.! interactionId point),

@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.EvidenceSearch (run, runHelper, primitiveProposals, clauseProposals, Result (..)) where
+module AgdaProver.Agda28.EvidenceSearch (run, runHelper, primitiveProposals, constructorProposals, clauseProposals, Result (..)) where
 
 import Control.Monad (forM)
 import Control.Monad.Except (catchError, runExceptT, throwError)
@@ -33,7 +33,8 @@ import Agda.Syntax.Scope.Base
 import Agda.Syntax.Scope.Monad (tryResolveName)
 import Agda.Syntax.Translation.InternalToAbstract (reify)
 import Agda.Interaction.BasicOps (give_)
-import Agda.Interaction.Base (UseForce (WithoutForce))
+import Agda.Interaction.BasicOps qualified as Basic
+import Agda.Interaction.Base (UseForce (WithoutForce), Rewrite (AsIs))
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Conversion (compareType)
 import Agda.TypeChecking.Pretty (prettyTCM)
@@ -153,15 +154,15 @@ runHelper stats limits models mode native emit namespace point view application 
 -- printed type matching. Rechecking each proposal owns all meta assignments.
 primitiveProposals :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
                    -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> [String]
-                   -> Maybe Recursion.Owner -> I.Type
+                   -> Maybe Recursion.Owner -> InteractionId -> I.Type
                    -> TCM [(A.Expr, [(T.Text, T.Text)])]
-primitiveProposals stats limits models mode native emit namespace excluded owner target = do
+primitiveProposals stats limits models mode native emit namespace excluded owner point target = do
   pruned <- liftIO $ newIORef False
   originalSize <- getContextSize
   let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
       freshHole scope = do
-        point <- registerInteractionPoint False noRange Nothing
-        pure $ A.QuestionMark (Info.emptyMetaInfo { Info.metaScope = scope }) point
+        freshPoint <- registerInteractionPoint False noRange Nothing
+        pure $ A.QuestionMark (Info.emptyMetaInfo { Info.metaScope = scope }) freshPoint
       signature ty = do
         allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
         if not allowed then pure (Nothing, []) else reduce ty >>= \case
@@ -197,9 +198,26 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
           suffix <- go applied rest
           pure $ if getHiding info == NotHidden && compatible expected result
             then applied:suffix else suffix
+  -- Unification in a sibling can solve a meta without retiring its source
+  -- interaction. Use Agda's own scoped solution (including its permutation)
+  -- as a proposal, rather than searching for that assignment a second time.
+  -- Still check it through the normal transition and retain ordinary fallbacks.
+  assigned <- attempt runtime $ do
+    allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+    if not allowed then pure Nothing else do
+      meta <- lookupInteractionId point
+      variable <- lookupLocalMeta meta
+      case mvInstantiation variable of
+        InstV{} -> do
+          solutions <- Basic.getSolvedInteractionPoints False AsIs
+          pure $ lookup point [(p, expression) | (p, _, expression) <- solutions]
+        _ -> pure Nothing
+  let assignedProposals = maybe [] (\expression -> [(expression, [])]) assigned
   (forbiddenHere, _) <- excludedGlobals excluded
   inherited <- maybe (pure Set.empty) Recursion.ownerGroup owner
   let forbidden = Set.union forbiddenHere inherited
+  closures <- Construction.constructorClosures
+    (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }) forbidden target
   globals <- visibleGlobals forbidden
   classified <- attempt runtime $ do
     allowed <- charge runtime $ \s -> s
@@ -244,10 +262,13 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
         modify runtime $ \s -> s { lambdaProposals = lambdaProposals s + 1 }
         pure [(A.Lam exprNoRange (A.mkDomainFree $ Arg (getArgInfo domain) $ unnamed $ A.mkBinder_ name) hole, [])]
     _ -> pure []
-  let ordered = if Classification.constructionFirst classification
-        then [(0, item) | item <- introduction ++ record] ++ [(1, item) | item <- heads]
-        else [(0, item) | item <- heads] ++ [(1, item) | item <- introduction ++ record]
-  if not (P.hasDomain models P.Refinements) || mode == P.Symbolic then pure $ map snd ordered else do
+  let constructed = [(expression, []) | expression <- closures,
+        expression `notElem` map fst heads] ++ introduction ++ record
+      ordered = if Classification.constructionFirst classification
+        then [(0, item) | item <- constructed] ++ [(1, item) | item <- heads]
+        else [(0, item) | item <- heads] ++ [(1, item) | item <- constructed]
+  if not (P.hasDomain models P.Refinements) || mode == P.Symbolic
+    then pure $ assignedProposals ++ map snd ordered else do
     context <- getContext
     localTypes <- forM (zip [0..] context) $ \(index, entry) -> do
       ty <- typeOfBV index
@@ -258,8 +279,26 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
         features expression = do
           (tag, local) <- PolicyViews.refinementView expression
           pure $ F.refinementTokens goal tag (local >>= (`lookup` localTypes))
-    rankCompatible runtime P.Refinements goal
+    (assignedProposals ++) <$> rankCompatible runtime P.Refinements goal
       [(tier, features expression, item) | (tier, item@(expression, _)) <- ordered]
+
+-- A cheap target-directed slice for other selected joint obligations. It does
+-- not enumerate their premise catalogues or perform a hidden whole-goal search.
+constructorProposals :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
+                     -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> [String]
+                     -> Maybe Recursion.Owner -> InteractionId -> I.Type
+                     -> TCM [(A.Expr, [(T.Text, T.Text)])]
+constructorProposals stats limits models mode native emit namespace excluded owner _ target = do
+  pruned <- liftIO $ newIORef False
+  let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
+  (forbiddenHere, _) <- excludedGlobals excluded
+  inherited <- maybe (pure Set.empty) Recursion.ownerGroup owner
+  proposals <- Construction.constructorClosures
+    (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
+    (Set.union forbiddenHere inherited) target
+  seeds <- mapM (describe runtime "constructor-closure") proposals
+  ranked <- rankDescribed runtime Classification.unknownClassification target seeds
+  pure [(expression, picked) | (Seed expression _ _, picked) <- ranked]
 
 -- Clause subjects come from native context identities and datatype/record
 -- metadata. Generated actions retain those identities through the session;

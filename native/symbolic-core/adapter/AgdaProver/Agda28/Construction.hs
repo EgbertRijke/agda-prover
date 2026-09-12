@@ -2,8 +2,10 @@
 {-# LANGUAGE LambdaCase #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.Construction
-  ( recordPlan, recordExpression, projectedEvidence, omittedField, absurdLambda, eliminateEmpty ) where
+  ( recordPlan, recordExpression, projectedEvidence, omittedField, absurdLambda, eliminateEmpty
+  , constructorClosures ) where
 
+import Control.Monad (filterM)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Set qualified as Set
 
@@ -16,11 +18,44 @@ import Agda.Syntax.Info (LetInfo (..), exprNoRange)
 import Agda.Syntax.Info qualified as Info
 import Agda.Syntax.Internal qualified as I
 import Agda.Syntax.Position (noRange)
+import Agda.Syntax.Scope.Base (isNameInScope)
 import Agda.Syntax.Translation.InternalToAbstract (reify)
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Records (isRecordType, recordFieldNames)
-import Agda.TypeChecking.Substitute (apply)
+import Agda.TypeChecking.Reduce (reduce)
+import Agda.TypeChecking.Substitute (apply, absApp, raise)
 import Agda.Utils.Null (empty)
+
+-- Focused introductions ending in a visible nullary constructor. These are
+-- proposals, not assertions that a dependent result index matches. Checking
+-- the whole expression can propagate that index into other open definitions.
+-- No proof-specific family, spelling or reference implementation is involved.
+constructorClosures :: TCM Bool -> Set.Set QName -> I.Type -> TCM [A.Expr]
+constructorClosures charge forbidden target = charge >>= \allowed ->
+  if not allowed then pure [] else reduce target >>= \case
+    I.El _ (I.Pi domain body) -> do
+      let hint = if I.absName body `elem` ["", "_"] then "x" else I.absName body
+      withFreshName noRange hint $ \name -> do
+        bodies <- addContext (name, domain) $ constructorClosures charge forbidden
+          (absApp (raise 1 body) $ I.Var 0 [])
+        pure [A.Lam exprNoRange
+          (A.mkDomainFree $ Arg (getArgInfo domain) $ unnamed $ A.mkBinder_ name) expression
+          | expression <- bodies]
+    I.El _ (I.Def family _) -> do
+      scope <- getScope
+      definition <- getConstInfo family
+      let constructors = case theDef definition of
+            Datatype { dataCons = names } -> names
+            RecordDefn record | _recInduction record /= Just CoInductive ->
+              [I.conName $ _recConHead record]
+            _ -> []
+          availableName name = isNameInScope name scope && not (Set.member name forbidden)
+      names <- filterM (\name -> charge >>= \available ->
+        if not available then pure False else getConstInfo name >>= \entry -> pure $
+          case theDef entry of Constructor { conArity = 0 } -> True; _ -> False)
+        (filter availableName constructors)
+      pure [A.Con $ I.AmbQ (name :| []) | name <- names]
+    _ -> pure []
 
 -- The telescope comes from Agda, already instantiated with this record's
 -- parameters. Search substitutes checked field values into it, never names or

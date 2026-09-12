@@ -420,11 +420,12 @@ evidence search. `ranker` is `nnue` or `symbolic`; model/native paths are explic
 nullable paths. Models are loaded once for this run. `focused_search` is boolean
 and `exclude_names` is the existing list of forbidden premise names. The optional
 `scheduling` object has the first four required fields below and optional
-`dependency_ordering`, `progress_ordering` and `retry_work_ordering` booleans
+`dependency_ordering`, `progress_ordering`, `retry_work_ordering` and
+`joint_constructor_propagation` booleans
 (defaults shown):
 
 ```json
-{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true}
+{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true,"joint_constructor_propagation":true}
 ```
 
 Delays are nonnegative scheduling priorities, not proof-depth restrictions.
@@ -451,6 +452,25 @@ continuation retains finite priority and remains available. This is scheduling
 weight only: the physical ledger is neither charged twice nor reset. The cost
 receipt reports `retry_ordering: spent-work-v1`, or `uniform-v1` for the explicit
 false ablation. One-step search has no macro retries and is unaffected.
+
+`joint_constructor_propagation` offers target-directed constructor closures for
+other selected pending goals with positively observed dependencies on selected
+goals, before broad alternatives for the primary goal. It reuses the native
+dependency snapshot (`constructor_probe_goals`); missing or censored edges leave
+the ordinary schedule intact and do not establish independence.
+The adapter introduces the native telescope and proposes visible constructors
+with no fields; Agda checks all indices and implicit parameters. These checked
+proposals can constrain earlier definitions without assuming that any goals
+are independent. Unselected goals never receive these moves. Censored planning
+retains the frontier; every observation/check is charged. The cost receipt
+records this flag. Disabling it retains primary-goal construction and existing
+evidence fallbacks. No whole-goal search is hidden inside this propagation pass.
+
+When unification solves a source meta indirectly, Agda may retain its interaction
+point for source bookkeeping. The native catalogue retrieves Agda's scoped
+solution and offers it before ordinary alternatives. Applying it still invokes
+the checker and records a native draft; reconstruction and fresh validation are
+not bypassed, and merely having zero open metas is not global source completion.
 
 Success returns `status: ready`, `run`, `cost`, `proof_authority: false`.
 A run key has exactly `{session, epoch, run, revision}`; all counters are
