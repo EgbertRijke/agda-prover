@@ -31,7 +31,7 @@ import AgdaProver.Symbolic.NNUE.Native (withNativeScorer)
 
 data Operation = Pending StateKey | Observe StateKey InteractionId P.ObservationMode
   | Give StateKey InteractionId DraftExpression | Evict StateKey | Replay StateKey
-  | SolveEvidence StateKey InteractionId Search.SearchLimits Policy.RankingMode (Maybe FilePath) (Maybe FilePath) [String]
+  | SolveEvidence StateKey InteractionId Search.SearchLimits Policy.RankingMode (Maybe FilePath) (Maybe FilePath) (Maybe FilePath) Bool [String]
   | MakeClause StateKey InteractionId ClauseAction
   | ApplyClause StateKey InteractionId ClauseAction
   | Cost | Cancel | Close
@@ -77,13 +77,16 @@ parseRequest = withObject "session request" $ \o -> do
       fields ["state", "goal_id", "action"]
       ApplyClause <$> o .: "state" <*> goal <*> o .: "action"
     "solve-evidence" -> do
-      fields ["state", "goal_id", "limits", "ranker", "model_path", "native_path", "exclude_names"]
+      fields $ ["state", "goal_id", "limits", "ranker", "model_path", "native_path", "exclude_names"]
+        ++ filter (`KM.member` o) ["focused_model_path", "focused_search"]
       mode <- o .: "ranker" >>= \case
         ("nnue" :: String) -> pure Policy.Learned
         "symbolic" -> pure Policy.Symbolic
         _ -> fail "unknown ranker"
       SolveEvidence <$> o .: "state" <*> goal <*> o .: "limits" <*> pure mode
-        <*> o .: "model_path" <*> o .: "native_path" <*> o .: "exclude_names"
+        <*> o .: "model_path" <*> o .:? "focused_model_path" <*> o .: "native_path"
+        <*> (if KM.member "focused_search" o then o .: "focused_search" else pure True)
+        <*> o .: "exclude_names"
     "evict" -> fields ["state"] >> Evict <$> o .: "state"
     "replay" -> fields ["state"] >> Replay <$> o .: "state"
     "cost" -> fields [] >> pure Cost
@@ -199,12 +202,13 @@ perform session emit operation = case operation of
   Give key goal expression -> resolvedGoal key goal $ \ref -> do
     answer <- S.tryExpression session ref expression
     checkedResult answer
-  SolveEvidence key goal limits mode modelPath nativePath excluded -> resolvedGoal key goal $ \ref -> do
+  SolveEvidence key goal limits mode modelPath focusedPath nativePath enableFocused excluded -> resolvedGoal key goal $ \ref -> do
     loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
-    case loaded >>= Policy.models of
+    focused <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.FocusedBranch)) focusedPath
+    case ((++) <$> loaded <*> focused) >>= Policy.models of
       Left reason -> pure $ failureView $ KernelFailure ("model-configuration:" ++ reason)
       Right models -> withNativeScorer nativePath $ \native -> do
-        (stats, answer) <- S.solveEvidence session ref limits models mode native excluded emit
+        (stats, answer) <- S.solveEvidence session ref limits models mode native enableFocused excluded emit
         case answer of
           Left failure -> pure $ object ["search_cost" .= stats, "failure" .= failureView failure]
           Right (status, candidate, selected) -> do
@@ -216,6 +220,7 @@ perform session emit operation = case operation of
             pure $ object ["status" .= Search.statusName status, "search_cost" .= stats,
               "candidate" .= value, "selected_choices" .= selected,
               "model_id" .= either (const Nothing) (fmap Model.modelId . safeHead) loaded,
+              "focused_model_id" .= either (const Nothing) (fmap Model.modelId . safeHead) focused,
               "proof_authority" .= False]
   Evict key -> resolved key $ \ref -> result (const $ object ["status" .= ("evicted" :: String)]) <$> S.evict session ref
   Replay key -> resolved key $ \ref -> result (\state -> object ["state" .= S.stateKey state]) <$> S.replay session ref

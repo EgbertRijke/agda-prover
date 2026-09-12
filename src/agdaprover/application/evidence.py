@@ -28,7 +28,7 @@ from ..nnue import NNUEModel
 from ..observability.policy_trace import validated_proof_evidence
 from ..offline import assert_offline_configuration
 from ..project import choose_goal, require_agda_source_file
-from ..ranking.bundled import OR_MODEL
+from ..ranking.bundled import FOCUSED_MODEL, OR_MODEL
 from ..reconstruction import reconstruct_hole_completion
 from ..resource_budget import ResourceLimitError, ResourceScope
 from ..validation import validate_reconstruction
@@ -42,6 +42,7 @@ class NativeEvidenceEngine:
     policy_model: Path | None = None
     native_scorer: Path | None = None
     trace_bytes: int = 16 * 1024 * 1024
+    focused_search: bool = True
 
     def prove(
         self,
@@ -75,6 +76,8 @@ class NativeEvidenceEngine:
                 raise ValueError("native work_units must be positive or None")
             if type(self.trace_bytes) is not int or self.trace_bytes < 0:
                 raise ValueError("trace_bytes must be nonnegative")
+            if type(self.focused_search) is not bool:
+                raise ValueError("focused_search must be a boolean")
             assert_offline_configuration(task, deadline=budget.deadline)
             require_agda_source_file(source)
             result.source_hash = file_sha256(source, deadline=budget.deadline)
@@ -93,6 +96,7 @@ class NativeEvidenceEngine:
                 "native_executable_sha256": binary_hash,
             }
             model_path = None
+            focused_model_path = None
             if task.ranker == "nnue":
                 model_path = self.policy_model or OR_MODEL.path
                 model = (
@@ -105,17 +109,30 @@ class NativeEvidenceEngine:
                     else OR_MODEL.load(deadline=budget.deadline)
                 )
                 result.action_model_id = model.model_id
+                focused_model_path = task.model_path or FOCUSED_MODEL.path
+                focused_model = (
+                    NNUEModel.load(
+                        focused_model_path,
+                        expected_role="focused-search-branch-policy",
+                        deadline=budget.deadline,
+                    )
+                    if task.model_path
+                    else FOCUSED_MODEL.load(deadline=budget.deadline)
+                )
+                result.model_id = focused_model.model_id
             identity = task_identity(
                 task,
                 result.source_hash,
                 mode="native-evidence",
                 policy_profile=result.policy_profile,
                 toolchain_id=result.toolchain_id,
-                model_ids={"or": result.action_model_id},
+                model_ids={"or": result.action_model_id, "focused": result.model_id},
                 project_inputs_id=inputs.identity,
             )
             result.task_id = hashlib.sha256(
-                json.dumps([identity, binary_hash, self.work_units]).encode()
+                json.dumps(
+                    [identity, binary_hash, self.work_units, self.focused_search]
+                ).encode()
             ).hexdigest()
             with open_kernel_session(
                 session_factory,
@@ -147,7 +164,12 @@ class NativeEvidenceEngine:
                     }
                 if event["event"] == "search-policy":
                     trace = event["trace"]
-                    if trace.get("model_id") not in {None, result.action_model_id}:
+                    expected_model = (
+                        result.model_id
+                        if trace.get("role") == "focused-search-branch-policy"
+                        else result.action_model_id
+                    )
+                    if trace.get("model_id") not in {None, expected_model}:
                         raise SymbolicProtocolError(
                             "native trace uses an unpinned NNUE"
                         )
@@ -171,6 +193,8 @@ class NativeEvidenceEngine:
                 work_units=self.work_units,
                 ranker=task.ranker,
                 model_path=model_path,
+                focused_model_path=focused_model_path,
+                focused_search=self.focused_search,
                 native_path=self.native_scorer,
                 cancellation=cancellation or CancellationToken(),
                 publish=publish,
@@ -183,6 +207,8 @@ class NativeEvidenceEngine:
                 raise SymbolicProtocolError("native executable changed during search")
             outcome = reply["outcome"]
             stats = outcome.get("search_cost", {})
+            if stats.get("schema_version") != "agdaprover.symbolic-evidence-cost.v2":
+                raise SymbolicProtocolError("unsupported native search cost schema")
             result.search_stats = {
                 **(result.search_stats or {}),
                 "algorithm": "native-evidence-v1",
@@ -197,15 +223,37 @@ class NativeEvidenceEngine:
             ) = stats.get("model_items_scored", 0)
             result.model_elapsed_ms = stats.get("model_elapsed_ns", 0) / 1e6
             result.cost.kernel_loads += 1
-            result.cost.speculative_checks = stats.get("work_units", 0)
+            result.cost.speculative_checks = sum(
+                stats.get(key, 0)
+                for key in (
+                    "inference_queries",
+                    "checker_queries",
+                    "recursive_context_queries",
+                )
+            )
             result.cost.candidate_terms_checked = stats.get("checker_queries", 0)
-            result.candidates_generated = result.cost.actions_generated = stats.get(
-                "application_proposals", 0
-            ) + stats.get("lambda_proposals", 0)
+            result.candidates_generated = result.cost.actions_generated = sum(
+                stats.get(key, 0)
+                for key in (
+                    "application_proposals",
+                    "lambda_proposals",
+                    "record_proposals",
+                    "absurd_proposals",
+                    "recursive_proposals",
+                    "focused_candidates",
+                )
+            )
+            result.cost.actions_expanded = stats.get("nodes", 0) + stats.get(
+                "focused_nodes", 0
+            )
             if "failure" in outcome:
                 raise SymbolicProtocolError(str(outcome["failure"]))
             if outcome.get("model_id") != result.action_model_id:
                 raise SymbolicProtocolError("native model differs from the pinned NNUE")
+            if outcome.get("focused_model_id") != result.model_id:
+                raise SymbolicProtocolError(
+                    "native focused model differs from the pinned NNUE"
+                )
             if outcome.get("status") in {"unsolved", "resource-exhausted"}:
                 result.status = outcome["status"]
                 return result

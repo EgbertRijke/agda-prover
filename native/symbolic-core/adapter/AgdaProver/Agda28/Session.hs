@@ -330,11 +330,11 @@ reserveAllocation (Allocation name point) = do
 -- survive cancellation. A winning native term is rechecked from the ORIGINAL
 -- parent: no speculative constraints or warnings are silently published.
 solveEvidence :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
-              -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String]
+              -> Policy.RankingMode -> Maybe (NativeScorer n) -> Bool -> [String]
               -> (Value -> IO ())
               -> IO (Search.SearchStats, Either Failure
                    (Search.SearchStatus, Maybe (Transition s), [(T.Text,T.Text)]))
-solveEvidence session goal limits models mode native excluded emit = do
+solveEvidence session goal limits models mode native enableFocused excluded emit = do
   stats <- newIORef Search.emptyStats
   outcome <- request session (goalState goal) $ \owner state -> do
     ledger <- work session
@@ -354,7 +354,7 @@ solveEvidence session goal limits models mode native excluded emit = do
               changed <- Set.difference <$> useTC stTCWarnings <*> pure warnings
               let bad = filter (not . expectedWarning) (Set.toAscList changed)
               unless (null bad) $ genericError $ unlines $ map tcWarningString bad
-        Right <$> Search.run stats limits models mode native emit namespace excluded point origin validate target
+        Right <$> Search.run stats limits models mode native enableFocused emit namespace excluded point origin validate target
     case searched >>= id of
       Left failure -> pure (owner, Left failure)
       Right (Search.Result status Nothing selected) -> pure (owner, Right (status, Nothing, selected))

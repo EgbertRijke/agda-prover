@@ -46,6 +46,8 @@ import AgdaProver.Symbolic.Evidence
 import AgdaProver.Agda28.Construction qualified as Construction
 import AgdaProver.Agda28.Recursion qualified as Recursion
 import AgdaProver.Agda28.Scheduling qualified as Scheduling
+import AgdaProver.Agda28.Focused qualified as NativeFocused
+import AgdaProver.Symbolic.Focused qualified as Focused
 import AgdaProver.Symbolic.Classification qualified as Classification
 import AgdaProver.Symbolic.NNUE.Features qualified as F
 import AgdaProver.Symbolic.NNUE.Native (NativeScorer)
@@ -57,16 +59,16 @@ import AgdaProver.Symbolic.NNUE.Policy qualified as P
 -- the same branch. No inferred type containing fresh metas escapes rollback.
 data Result = Result SearchStatus (Maybe A.Expr) [(T.Text, T.Text)]
 data Runtime s = Runtime SearchLimits (IORef SearchStats) (IORef Bool)
-  P.Models P.RankingMode (Maybe (NativeScorer s)) (Value -> IO ()) T.Text
+  P.Models P.RankingMode (Maybe (NativeScorer s)) (Value -> IO ()) T.Text Bool
 data Seed = Seed A.Expr String String
 data GlobalInventory = GlobalInventory [A.Expr] (Set.Set QName) (Maybe Recursion.CallContext)
 
 run :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode -> Maybe (NativeScorer s)
-    -> (Value -> IO ()) -> String -> [String] -> InteractionId -> Maybe Recursion.Owner
+    -> Bool -> (Value -> IO ()) -> String -> [String] -> InteractionId -> Maybe Recursion.Owner
     -> (A.Expr -> TCM ()) -> I.Type -> TCM Result
-run stats limits models mode native emit namespace excluded point owner validate target = do
+run stats limits models mode native enableFocused emit namespace excluded point owner validate target = do
   pruned <- liftIO $ newIORef False
-  let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace)
+  let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) enableFocused
   (currentForbidden, userExcluded) <- excludedGlobals excluded
   inheritedGroup <- maybe (pure Set.empty) Recursion.ownerGroup owner
   let forbidden = Set.union currentForbidden inheritedGroup
@@ -98,16 +100,16 @@ run stats limits models mode native emit namespace excluded point owner validate
   iterateDepth 0
 
 modify :: Runtime s -> (SearchStats -> SearchStats) -> TCM ()
-modify (Runtime _ ref _ _ _ _ _ _) f = liftIO $ atomicModifyIORef' ref $ \s -> (f s, ())
+modify (Runtime _ ref _ _ _ _ _ _ _) f = liftIO $ atomicModifyIORef' ref $ \s -> (f s, ())
 stopped :: Runtime s -> TCM Bool
-stopped (Runtime _ ref _ _ _ _ _ _) = workExhausted <$> liftIO (readIORef ref)
+stopped (Runtime _ ref _ _ _ _ _ _ _) = workExhausted <$> liftIO (readIORef ref)
 charge :: Runtime s -> (SearchStats -> SearchStats) -> TCM Bool
-charge (Runtime limits ref _ _ _ _ _ _) f = liftIO $ atomicModifyIORef' ref $ \s ->
+charge (Runtime limits ref _ _ _ _ _ _ _) f = liftIO $ atomicModifyIORef' ref $ \s ->
   if workExhausted s || maybe False (workUnits s >=) (workUnitLimit limits)
     then (s { workExhausted = True }, False)
     else (f s { workUnits = workUnits s + 1 }, True)
 deferDepth :: Runtime s -> TCM (Maybe a)
-deferDepth (Runtime _ _ ref _ _ _ _ _) = liftIO (writeIORef ref True) >> pure Nothing
+deferDepth (Runtime _ _ ref _ _ _ _ _ _) = liftIO (writeIORef ref True) >> pure Nothing
 
 -- Only ordinary type rejection/postponement are search outcomes. Internal,
 -- parser or IO failures propagate to the session's precise failure boundary.
@@ -208,7 +210,7 @@ describe runtime origin expression = do
   pure $ Seed expression origin (maybe "unknown" id info)
 
 rankSeeds :: Runtime s -> Classification.Classification -> I.Type -> [A.Expr] -> TCM [(Seed, [(T.Text, T.Text)])]
-rankSeeds runtime@(Runtime _ ref _ models mode native emit namespace) classification target globals = do
+rankSeeds runtime@(Runtime _ ref _ models mode native emit namespace _) classification target globals = do
   locals <- map (A.Var . ctxEntryName) <$> getContext
   seeds <- mapM (uncurry $ describe runtime) $
     [("local", expression) | expression <- locals] ++ [("visible", expression) | expression <- globals, expression `notElem` locals]
@@ -241,12 +243,63 @@ rankSeeds runtime@(Runtime _ ref _ models mode native emit namespace) classifica
 
 -- Continuations implement the AND part: if a later argument or final check
 -- fails, search revisits earlier argument choices with the original TCState.
+rankFocused :: Runtime s -> NativeFocused.Fragment -> Focused.Formula -> [Focused.Formula]
+            -> [Focused.Action] -> TCM [(Focused.Action, [(T.Text, T.Text)])]
+rankFocused _ _ _ _ [] = pure []
+rankFocused runtime@(Runtime _ ref _ models mode native emit namespace _) fragment target context actions = do
+  stats <- liftIO $ readIORef ref
+  let view (Focused.Atom index) = NativeFocused.atomViews fragment !! index
+      view (Focused.Arrow a b) = F.ArrowView (view a) (view b)
+      goal = view target
+      assumptions = [F.FocusedAssumption (view ty) index | (index, ty) <- zip [0..] context]
+      ordinal = policyDecisions stats
+      decision = namespace <> ":focused:" <> T.pack (show ordinal)
+      candidates = [P.Candidate (T.pack $ show index) ("focus-" <> T.pack (show $ Focused.assumption action)) 0
+          (Right $ F.focusedActionTokens goal assumptions (assumptions !! Focused.assumption action)
+            (map view $ Focused.domains action)) action
+        | (index, action) <- zip [0 :: Int ..] actions]
+  result <- liftIO $ P.rankBatch native models mode P.FocusedBranches decision
+    (Right $ F.focusedStateTokens goal assumptions) candidates
+  case result of
+    Left reason -> genericError $ "native-focused-policy-batch:" ++ reason
+    Right batch -> do
+      modify runtime $ \s -> s { policyDecisions = ordinal + 1
+        , modelItems = modelItems s + fromIntegral (P.traceItemsScored $ P.decisionTrace batch)
+        , modelNanoseconds = modelNanoseconds s + P.traceModelNanoseconds (P.decisionTrace batch) }
+      liftIO $ emit $ P.traceView $ P.decisionTrace batch
+      pure [(P.candidateValue candidate, if length candidates > 1 then [(decision, P.candidateId candidate)] else [])
+        | candidate <- P.rankedCandidates batch]
+
 search :: Runtime s -> GlobalInventory -> Int -> I.Type -> [(T.Text,T.Text)]
        -> (A.Expr -> I.Term -> [(T.Text,T.Text)] -> TCM (Maybe a)) -> TCM (Maybe a)
-search runtime inventory@(GlobalInventory globals forbidden recursion) depth target selected use = do
+search runtime@(Runtime _ _ _ _ _ _ _ _ enableFocused) inventory@(GlobalInventory globals forbidden recursion) depth target selected use = do
   done <- stopped runtime
   if done then pure Nothing else do
     modify runtime $ \s -> s { searchNodes = searchNodes s + 1 }
+    choices runtime $ [focused | enableFocused] ++ [ordinary]
+ where
+  focused = do
+    allowed <- charge runtime $ \s -> s
+      { inferenceQueries = inferenceQueries s + 1, focusedObservationQueries = focusedObservationQueries s + 1 }
+    if not allowed then pure Nothing else NativeFocused.observe target >>= \case
+      Nothing -> pure Nothing
+      Just fragment -> Focused.enumerate
+        (Focused.Hooks
+          (charge runtime $ \s -> s { focusedActions = focusedActions s + 1 })
+          noteFocused
+          (rankFocused runtime fragment))
+        (NativeFocused.emptyAtoms fragment) depth (NativeFocused.assumptions fragment)
+        (NativeFocused.target fragment) $ \solution -> attempt runtime $ do
+          modify runtime $ \s -> s { focusedCandidates = focusedCandidates s + 1 }
+          expression <- NativeFocused.render fragment $ Focused.proof solution
+          queryCheck runtime expression target $ \term -> use expression term (selected ++ Focused.decisions solution)
+  noteFocused event = case event of
+    Focused.Node -> modify runtime $ \s -> s { focusedNodes = focusedNodes s + 1 }
+    Focused.CacheHit -> modify runtime $ \s -> s { focusedCacheHits = focusedCacheHits s + 1 }
+    Focused.CyclePruned -> modify runtime $ \s -> s { focusedCycles = focusedCycles s + 1 }
+    Focused.Deferred -> deferDepth runtime >> pure ()
+    Focused.Rule -> pure ()
+  ordinary = do
     classified <- attempt runtime $ do
       allowed <- charge runtime $ \s -> s
         { inferenceQueries = inferenceQueries s + 1, classificationQueries = classificationQueries s + 1 }
@@ -266,7 +319,6 @@ search runtime inventory@(GlobalInventory globals forbidden recursion) depth tar
             then construction ++ application else application ++ construction)
       ++ [recursiveCall arguments context | Just context <- [recursion]]
       ++ [produce expression picked | (Seed expression _ _, picked) <- seeds]
- where
   -- The recursive head is sealed away from ordinary argument search. Only a
   -- fully applied call using a descent seed or a real coinductive copattern
   -- context is offered as evidence.

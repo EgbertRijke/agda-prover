@@ -44,6 +44,8 @@ def search_evidence(
     work_units: int | None,
     ranker: str,
     model_path: Path | None,
+    focused_model_path: Path | None = None,
+    focused_search: bool = True,
     native_path: Path | None,
     cancellation: CancellationToken,
     publish: Callable[[dict[str, Any]], None],
@@ -54,6 +56,8 @@ def search_evidence(
         raise ValueError("work_units must be positive or None")
     if ranker not in {"nnue", "symbolic"}:
         raise ValueError("unknown native ranker")
+    if type(focused_search) is not bool:
+        raise ValueError("focused_search must be a boolean")
     with tempfile.TemporaryDirectory(prefix="agdaprover-evidence-") as directory:
         root = Path(directory)
         overlay = materialize_project(project, root, budget, cancellation)
@@ -76,6 +80,10 @@ def search_evidence(
                 "limits": {"work_units": work_units},
                 "ranker": ranker,
                 "model_path": str(model_path.resolve()) if model_path else None,
+                "focused_model_path": str(focused_model_path.resolve())
+                if focused_model_path
+                else None,
+                "focused_search": focused_search,
                 "native_path": str(native_path.resolve()) if native_path else None,
                 "exclude_names": [],
             }

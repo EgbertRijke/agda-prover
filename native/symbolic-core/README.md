@@ -1,7 +1,7 @@
 # Haskell symbolic core
 
 This is the experimental typed Haskell core. It supports resident checking and
-autonomous evidence/application, structural-construction and recursive-call fragments, including
+autonomous evidence/application, focused logic, structural-construction and recursive-call fragments, including
 the bundled NNUE.
 It does **not** replace AgdaProver's current search engine. A default-engine
 switch requires autonomous clause search, joint-search and qualification work.
@@ -124,6 +124,13 @@ See [the ranking contract](../../schemas/symbolic-ranking-v1.md).
 
 ## Evidence search
 
+The focused path builds ordinary nondependent implication proofs entirely in
+memory from native type identities. It reuses positive subproofs, detects cycles,
+retains alternative inhabitants and handles observed empty datatypes. Only
+completed candidates are checked by Agda. Dependent, hidden and unsupported
+types retain the general native path; a failed fast path never proves impossibility.
+Its separately role-checked NNUE uses the unchanged focused weights.
+
 The first native fragment handles exact local/global evidence, lambda
 introduction, partial applications, hidden/instance inference, dependent
 arguments and function-valued record projections. All semantic terms retain
@@ -177,7 +184,7 @@ include the same classification supplied to the unchanged feature encoder.
 Use `ProverApplication.prove_evidence(task, engine=NativeEvidenceEngine(path))`
 from `agdaprover.application.service` and `agdaprover.application.evidence` to
 exercise the explicit application path. `path` is the built executable, not a
-source directory. It uses the bundled OR model unless `task.ranker` is
+source directory. It uses the bundled OR and focused models unless `task.ranker` is
 `symbolic`; `policy_model` and `native_scorer` select user-supplied inference
 assets. No model bytes or training policy change in this milestone.
 
@@ -189,7 +196,11 @@ rejected here, never silently ignored. Existing production library support is
 unchanged. Autonomous clause scheduling, full induction workflows, joint solving and editor migration remain
 later milestones, not implied by `search_available`.
 
-`work_units` optionally limits native inference/checking queries. Its default
+`focused_search=False` on `NativeEvidenceEngine` disables only the focused fast
+path for paired measurements. `task.model_path` replaces the focused weights;
+the OR-policy override remains separate. Each model is role-checked and pinned.
+
+`work_units` optionally limits native queries plus in-memory focused actions. Its default
 `None` widens search depth under the caller's physical resource envelope and
 cancellation, without a fixed proof-depth or 20-second cutoff. The current
 implementation is a first functional slice, not a performance claim: repeated

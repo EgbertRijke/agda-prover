@@ -53,7 +53,7 @@ Each operation permits only its listed additional fields:
 | `give` | `state`, `goal_id`, `expression` | Child state, native evidence view, obligations |
 | `make-clause` | `state`, `goal_id`, `action` | Parent-bound native clause proposal, not a child state |
 | `apply-clause` | `state`, `goal_id`, `action` | Checked native helper/clause child, evidence view and dependent obligations |
-| `solve-evidence` | `state`, `goal_id`, `limits`, `ranker`, `model_path`, `native_path`, `exclude_names` | Search status, provisional child/evidence, cumulative search cost, selected policy choices |
+| `solve-evidence` | `state`, `goal_id`, `limits`, `ranker`, `model_path`, `native_path`, `exclude_names`; optional `focused_model_path`, `focused_search` | Search status, provisional child/evidence, cumulative search cost, selected policy choices |
 | `evict` | `state` | Drop child snapshot; preserve replay ancestry |
 | `replay` | `state` | Rechecked state key (resident states are returned unchanged) |
 | `cost` | none | Current cumulative native-operation counters |
@@ -182,13 +182,19 @@ full workflow integration are separate migration tasks.
 ## Evidence operation
 
 `limits` is exactly `{"work_units": positive-integer-or-null}`. It bounds
-inference/checking queries, not proof size or depth. Null leaves the run under
+inference/checking queries and in-memory search work, not proof size or depth. Null leaves the run under
 external CPU/memory/I/O and cancellation supervision; depth widens. `ranker` is
 `nnue` or `symbolic`. `model_path` is an OR-decision APNNUE artifact path or null;
 `native_path` optionally selects the existing ABI3 scoring library. Null model
 uses symbolic order and is reported as unavailable, not as learned inference.
 The application normally supplies the pinned bundled OR artifact. The response
 includes its loaded hash, checked against the application's pinned model.
+`focused_model_path` optionally supplies the role-checked focused APNNUE, with
+its hash returned separately as `focused_model_id`. Missing or null means that
+family retains symbolic order, not that the OR model substitutes for it. The
+application normally supplies both bundled artifacts. `focused_search` is an
+optional boolean, default true; false provides a local ablation without changing
+other evidence search. Null is not a boolean and is rejected.
 
 `exclude_names` lists visible global aliases to exclude after Agda resolution.
 The current and inherited source owner's mutual groups are excluded automatically
@@ -251,7 +257,7 @@ Search cost adds `recursive_context_queries`, `recursive_proposals` and
 `recursive_validation_queries`. The last counts whole candidate admissibility
 queries (non-forced assignment plus source-owner termination) and is a subset
 of `checker_queries`, not extra proof authority. `work_units` equals
-`inference_queries + checker_queries + recursive_context_queries`; native
+`inference_queries + checker_queries + recursive_context_queries + focused_actions`; native
 result-type comparisons count as checker queries. Rejected proposals and
 recursive validation work survive rollback. There are no per-term Python
 callbacks, datatype-specific rules or model-weight changes.
@@ -296,6 +302,33 @@ available after failure; scores and unknown facts never remove them. The
 additive `classification_queries` counter is a subset of `inference_queries`
 and charges each composite native metadata query once. It is not an extra
 charge in the work-unit sum. Work survives rejected/cancelled classification.
+
+`focused-implication-v1` adds in-memory logical proposals over native-observed,
+meta-free types. Visible, nondependent ordinary arrows are recognized by Agda's
+Pi structure and free-variable information; other binders retain general search.
+Atoms have local native type identities, not pretty-printed names. The adapter
+may identify a genuinely constructor-free datatype for empty elimination.
+It never treats focused failure as an impossibility certificate.
+
+The pure focused core keeps AND argument products, OR alternatives, positive
+memoized witnesses and active-cycle detection. A whole right-introduction
+telescope is one invertible phase. No failed, depth-censored or rejected
+continuation is cached as logical failure. Only completed drafts invoke Agda;
+rejection resumes alternatives and then general evidence search. H7/H8 still
+own joint agenda resumption and full source/PV integration.
+
+Focused choices use the existing focused model role and feature family. Traces
+are provisional, including when a memoized witness reuses earlier choices.
+They do not receive labels for censored or unvisited branches.
+
+Search costs now use `agdaprover.symbolic-evidence-cost.v2`: `focused_actions`
+counts in-memory nodes/rules/cache uses in addition to kernel work.
+`focused_observation_queries` is a subset of `inference_queries`.
+`focused_nodes`, `focused_cache_hits`, `focused_cycles`, and
+`focused_candidates` expose the pure search's behavior. All charges survive
+kernel rollback and cancellation. Focused work is not reported as checker calls.
+The application rejects unknown cost-schema versions rather than silently
+interpreting the former query-only work equation.
 
 Expression displays have column-zero relative Agda layout. The native
 application path preserves and anchors this layout in a parenthesized
