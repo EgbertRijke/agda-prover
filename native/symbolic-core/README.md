@@ -3,8 +3,9 @@
 This is the experimental typed Haskell core. It supports resident checking and
 autonomous evidence/application, focused logic, structural-construction and recursive-call fragments, including
 the bundled NNUE.
-It does **not** replace AgdaProver's current search engine. A default-engine
-switch requires joint-search, application integration and qualification work.
+It does **not** replace AgdaProver's default search engine. Single-goal,
+joint-prefix, one-step and interactive workflows are connected, but the native
+engine has not passed the required joint benchmarks. Keep Python as the default.
 
 ## Build and inspect
 
@@ -21,6 +22,12 @@ and artifact hashes. Provision these exact packages before the offline build.
 `AGDAPROVER_AGDA_PACKAGE_DB` overrides the package database location. Builds are
 offline and refuse to silently rebuild Agda. Build output stays in the ignored
 `dist-newstyle` directory. No development repository or corpus is needed.
+
+For relocatable executables, build the linked Agda library **and** the separate
+Agda checker with `+use-xdg-data-home`. Agda's default build can retain an
+absolute Cabal data-directory dependency even when the executable has no
+non-system dynamic libraries. The XDG build uses Agda's embedded runtime data
+in the application's private data directory. See [build and relocation](BUILDING.md).
 
 The resulting executable accepts:
 
@@ -81,24 +88,24 @@ helper. Agda generates the helper's native clauses and checks the final draft;
 new goals retain their dependent types and can be split or filled in subsequent
 branches. The original global definitions and parent remain intact. Rejections,
 cancellation and replay preserve the same transaction/cost rules as `give`.
-This is not yet full source export: displayed
-evidence can require exposing hidden parent binders before insertion. Full
-proof-plan reconstruction and fresh workflow qualification remain required.
+Displayed evidence can require exposing hidden parent binders before insertion;
+the source-export/application path below performs that operation. Direct
+session results never substitute for independently checked source export.
 
 `reconstruct-goal` assembles retained native drafts for an original goal along
 one descendant branch. It preserves binders, helper declarations and clause
 structure, then rechecks the expression from the original parent. Accepted text
 inputs are scoped once and retained as native drafts for replay. Partial drafts
-remain partial, and the returned evidence is not fresh verification. General
-source patches and hidden-binder exposure remain separate export work.
+remain partial, and the returned evidence is not fresh verification. Source
+patching and hidden-binder exposure belong to the separate export operation.
 
 `reconstruct-goals` rechecks an ordered batch in one new branch. Later entries
 can depend on earlier reconstructed definitions; unselected goals stay open.
 `export-goals` adds a native source presentation to each checked entry. Hidden
 clause binders referenced by the proof are exposed by Agda and mapped by native
 binding identity. Relative helper layout is retained. The application anchors
-the resulting expression or whole-clause edit and validates it freshly; wider
-format integration remains pending. See the source-presentation contract in
+the resulting expression or whole-clause edit and validates it freshly. The
+supported formats are `.agda` and `.lagda.md`. See the source-presentation contract in
 the session schema.
 The batch returns each entry's checked evidence and the final pending state.
 A failed batch publishes no intermediate states, while preserving its spent
@@ -112,8 +119,9 @@ for inspection. It neither installs a helper nor claims a proof.
 `solve-helper` additionally searches the finite one-constructor/available-value
 helper fragment for a supplied application. Clauses come from Agda, candidates
 use the existing NNUE and checked-transition boundary, and complete results
-still require independent fresh validation. Autonomous invocation within larger
-search remains agenda work; no general helper-invention capability is claimed.
+still require independent fresh validation. The autonomous agenda also uses
+Agda-generated local helpers for structural elimination; general arbitrary
+helper-application invention is not implemented.
 
 ## Boundaries
 
@@ -129,7 +137,7 @@ carry all dependent pending goals, metas and constraints together. Exhausted
 coarse evidence attempts retain the queue as censored work, not refuted branches.
 Retrying such an attempt repeats and charges its work; fine-grained inner
 suspension is still pending. Planners supply moves through the typed adapter
-API; source export and workflow qualification remain migration work.
+API. Source export is connected; whole-benchmark qualification remains open.
 Neither layer confers proof acceptance.
 
 `proposeTerms`/`applyTerm` provide native one-move evidence, application prefixes,
@@ -154,8 +162,8 @@ branches; retries are charged, not treated as free continuation inside Agda.
 Increasing a run's work allowance does not reset accumulated work. Typed
 catalogue censorship pauses the run rather than discarding unexplored moves.
 The Haskell API exposes generic agenda events and cost snapshots. Autonomous
-helper-application invention, full application routing and
-OS-resource integration are not implied by this controller checkpoint.
+helper-application invention is not implied. The application routes public
+operations to this controller and supervises shared physical resource limits.
 
 The resident protocol exposes `start-search`, `advance-search`, `search-cost`
 and `discard-search`. An advance uses a configurable scheduling quantum and

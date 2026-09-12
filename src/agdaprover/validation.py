@@ -493,11 +493,14 @@ def validate_partial_reconstruction(
             timeout_seconds=_remaining(deadline, "partial reconstruction overlay"),
         )
         try:
-            with fresh_interaction_validation(), AgdaSession(
-                timeout_seconds=_remaining(deadline, "partial reconstruction load"),
-                deadline=deadline,
-                project_configuration=workspace.configuration,
-            ) as session:
+            with (
+                fresh_interaction_validation(),
+                AgdaSession(
+                    timeout_seconds=_remaining(deadline, "partial reconstruction load"),
+                    deadline=deadline,
+                    project_configuration=workspace.configuration,
+                ) as session,
+            ):
                 goals = session.load_module(workspace.source_file)
         except AgdaLoadError as error:
             raise ValidationError(

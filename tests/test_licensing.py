@@ -57,6 +57,8 @@ class LicensingTests(unittest.TestCase):
                 "licenses/Agda-MIT.txt",
                 "licenses/agda-stdlib-MIT.txt",
                 "licenses/agda-unimath-MIT.txt",
+                "licenses/blake2-Unlicense.txt",
+                "licenses/cryptohash-sha256-BSD-3-Clause.txt",
             },
         )
         editor_files = config["tool"]["setuptools"]["data-files"][

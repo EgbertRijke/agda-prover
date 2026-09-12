@@ -96,9 +96,7 @@ def select_engine(
         if executable is not None
         else environment.get("AGDAPROVER_SYMBOLIC_CORE")
     )
-    command = (
-        os.path.expanduser(configured) if configured else "agdaprover-symbolic"
-    )
+    command = os.path.expanduser(configured) if configured else "agdaprover-symbolic"
     resolved = shutil.which(command, path=environment.get("PATH", os.defpath))
     if resolved is None or not Path(resolved).is_file():
         raise EngineConfigurationError(
