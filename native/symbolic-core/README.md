@@ -158,6 +158,10 @@ holes and inferred hidden parameters remain coupled in the checked child;
 partial applications retain their structure. Catalogue censorship is a distinct
 typed result, not an empty completed search. Existing NNUE head ranking and
 shared structural ordering apply.
+When compound construction supplies the same single-lambda/open-body action,
+the controller keeps its preferred copy instead of also scheduling the ordinary
+one. This comparison requires the same parent, goal and binder modality; it
+does not merge proof states, populated bodies or multi-binder constructions.
 
 `AgendaSearch` provides an autonomous Haskell controller over these primitive
 term moves, native case proposals and clause-generated local helpers. Datatype

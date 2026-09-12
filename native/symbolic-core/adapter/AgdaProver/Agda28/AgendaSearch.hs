@@ -200,7 +200,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
               (ranking settings) native (excluded settings) trace
             recordSearch compoundCost
             pure $ case structures of
-              Right (S.CompleteTerms additions) -> Right $ S.CompleteTerms $ additions ++ originals
+              Right (S.CompleteTerms additions) -> Right $ S.CompleteTerms $ S.preferStructures additions originals
               other -> other
           other -> pure other
         equations <- case constructedTerms of

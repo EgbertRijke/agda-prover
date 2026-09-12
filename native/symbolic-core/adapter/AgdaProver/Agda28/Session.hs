@@ -17,7 +17,7 @@ module AgdaProver.Agda28.Session
   , Refutation.Kind (..)
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
-  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, proposeTerms, proposeStructures, proposeEquations, proposeConstructors, applyTerm
+  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, preferStructures, proposeTerms, proposeStructures, proposeEquations, proposeConstructors, applyTerm
   , ClauseMove, clauseMoveGoal, clauseMoveIsBatch, applyClauseMove, ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
@@ -51,7 +51,8 @@ import Agda.Interaction.Base (UseForce (WithoutForce))
 import Agda.Interaction.Library (getPrimitiveLibDir, getAgdaLibFile, AgdaLibFile (..))
 import Agda.Interaction.Library.Base (agdaLibFiles, runLibM)
 import Agda.Syntax.Abstract qualified as A
-import Agda.Syntax.Common (InteractionId, interactionId, NameId)
+import Agda.Syntax.Abstract.Views (unScope)
+import Agda.Syntax.Common (InteractionId, interactionId, NameId, Arg (..), Named (..))
 import Agda.Syntax.Common.Pretty (prettyShow)
 import Agda.Syntax.Internal qualified as I
 import Agda.Syntax.Position (noRange)
@@ -161,6 +162,24 @@ termProposalGoal (TermProposal goal _ _ _) = goal
 
 termProposalChoices :: TermProposal s -> [(T.Text, T.Text)]
 termProposalChoices (TermProposal _ _ choices _) = choices
+
+-- Prefer the compound catalogue's position without enqueuing a second copy
+-- of the ordinary lambda-to-fresh-hole move. Both come from the same sealed
+-- parent and goal, with the same binder modality. This narrowly witnessed
+-- action overlap does not identify arbitrary alpha-equivalent proof states,
+-- populated bodies, repeated holes or helper definitions.
+preferStructures :: [TermProposal s] -> [TermProposal s] -> [TermProposal s]
+preferStructures structures ordinary = structures ++ filter (not . duplicate) ordinary
+ where
+  duplicate proposal = case atomicLambda proposal of
+    Nothing -> False
+    Just key -> any ((== Just key) . atomicLambda) structures
+  atomicLambda (TermProposal goal (NativeDraft expression _) _ _) = case unScope expression of
+    A.Lam _ (A.DomainFree tactic (Arg info (Named Nothing (A.Binder Nothing _ _)))) body
+      | tactic == empty, A.QuestionMark{} <- unScope body ->
+          Just (stateKey $ goalState goal, goalId goal, info)
+    _ -> Nothing
+  atomicLambda _ = Nothing
 
 -- Preserve checked-source abstract syntax as well as internal evidence. Agda's
 -- display reifier may use postfix projections: display syntax is not a draft
