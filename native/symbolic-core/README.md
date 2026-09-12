@@ -340,6 +340,17 @@ claim. Generated helper goals retain their source owner across branch replay.
 New helpers join that owner's mutual group before Agda checks termination, so
 cycles spanning a helper and the source function cannot evade the check.
 
+Primitive moves also expose fully applied recursive calls anchored by a scoped
+descendant, including applications of function-valued children. Remaining
+arguments are coupled interaction goals, with inference-first and explicitly
+supplied hidden/instance forms. Actual coinductive copattern contexts can
+propose owner calls without claiming inductive descent. Every move still passes
+the same owner-group termination/productivity check. The recursive head is not
+made an ordinary premise, and explicit exclusions apply before generation.
+Native descent facts feed the existing scheduling/NNUE boundary. These moves
+complement the coarse search for wrapped and more elaborate recursive operands;
+they do not establish whole-benchmark coverage or promote the native default.
+
 Expected-result applications are tried before unconstrained operand enumeration.
 Agda relates their inferred result to the goal before arguments are searched,
 preserving dependencies even when constructor elaboration creates fresh hidden

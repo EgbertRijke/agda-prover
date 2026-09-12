@@ -243,9 +243,14 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
               part -> pure part) expression
         _ -> pure Nothing
   let assignedProposals = maybe [] (\expression -> [(expression, [])]) assigned
-  (forbiddenHere, _) <- excludedGlobals excluded
+  (forbiddenHere, userExcluded) <- excludedGlobals excluded
   inherited <- maybe (pure Set.empty) Recursion.ownerGroup owner
   let forbidden = Set.union forbiddenHere inherited
+  recursion <- case owner of
+    Just root | not $ Set.member (Recursion.ownerName root) userExcluded -> localTCState $ attempt runtime $ do
+      allowed <- charge runtime $ \s -> s { recursiveContextQueries = recursiveContextQueries s + 1 }
+      if allowed then Recursion.inspect point root else pure Nothing
+    _ -> pure Nothing
   closures <- Construction.constructorClosures
     (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }) forbidden target
   globals <- visibleGlobals forbidden
@@ -253,11 +258,53 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
     allowed <- charge runtime $ \s -> s
       { inferenceQueries = inferenceQueries s + 1, classificationQueries = classificationQueries s + 1 }
     let constructors = Set.fromList [name | A.Con (I.AmbQ names) <- globals, name <- toList names]
-    if allowed then Just <$> Scheduling.classify forbidden constructors Nothing target else pure Nothing
+    if allowed then Just <$> Scheduling.classify forbidden constructors recursion target else pure Nothing
   let classification = maybe Classification.unknownClassification id classified
   ranked <- rankSeeds runtime classification target globals
   scope <- getScope
   (expected, _) <- localTCState $ signature target
+  recursive <- case recursion of
+    Nothing -> pure []
+    Just context -> do
+      observed <- localTCState $ attempt runtime $
+        queryInferWith DontExpandLast runtime (Recursion.callHead context) $ \(_, ty) ->
+          Just <$> signature ty
+      subjects <- Recursion.callSubjects context
+      operands <- fmap concat $ forM subjects $ \subject -> do
+        observedSubject <- localTCState $ attempt runtime $
+          queryInferWith DontExpandLast runtime subject $ \(_, ty) -> Just <$> signature ty
+        variants <- applications Nothing scope subject $ maybe [] snd observedSubject
+        pure $ subject:variants
+      -- A sealed recursive head is never an ordinary premise. Offer complete
+      -- spines anchored by a native descendant (or a real copattern context),
+      -- leaving coupled operands to the shared AND agenda. Checking the move
+      -- invokes Agda's owner-group termination check, just as a complete call
+      -- does; no open operand is evidence of decrease or productivity.
+      let build supplyHidden anchor infos = do
+            arguments' <- forM (zip [0 :: Int ..] infos) $ \(index, (info, _)) -> do
+              operand <- case anchor of
+                Just (position, subject) | position == index -> pure subject
+                _ | visible info || supplyHidden -> freshHole scope
+                  | otherwise -> Construction.omittedField (getHiding info)
+              pure $ Arg info $ unnamed operand
+            pure $ A.app (Recursion.callHead context) arguments'
+      expressions <- case observed of
+        Just (result, infos)
+          | let terminal = case reverse infos of (_, shape):_ -> shape; [] -> result
+          , compatible expected terminal -> fmap concat $ forM
+              ([Nothing | Recursion.copatternCall context] ++
+               [Just (index, subject) | index <- [0 .. length infos - 1], subject <- operands]) $ \anchor -> do
+                inferred <- build False anchor infos
+                supplied <- if any (notVisible . fst) infos
+                  then (:[]) <$> build True anchor infos else pure []
+                pure $ inferred:supplied
+        _ -> pure []
+      modify runtime $ \s -> s { recursiveProposals = recursiveProposals s + fromIntegral (length expressions),
+        copatternProposals = copatternProposals s +
+          if Recursion.copatternCall context then fromIntegral (length expressions) else 0 }
+      described <- mapM (describe runtime "recursive") expressions
+      ordered <- rankDescribed runtime classification target described
+      pure [(expression, picked) | (Seed expression _ _, picked) <- ordered]
   heads <- fmap concat $ forM ranked $ \(Seed expression _ _, picked) -> do
     observed <- localTCState $ attempt runtime $
       queryInferWith DontExpandLast runtime expression $ \(_, ty) -> do
@@ -313,10 +360,10 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
       -- otherwise a datatype's constructor fields are scheduled as arbitrary
       -- eliminations, while the equivalent record fields get precedence.
       constructorHeads = [item | item@(expression, _) <- heads, constructorHead expression]
-      eliminationHeads = [item | item@(expression, _) <- heads, not $ constructorHead expression]
+      eliminationHeads = [item | item@(expression, _) <- heads, not $ constructorHead expression] ++ recursive
       ordered = if Classification.constructionFirst classification
         then [(0, item) | item <- constructed ++ constructorHeads] ++ [(1, item) | item <- eliminationHeads]
-        else [(0, item) | item <- heads] ++ [(1, item) | item <- constructed]
+        else [(0, item) | item <- heads ++ recursive] ++ [(1, item) | item <- constructed]
   if not (P.hasDomain models P.Refinements) || mode == P.Symbolic
     then pure $ assignedProposals ++ map snd ordered else do
     context <- getContext

@@ -3,7 +3,7 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.Recursion
   ( Owner, owner, ownerName, ownerGroup, checkOwner, CallContext, inspect, callHead, callType
-  , eligibleCall, copatternCall, descentFacts, usesOwner ) where
+  , eligibleCall, callSubjects, copatternCall, descentFacts, usesOwner ) where
 
 import Control.Monad (unless, forM)
 import Data.List (find)
@@ -105,6 +105,16 @@ callHead (CallContext (Owner function) _) = A.Def function
 
 callType :: CallContext -> TCM I.Type
 callType (CallContext (Owner function) _) = typeOfConst function
+
+-- Keep proposal subjects as scoped native variables. The agenda may apply a
+-- function-valued child to holes, but neither spelling nor result-type shape
+-- can manufacture a descent witness. Unknown with-ancestry retains the same
+-- conservative fallback as the coarse evidence search.
+callSubjects :: CallContext -> TCM [A.Expr]
+callSubjects context = do
+  current <- getContext
+  pure [expression | entry <- current, let expression = A.Var $ ctxEntryName entry,
+    not (copatternCall context), eligibleCall context expression]
 
 -- A real coinductive projection admits a fully applied owner proposal without
 -- asserting descent. It does not prove guarding: give and the complete mutual
