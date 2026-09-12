@@ -68,6 +68,7 @@ data SearchStats = SearchStats
   , recordObservationQueries :: !Integer, projectedSeeds :: !Integer
   , helperInferenceQueries :: !Integer, helperClauseQueries :: !Integer, helperProposals :: !Integer
   , searchNodes :: !Integer, depthIterations :: !Integer, currentDepth :: !Int
+  , resumedSlices :: !Integer, replayedCatalogues :: !Integer, replayedScopes :: !Integer
   , modelItems :: !Integer, modelNanoseconds :: !Integer, policyDecisions :: !Integer
   , workExhausted :: !Bool }
   deriving (Eq, Show)
@@ -86,6 +87,7 @@ emptyStats = SearchStats
   , recordObservationQueries = 0, projectedSeeds = 0
   , helperInferenceQueries = 0, helperClauseQueries = 0, helperProposals = 0
   , searchNodes = 0, depthIterations = 0, currentDepth = 0
+  , resumedSlices = 0, replayedCatalogues = 0, replayedScopes = 0
   , modelItems = 0, modelNanoseconds = 0, policyDecisions = 0
   , workExhausted = False }
 instance ToJSON SearchStats where
@@ -113,5 +115,7 @@ instance ToJSON SearchStats where
     ,"helper_inference_queries" .= helperInferenceQueries s
     ,"helper_clause_queries" .= helperClauseQueries s, "helper_proposals" .= helperProposals s
     ,"depth_iterations" .= depthIterations s, "current_depth" .= currentDepth s
+    ,"resumed_slices" .= resumedSlices s, "replayed_catalogues" .= replayedCatalogues s
+    ,"replayed_scopes" .= replayedScopes s
     ,"model_items_scored" .= modelItems s, "model_elapsed_ns" .= modelNanoseconds s
     ,"policy_decisions" .= policyDecisions s, "work_exhausted" .= workExhausted s]

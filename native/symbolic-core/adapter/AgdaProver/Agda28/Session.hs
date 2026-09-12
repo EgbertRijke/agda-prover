@@ -13,7 +13,7 @@ module AgdaProver.Agda28.Session
   , withSessionConfigurationReuse
   , inspect, pending, tryExpression
   , DependencySnapshot, dependencies, dependencyView, orderDependentGoals, constrainingGoals
-  , solveEvidence, solveEvidenceAtDepth, solveHelper, RefutationProposal, proposeRefutation, refutationView, refutationKind
+  , solveEvidence, solveEvidenceAtDepth, EvidenceContinuation, solveEvidenceSlice, resumeEvidenceSlice, solveHelper, RefutationProposal, proposeRefutation, refutationView, refutationKind
   , Refutation.Kind (..)
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
@@ -558,7 +558,7 @@ reserveAllocation (Allocation name point) = do
   stFreshNameId `modifyTCLens` max name
   stFreshInteractionId `modifyTCLens` max point
 
--- One coarse request owns all speculative choices. Costs live outside TCM and
+-- Each advance owns its speculative execution. Costs live outside TCM and
 -- survive cancellation. A winning native term is rechecked from the ORIGINAL
 -- parent: no speculative constraints or warnings are silently published.
 solveEvidence :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
@@ -576,6 +576,33 @@ solveEvidenceAtDepth :: Search.IterationDepth -> Session s -> GoalRef s -> Searc
 solveEvidenceAtDepth depth session goal limits models mode native enableFocused excluded emit =
   runGoalSearch session goal $ \stats namespace point origin validate target ->
     Search.run depth stats limits models mode native enableFocused emit namespace excluded point origin validate target
+
+-- Opaque, exact-parent continuation. It owns immutable snapshots, not the live
+-- session or scorer. Reusing it checks source/epoch/residency through request;
+-- retry after cancellation starts from the same snapshot without refunding work.
+type role EvidenceContinuation nominal
+data EvidenceContinuation s = EvidenceContinuation (GoalRef s) TCState TCEnv Search.Pending
+
+solveEvidenceSlice :: Session s -> GoalRef s
+                   -> Search.SearchLimits -> Policy.Models -> Policy.RankingMode
+                   -> Maybe (NativeScorer n) -> Bool -> [String] -> (Value -> IO ())
+                   -> IO (Search.SearchStats, Either Failure
+                     (Search.SearchStatus, Maybe (Transition s), [(T.Text,T.Text)], Maybe (EvidenceContinuation s)))
+solveEvidenceSlice session goal limits models mode native enableFocused excluded emit =
+  runGoalSearchResumable session goal Nothing $ \stats namespace point origin validate target ->
+    Search.resume stats limits native emit namespace $
+      Search.begin Search.initialDepth models mode enableFocused excluded point origin validate target
+
+-- Resumption cannot silently change a continuation's visibility/model policy.
+-- Only the new allowance, borrowed scorer and response channel are supplied.
+resumeEvidenceSlice :: EvidenceContinuation s -> Session s -> GoalRef s -> Search.SearchLimits
+                    -> Maybe (NativeScorer n) -> (Value -> IO ())
+                    -> IO (Search.SearchStats, Either Failure
+                      (Search.SearchStatus, Maybe (Transition s), [(T.Text,T.Text)], Maybe (EvidenceContinuation s)))
+resumeEvidenceSlice continuation@(EvidenceContinuation _ _ _ task) session goal limits native emit =
+  runGoalSearchResumable session goal (Just continuation) $ \stats namespace _ _ _ _ -> do
+    liftIO $ modifyIORef' stats $ \s -> s { Search.resumedSlices = Search.resumedSlices s + 1 }
+    Search.resume stats limits native emit namespace task
 
 solveHelper :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
             -> Policy.RankingMode -> Maybe (NativeScorer n) -> ObservationMode -> DraftExpression
@@ -707,6 +734,16 @@ runGoalSearch :: Session s -> GoalRef s
               -> IO (Search.SearchStats, Either Failure
                    (Search.SearchStatus, Maybe (Transition s), [(T.Text,T.Text)]))
 runGoalSearch session goal search = do
+  (cost, result) <- runGoalSearchResumable session goal Nothing $ \stats namespace point origin validate target ->
+    (, Nothing) <$> search stats namespace point origin validate target
+  pure (cost, (\(status, transition, selected, _) -> (status, transition, selected)) <$> result)
+
+runGoalSearchResumable :: Session s -> GoalRef s -> Maybe (EvidenceContinuation s)
+              -> (IORef Search.SearchStats -> String -> InteractionId -> Maybe Recursion.Owner
+                  -> (A.Expr -> TCM ()) -> I.Type -> TCM (Search.Result, Maybe Search.Pending))
+              -> IO (Search.SearchStats, Either Failure
+                   (Search.SearchStatus, Maybe (Transition s), [(T.Text,T.Text)], Maybe (EvidenceContinuation s)))
+runGoalSearchResumable session goal continuation search = do
   stats <- newIORef Search.emptyStats
   outcome <- request session (goalState goal) $ \owner state -> do
     ledger <- work session
@@ -714,9 +751,19 @@ runGoalSearch session goal search = do
         namespace = show (stateKey $ goalState goal) ++ ":" ++ show (requests ledger)
         origin = Map.lookup (keyBranch $ stateKey $ goalState goal) (ownerBranches owner)
           >>= Map.findWithDefault Nothing point . branchOrigins
-    (searched, allocation) <- kernel session state $ do
+        matching (EvidenceContinuation previous _ _ _) =
+          stateKey (goalState previous) == stateKey (goalState goal) && goalId previous == point
+        initial = case continuation of
+          Just (EvidenceContinuation _ saved _ _) -> saved
+          Nothing -> state
+        environment = case continuation of
+          Just (EvidenceContinuation _ _ saved _) -> localTC (const saved)
+          Nothing -> id
+    (searched, allocation) <- kernel session initial $ environment $ do
       exists <- elem point <$> openInteractionPoints
-      if not exists then pure $ Left UnknownGoal else withInteractionId point $ do
+      if maybe False (not . matching) continuation then pure $ Left $
+        KernelFailure "evidence-continuation-parent-mismatch"
+      else if not exists then pure $ Left UnknownGoal else withInteractionId point $ do
         meta <- lookupInteractionId point
         target <- getMetaTypeInContext meta
         let validate expression = do
@@ -726,14 +773,18 @@ runGoalSearch session goal search = do
               changed <- Set.difference <$> useTC stTCWarnings <*> pure warnings
               let bad = filter (not . expectedWarning) (Set.toAscList changed)
               unless (null bad) $ genericError $ unlines $ map tcWarningString bad
-        Right <$> search stats namespace point origin validate target
+        result <- search stats namespace point origin validate target
+        env <- askTC
+        pure $ Right (result, env)
     case searched >>= id of
       Left failure -> pure (owner, Left failure)
-      Right (Search.Result status Nothing selected) -> pure (owner, Right (status, Nothing, selected))
-      Right (Search.Result status (Just term) selected) -> do
+      Right ((Search.Result status Nothing selected, remaining), env) ->
+        pure (owner, Right (status, Nothing, selected,
+          EvidenceContinuation goal allocation env <$> remaining))
+      Right ((Search.Result status (Just term) selected, _), _) -> do
         (next, checked) <- check session owner (goalState goal) state
           (DraftAction point $ nativeDraft term allocation) False
-        pure (next, (\transition -> (status, Just transition, selected)) <$> checked)
+        pure (next, (\transition -> (status, Just transition, selected, Nothing)) <$> checked)
   observed <- readIORef stats
   recordSearchWork session observed
   pure (observed, outcome)

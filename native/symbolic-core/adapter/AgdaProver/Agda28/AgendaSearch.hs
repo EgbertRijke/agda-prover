@@ -118,6 +118,7 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "ordering" .= (if progressOrdering settings then "cost-plus-obligations-v2" else "cost-only-v1" :: String),
     "retry_ordering" .= (if retryWorkOrdering settings then "spent-work-v1" else "uniform-v1" :: String),
     "evidence_depth_reuse" .= evidenceDepthReuse settings,
+    "evidence_continuation" .= (if evidenceDepthReuse settings then "operand-progress-v1" else "restart-v1" :: String),
     "coalesce_introductions" .= coalesceIntroductions settings,
     "target_function_operands" .= targetFunctionOperands settings,
     "recursive_evidence_operands" .= recursiveEvidenceOperands settings,
@@ -129,9 +130,9 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
 frontier :: Run s -> (Int, Maybe (S.StateRef s, Natural, Natural))
 frontier (Run _ _ queue _ _ _ _ _ _) = N.frontier queue
 
--- A slice ends between native operations, retaining the exact queue. A coarse
--- evidence attempt remains atomic: its censored retry is explicitly charged
--- again. No pause claims to checkpoint the interior of an Agda checker call.
+-- A slice ends between native operations, retaining the exact queue and coarse
+-- evidence operands. Atomic catalogue/scope retries stay explicitly charged.
+-- No pause claims to checkpoint the interior of an Agda checker call.
 advance :: Maybe (NativeScorer n) -> Natural -> Run s -> IO (Result s)
 advance native count run@(Run session settings initial baseline metrics owner trace accepted refutationGoal) =
   withMVar owner $ \_ -> if count == 0 then pure $ Paused SliceEnded run else

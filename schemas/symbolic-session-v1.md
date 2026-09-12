@@ -454,18 +454,25 @@ weight only: the physical ledger is neither charged twice nor reset. The cost
 receipt reports `retry_ordering: spent-work-v1`, or `uniform-v1` for the explicit
 false ablation. One-step search has no macro retries and is unaffected.
 
-`evidence_depth_reuse` retains the unfinished iterative-deepening level after
-an evidence attempt is censored. Retrying that same immutable parent/goal starts
-at this level, rather than repeating already completed shallower iterations.
-The unfinished iteration is replayed, not skipped, and all work actually
-performed is charged. The continuation contains no speculative metavariable
-assignment, candidate proof or suspended Agda stack. Its model/visibility
-configuration is fixed by the owning run. Candidate reconstruction and fresh
-checking remain unchanged. False restarts every attempt at depth zero; the
-agenda cost receipt includes the effective boolean. This additive option does
-not change one-step behavior or the direct `solve-evidence` request, which
-continues to start at zero. Within an attempt, the initial level is recoverable
-as `current_depth - depth_iterations + 1` when at least one iteration ran.
+`evidence_depth_reuse` retains completed iterative depths and unfinished operand
+progress for the exact parent/goal. The continuation includes pending candidates,
+dependent sibling substitutions and rollback snapshots inside the Agda adapter;
+it is neither serializable nor an accepted proof. Source, epoch and parent
+residency are checked at each advance. Scorers and response callbacks are not
+retained. Model/visibility settings remain fixed by the owning run. A candidate
+is checked again from the original parent before publication, then subject to
+the usual reconstruction and independent fresh checking.
+
+Native operations are not suspended internally. A catalogue builder or stateful
+scope operation that runs out of allowance is replayed from its own starting
+snapshot, without refunding any work. The evidence-v2 receipt adds
+`resumed_slices`, `replayed_catalogues` and `replayed_scopes`; counters cover only
+work in that request. `depth_iterations` counts newly entered iterations, so a
+resumed request may have zero iterations with nonzero `current_depth`.
+False restarts from depth zero. The agenda receipt preserves the boolean and
+adds `evidence_continuation: operand-progress-v1` (true) or `restart-v1` (false).
+One-step behavior and direct `solve-evidence` request semantics are unchanged;
+the latter starts a new search, discarding any censored internal continuation.
 
 `coalesce_introductions` lets whole search use a generated ordinary lambda to
 expose a function binder without also scheduling a result-split helper for the

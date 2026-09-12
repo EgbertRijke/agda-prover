@@ -1,8 +1,10 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE RankNTypes #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.EvidenceSearch (run, runHelper, primitiveProposals, structuralProposals, equationProposals, constructorProposals, clauseProposals, Result (..)) where
+module AgdaProver.Agda28.EvidenceSearch (run, begin, resume, Pending, runHelper, primitiveProposals, structuralProposals, equationProposals, constructorProposals, clauseProposals, Result (..)) where
 
 import Control.Monad (forM)
 import Control.Monad.Except (catchError, runExceptT, throwError)
@@ -51,6 +53,7 @@ import Agda.Utils.Impossible (impossible)
 import AgdaProver.Symbolic.Evidence
 import AgdaProver.Symbolic.Agenda qualified as Agenda
 import AgdaProver.Agda28.Construction qualified as Construction
+import AgdaProver.Agda28.SearchTask qualified as Task
 import AgdaProver.Agda28.ObservedEquations qualified as ObservedEquations
 import AgdaProver.Agda28.Recursion qualified as Recursion
 import AgdaProver.Agda28.Scheduling qualified as Scheduling
@@ -79,6 +82,70 @@ data Runtime s = Runtime SearchLimits (IORef SearchStats) (IORef Bool)
 data Seed = Seed A.Expr String String
 data GlobalInventory = GlobalInventory [A.Expr] (Set.Set QName) (Maybe Recursion.CallContext)
 
+data Services = forall s. Services (Runtime s)
+type Search = Task.Task Services
+-- Pure continuation data. A live scorer/callback and statistics references are
+-- supplied afresh; dependent choices and rollback snapshots stay in the task.
+data Pending = Pending (Search Result) Bool Int P.Models P.RankingMode Bool
+
+liftS :: TCM a -> Search a
+liftS action = Task.operation $ const action
+
+service :: (forall s. Runtime s -> TCM a) -> Search a
+service action = Task.operation $ \(Services runtime) -> action runtime
+
+-- Catalogue builders remain native atomic operations. If one consumes its
+-- slice, replay that builder only, preserving surrounding operand progress.
+-- Its discarded attempt remains fully accounted; never refund checker work.
+nativeOperation :: (forall s. Runtime s -> TCM a) -> Search a
+nativeOperation action = do
+  initial <- liftS getTC
+  value <- service action
+  exhausted <- service stopped
+  if not exhausted then pure value else do
+    liftS $ putTC initial
+    Task.suspended $ \(Services runtime) -> not <$> stopped runtime
+    modifyS $ \s -> s { replayedCatalogues = replayedCatalogues s + 1 }
+    nativeOperation action
+
+scopeS :: (forall b. TCM b -> TCM b) -> Search a -> Search a
+scopeS = Task.atomicScope $ \(Services runtime) ->
+  modify runtime $ \s -> s { replayedScopes = replayedScopes s + 1 }
+
+modifyS :: (SearchStats -> SearchStats) -> Search ()
+modifyS update = service $ \runtime -> modify runtime update
+
+chargeS :: (SearchStats -> SearchStats) -> Search Bool
+chargeS update = do
+  Task.suspended $ \(Services runtime) -> charge runtime update
+  pure True
+
+deferDepthS :: Search (Maybe a)
+deferDepthS = service deferDepth
+
+attemptS :: Search (Maybe a) -> Search (Maybe a)
+attemptS = Task.attempt $ \(Services runtime) err -> case err of
+  TypeError{} -> modify runtime (\s -> s { rejectedQueries = rejectedQueries s + 1 }) >> pure True
+  PatternErr{} -> modify runtime (\s -> s { blockedQueries = blockedQueries s + 1 }) >> pure True
+  _ -> pure False
+
+choicesS :: [Search (Maybe a)] -> Search (Maybe a)
+choicesS [] = pure Nothing
+choicesS (action:rest) = attemptS action >>= maybe (choicesS rest) (pure . Just)
+
+queryCheckS :: A.Expr -> I.Type -> (I.Term -> Search (Maybe a)) -> Search (Maybe a)
+queryCheckS expression target use = do
+  _ <- chargeS $ \s -> s { checkerQueries = checkerQueries s + 1 }
+  liftS (checkExpr expression target) >>= use
+
+queryInferS :: A.Expr -> ((I.Term, I.Type) -> Search (Maybe a)) -> Search (Maybe a)
+queryInferS = queryInferWithS ExpandLast
+
+queryInferWithS :: ExpandHidden -> A.Expr -> ((I.Term, I.Type) -> Search (Maybe a)) -> Search (Maybe a)
+queryInferWithS expansion expression use = do
+  _ <- chargeS $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+  liftS (inferExpr' expansion expression) >>= use
+
 -- Only rigid type heads can witness a mismatch. A stuck definition, newly
 -- introduced telescope variable or meta is unknown. LocalShape identifies a
 -- binder in the original goal context, never a printed name. Argument/index
@@ -91,38 +158,57 @@ data ArgumentShape = ArgumentShape
 run :: IterationDepth -> IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode -> Maybe (NativeScorer s)
     -> Bool -> (Value -> IO ()) -> String -> [String] -> InteractionId -> Maybe Recursion.Owner
     -> (A.Expr -> TCM ()) -> I.Type -> TCM Result
-run startDepth stats limits models mode native enableFocused emit namespace excluded point owner validate target = do
-  pruned <- liftIO $ newIORef False
-  let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) enableFocused
-  (currentForbidden, userExcluded) <- excludedGlobals excluded
-  inheritedGroup <- maybe (pure Set.empty) Recursion.ownerGroup owner
-  let forbidden = Set.union currentForbidden inheritedGroup
-  globals <- visibleGlobals forbidden
-  recursion <- case owner of
-    Just root | not $ Set.member (Recursion.ownerName root) userExcluded -> attempt runtime $ do
-      allowed <- charge runtime $ \s -> s { recursiveContextQueries = recursiveContextQueries s + 1 }
-      if allowed then Recursion.inspect point root else pure Nothing
-    _ -> pure Nothing
-  let iterateDepth depth = do
-        liftIO $ writeIORef pruned False
-        modify runtime $ \s -> s { depthIterations = depthIterations s + 1, currentDepth = depth }
-        found <- search runtime (GlobalInventory globals forbidden recursion) depth target [] $ \expression term selected -> do
-          closed <- instantiateFull term
-          if not (noMetas closed) then pure Nothing else do
-            admissible <- if maybe False (`Recursion.usesOwner` expression) owner then do
-              allowed <- charge runtime $ \s -> s
-                { checkerQueries = checkerQueries s + 1, recursiveValidationQueries = recursiveValidationQueries s + 1 }
-              if not allowed then pure False else validate expression >> pure True
-              else pure True
-            pure $ if admissible then Just (expression, selected) else Nothing
-        observed <- liftIO $ readIORef stats
-        widened <- liftIO $ readIORef pruned
-        case found of
-          Just (term, selected) -> pure $ Result FoundCandidate (Just term) selected
-          Nothing | workExhausted observed -> pure $ Result WorkExhausted Nothing []
-          Nothing | not widened -> pure $ Result FragmentExhausted Nothing []
-          Nothing -> iterateDepth (depth + 1)
-  iterateDepth $ iterationDepth startDepth
+run depth stats limits models mode scorer focused emit namespace excluded point owner validate target =
+  fst <$> resume stats limits scorer emit namespace
+    (begin depth models mode focused excluded point owner validate target)
+
+begin :: IterationDepth -> P.Models -> P.RankingMode -> Bool -> [String] -> InteractionId
+      -> Maybe Recursion.Owner -> (A.Expr -> TCM ()) -> I.Type -> Pending
+begin startDepth models mode enableFocused excluded point owner validate target =
+  Pending task False (iterationDepth startDepth) models mode enableFocused
+ where
+  task = do
+    (currentForbidden, userExcluded) <- liftS $ excludedGlobals excluded
+    inheritedGroup <- liftS $ maybe (pure Set.empty) Recursion.ownerGroup owner
+    let forbidden = Set.union currentForbidden inheritedGroup
+    globals <- liftS $ visibleGlobals forbidden
+    recursion <- case owner of
+      Just root | not $ Set.member (Recursion.ownerName root) userExcluded -> attemptS $ do
+        _ <- chargeS $ \s -> s { recursiveContextQueries = recursiveContextQueries s + 1 }
+        liftS $ Recursion.inspect point root
+      _ -> pure Nothing
+    let iterateDepth depth = do
+          service $ \(Runtime _ _ pruned _ _ _ _ _ _) -> liftIO $ writeIORef pruned False
+          modifyS $ \s -> s { depthIterations = depthIterations s + 1, currentDepth = depth }
+          found <- search enableFocused (GlobalInventory globals forbidden recursion) depth target [] $ \expression term selected -> do
+            closed <- liftS $ instantiateFull term
+            if not (noMetas closed) then pure Nothing else do
+              if maybe False (`Recursion.usesOwner` expression) owner then do
+                _ <- chargeS $ \s -> s
+                  { checkerQueries = checkerQueries s + 1, recursiveValidationQueries = recursiveValidationQueries s + 1 }
+                liftS $ validate expression
+                else pure ()
+              pure $ Just (expression, selected)
+          widened <- service $ \(Runtime _ _ pruned _ _ _ _ _ _) -> liftIO $ readIORef pruned
+          case found of
+            Just (term, selected) -> pure $ Result FoundCandidate (Just term) selected
+            Nothing | not widened -> pure $ Result FragmentExhausted Nothing []
+            Nothing -> iterateDepth (depth + 1)
+    iterateDepth $ iterationDepth startDepth
+
+resume :: IORef SearchStats -> SearchLimits -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String
+       -> Pending -> TCM (Result, Maybe Pending)
+resume stats limits scorer emit namespace (Pending task wasPruned depth models mode focused) = do
+  pruned <- liftIO $ newIORef wasPruned
+  liftIO $ modifyIORef' stats $ \s -> s { currentDepth = depth }
+  let runtime = Runtime limits stats pruned models mode scorer emit (T.pack namespace) focused
+  Task.step task (Services runtime) >>= \case
+    Task.Done result -> pure (result, Nothing)
+    Task.Suspended rest -> do
+      widened <- liftIO $ readIORef pruned
+      observed <- liftIO $ readIORef stats
+      pure (Result WorkExhausted Nothing [],
+        Just $ Pending rest widened (currentDepth observed) models mode focused)
 
 -- Finite typed helper proposals use the same policy/checking boundary as
 -- ordinary evidence. Scheduling which application to generalize belongs to
@@ -928,49 +1014,47 @@ rankFocused runtime@(Runtime _ ref _ models mode native emit namespace _) fragme
       pure [(P.candidateValue candidate, if length candidates > 1 then [(decision, P.candidateId candidate)] else [])
         | candidate <- P.rankedCandidates batch]
 
-search :: Runtime s -> GlobalInventory -> Int -> I.Type -> [(T.Text,T.Text)]
-       -> (A.Expr -> I.Term -> [(T.Text,T.Text)] -> TCM (Maybe a)) -> TCM (Maybe a)
-search runtime@(Runtime _ _ _ _ _ _ _ _ enableFocused) inventory@(GlobalInventory globals forbidden recursion) depth target selected use = do
-  done <- stopped runtime
-  if done then pure Nothing else do
-    modify runtime $ \s -> s { searchNodes = searchNodes s + 1 }
-    choices runtime $ [focused | enableFocused] ++ [ordinary]
+search :: Bool -> GlobalInventory -> Int -> I.Type -> [(T.Text,T.Text)]
+       -> (A.Expr -> I.Term -> [(T.Text,T.Text)] -> Search (Maybe a)) -> Search (Maybe a)
+search enableFocused inventory@(GlobalInventory globals forbidden recursion) depth target selected use = do
+  modifyS $ \s -> s { searchNodes = searchNodes s + 1 }
+  choicesS $ [focused | enableFocused] ++ [ordinary]
  where
   focused = do
-    allowed <- charge runtime $ \s -> s
+    allowed <- chargeS $ \s -> s
       { inferenceQueries = inferenceQueries s + 1, focusedObservationQueries = focusedObservationQueries s + 1 }
-    if not allowed then pure Nothing else NativeFocused.observe target >>= \case
+    if not allowed then pure Nothing else liftS (NativeFocused.observe target) >>= \case
       Nothing -> pure Nothing
       Just fragment -> Focused.enumerate
         (Focused.Hooks
-          (charge runtime $ \s -> s { focusedActions = focusedActions s + 1 })
+          (chargeS $ \s -> s { focusedActions = focusedActions s + 1 })
           noteFocused
-          (rankFocused runtime fragment))
+          (\ty context actions -> nativeOperation $ \runtime -> rankFocused runtime fragment ty context actions))
         (NativeFocused.emptyAtoms fragment) depth (NativeFocused.assumptions fragment)
-        (NativeFocused.target fragment) $ \solution -> attempt runtime $ do
-          modify runtime $ \s -> s { focusedCandidates = focusedCandidates s + 1 }
-          expression <- NativeFocused.render fragment $ Focused.proof solution
-          queryCheck runtime expression target $ \term -> use expression term (selected ++ Focused.decisions solution)
+        (NativeFocused.target fragment) $ \solution -> attemptS $ do
+          modifyS $ \s -> s { focusedCandidates = focusedCandidates s + 1 }
+          expression <- liftS $ NativeFocused.render fragment $ Focused.proof solution
+          queryCheckS expression target $ \term -> use expression term (selected ++ Focused.decisions solution)
   noteFocused event = case event of
-    Focused.Node -> modify runtime $ \s -> s { focusedNodes = focusedNodes s + 1 }
-    Focused.CacheHit -> modify runtime $ \s -> s { focusedCacheHits = focusedCacheHits s + 1 }
-    Focused.CyclePruned -> modify runtime $ \s -> s { focusedCycles = focusedCycles s + 1 }
-    Focused.Deferred -> deferDepth runtime >> pure ()
+    Focused.Node -> modifyS $ \s -> s { focusedNodes = focusedNodes s + 1 }
+    Focused.CacheHit -> modifyS $ \s -> s { focusedCacheHits = focusedCacheHits s + 1 }
+    Focused.CyclePruned -> modifyS $ \s -> s { focusedCycles = focusedCycles s + 1 }
+    Focused.Deferred -> deferDepthS >> pure ()
     Focused.Rule -> pure ()
   ordinary = do
-    classified <- attempt runtime $ do
-      allowed <- charge runtime $ \s -> s
+    classified <- attemptS $ do
+      allowed <- chargeS $ \s -> s
         { inferenceQueries = inferenceQueries s + 1, classificationQueries = classificationQueries s + 1 }
       let constructors = Set.fromList [name | A.Con (I.AmbQ names) <- globals, name <- toList names]
-      if allowed then Just <$> Scheduling.classify forbidden constructors recursion target else pure Nothing
+      if allowed then Just <$> liftS (Scheduling.classify forbidden constructors recursion target) else pure Nothing
     let classification = maybe Classification.unknownClassification id classified
-    seeds <- rankSeeds runtime classification target globals
+    seeds <- nativeOperation $ \runtime -> rankSeeds runtime classification target globals
     let construction = [constructRecord, introduce]
-        application = [queryInferWith DontExpandLast runtime expression $ \(_, ty) ->
+        application = [queryInferWithS DontExpandLast expression $ \(_, ty) ->
             guidedApplication expression ty depth [] (selected ++ picked)
           | (Seed expression _ _, picked) <- seeds]
-    choices runtime $
-      [queryCheck runtime expression target $ \term -> use expression term (selected ++ picked)
+    choicesS $
+      [queryCheckS expression target $ \term -> use expression term (selected ++ picked)
        | (Seed expression _ _, picked) <- seeds]
       ++ [algebraic seeds]
       ++ [recursiveCall inferredArguments context | Just context <- [recursion]]
@@ -983,31 +1067,31 @@ search runtime@(Runtime _ _ _ _ _ _ _ _ enableFocused) inventory@(GlobalInventor
   -- proofs, and a downstream rejection resumes alternative paths. This does
   -- not confer commutativity, equality elimination or proof irrelevance.
   algebraic seeds = do
-    allowed <- charge runtime $ \s -> s
+    allowed <- chargeS $ \s -> s
       { inferenceQueries = inferenceQueries s + 1, algebraObservationQueries = algebraObservationQueries s + 1 }
     if not allowed then pure Nothing else do
-      views <- NativeAlgebra.inspectGoal target
-      choices runtime [rewriteView view | view <- views]
+      views <- liftS $ NativeAlgebra.inspectGoal target
+      choicesS [rewriteView view | view <- views]
    where
       rewriteView view = do
-        observed <- fmap catMaybes $ forM seeds $ \(Seed expression _ _, picked) -> localTCState $ attempt runtime $
-          queryInferWith DontExpandLast runtime expression $ \(_, ty) ->
-            fmap (\role -> (role,(expression,picked))) <$> NativeAlgebra.inspectEvidence view ty
+        observed <- fmap catMaybes $ forM seeds $ \(Seed expression _ _, picked) -> scopeS localTCState $ attemptS $
+          queryInferWithS DontExpandLast expression $ \(_, ty) ->
+            fmap (\role -> (role,(expression,picked))) <$> liftS (NativeAlgebra.inspectEvidence view ty)
         let (ops, edges) = NativeAlgebra.operations observed
             (left,right) = NativeAlgebra.endpoints view
-            note Algebra.Deferred = deferDepth runtime >> pure ()
+            note Algebra.Deferred = deferDepthS >> pure ()
             note _ = pure ()
-        wrappers <- NativeAlgebra.contexts view
+        wrappers <- liftS $ NativeAlgebra.contexts view
         let finish [] expression picked = do
-              modify runtime $ \s -> s { algebraCandidates = algebraCandidates s + 1 }
-              queryCheck runtime expression target $ \term -> use expression term picked
-            finish (f:rest) expression picked = choices runtime
+              modifyS $ \s -> s { algebraCandidates = algebraCandidates s + 1 }
+              queryCheckS expression target $ \term -> use expression term picked
+            finish (f:rest) expression picked = choicesS
               [finish rest (A.app lift [defaultArg $ unnamed f, defaultArg $ unnamed expression])
                 (picked ++ labels) | (lift,labels) <- Algebra.congruence ops]
         Algebra.enumerate (Algebra.Hooks
-          (charge runtime $ \s -> s { algebraActions = algebraActions s + 1 }) note)
-          depth ops edges left right $ \proof -> attempt runtime $ do
-            expression <- NativeAlgebra.render view (fmap fst proof)
+          (chargeS $ \s -> s { algebraActions = algebraActions s + 1 }) note)
+          depth ops edges left right $ \proof -> attemptS $ do
+            expression <- liftS $ NativeAlgebra.render view (fmap fst proof)
             finish wrappers expression (selected ++ concatMap snd (toList proof))
   -- The recursive head is sealed away from ordinary argument search. Only a
   -- fully applied call using a descent seed or a real coinductive copattern
@@ -1017,43 +1101,43 @@ search runtime@(Runtime _ _ _ _ _ _ _ _ enableFocused) inventory@(GlobalInventor
   -- is a proposal condition, not a replacement for Agda's termination checker;
   -- unresolved with-ancestry remains an explicitly uncertain fallback.
   recursiveCall generate context = do
-    allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+    allowed <- chargeS $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
     if not allowed then pure Nothing else do
       let headExpression = Recursion.callHead context
-      (_, ty) <- inferExpr headExpression
+      (_, ty) <- liftS $ inferExpr headExpression
       generate context headExpression ty depth selected
   -- Infer operands from the expected dependent result before enumerating them.
   -- All placeholders are native Agda metas in this speculative branch. Only a
   -- fully instantiated term is reified/retained; otherwise ordinary argument
   -- search remains available. No textual result-index matching is involved.
   inferredArguments context expression ty remaining picked
-    | remaining <= 0 = deferDepth runtime
+    | remaining <= 0 = deferDepthS
     | otherwise = inferExpected context expression ty picked
   -- This is one expected-type inference proposal, not a choice for every
   -- parameter. Its actual checker work is charged for each supplied meta.
-  inferExpected context expression ty picked = reduce ty >>= \case
+  inferExpected context expression ty picked = liftS (reduce ty) >>= \case
     I.El _ (I.Pi domain codomain)
       -> do
-          omitted <- Construction.omittedField $ getHiding domain
-          queryCheck runtime omitted (I.unDom domain) $ \value ->
+          omitted <- liftS $ Construction.omittedField $ getHiding domain
+          queryCheckS omitted (I.unDom domain) $ \value ->
             inferExpected context
               (A.app expression [Arg (getArgInfo domain) $ unnamed omitted])
               (absApp codomain value) picked
-    _ -> queryCheck runtime expression target $ \value -> do
-      instantiated <- instantiateFull value
+    _ -> queryCheckS expression target $ \value -> do
+      instantiated <- liftS $ instantiateFull value
       if not (noMetas instantiated) then pure Nothing else do
-        nativeExpression <- reify instantiated
+        nativeExpression <- liftS $ reify instantiated
         if not (Recursion.eligibleCall context nativeExpression) then pure Nothing else do
           noteCall context
           use nativeExpression instantiated picked
-  arguments context expression ty remaining picked = reduce ty >>= \case
+  arguments context expression ty remaining picked = liftS (reduce ty) >>= \case
     I.El _ (I.Pi domain codomain)
-      | remaining <= 0 -> deferDepth runtime
-      | otherwise -> choices runtime $
-          [do omitted <- Construction.omittedField $ getHiding domain
-              queryCheck runtime omitted (I.unDom domain) $ \value -> advance omitted value
+      | remaining <= 0 -> deferDepthS
+      | otherwise -> choicesS $
+          [do omitted <- liftS $ Construction.omittedField $ getHiding domain
+              queryCheckS omitted (I.unDom domain) $ \value -> advance omitted value
           | notVisible domain]
-          ++ [search runtime (GlobalInventory globals forbidden Nothing) (remaining-1)
+          ++ [search enableFocused (GlobalInventory globals forbidden Nothing) (remaining-1)
                 (I.unDom domain) picked $ \argument value selected' ->
                   next argument value selected']
        where
@@ -1063,49 +1147,49 @@ search runtime@(Runtime _ _ _ _ _ _ _ _ enableFocused) inventory@(GlobalInventor
         advance argument value = next argument value picked
     _ | Recursion.eligibleCall context expression -> do
           noteCall context
-          queryCheck runtime expression target $ \term -> use expression term picked
+          queryCheckS expression target $ \term -> use expression term picked
       | otherwise -> pure Nothing
-  noteCall context = modify runtime $ \s -> s
+  noteCall context = modifyS $ \s -> s
     { recursiveProposals = recursiveProposals s + 1
     , copatternProposals = copatternProposals s + if Recursion.copatternCall context then 1 else 0 }
-  constructRecord = Construction.recordPlan forbidden target >>= \case
+  constructRecord = liftS (Construction.recordPlan forbidden target) >>= \case
     Nothing -> pure Nothing
     Just (names, telescope)
-      | depth <= 0 && not (null names) -> deferDepth runtime
+      | depth <= 0 && not (null names) -> deferDepthS
       | otherwise -> do
-          modify runtime $ \s -> s { recordProposals = recordProposals s + 1 }
+          modifyS $ \s -> s { recordProposals = recordProposals s + 1 }
           fields names telescope [] selected
   fields [] I.EmptyTel assignments picked = do
     let expression = Construction.recordExpression assignments
-    queryCheck runtime expression target $ \term -> use expression term picked
-  fields (name:names) (I.ExtendTel domain rest) assignments picked = choices runtime $
-    [do expression <- Construction.omittedField $ getHiding domain
-        queryCheck runtime expression (I.unDom domain) $ \value ->
+    queryCheckS expression target $ \term -> use expression term picked
+  fields (name:names) (I.ExtendTel domain rest) assignments picked = choicesS $
+    [do expression <- liftS $ Construction.omittedField $ getHiding domain
+        queryCheckS expression (I.unDom domain) $ \value ->
           fields names (absApp rest value) assignments picked
     | notVisible domain]
-    ++ [search runtime inventory (depth-1) (I.unDom domain) picked $ \expression value selected' ->
+    ++ [search enableFocused inventory (depth-1) (I.unDom domain) picked $ \expression value selected' ->
           fields names (absApp rest value) (assignments ++ [(name, expression)]) selected']
-  fields _ _ _ _ = genericError "native-record-telescope-mismatch"
-  introduce = reduce target >>= \case
+  fields _ _ _ _ = liftS $ genericError "native-record-telescope-mismatch"
+  introduce = liftS (reduce target) >>= \case
     I.El _ (I.Pi domain codomain)
-      -> choices runtime
-        [do modify runtime $ \s -> s { absurdProposals = absurdProposals s + 1 }
+      -> choicesS
+        [do modifyS $ \s -> s { absurdProposals = absurdProposals s + 1 }
             let expression = Construction.absurdLambda $ getHiding domain
-            queryCheck runtime expression target $ \term -> use expression term selected
-        ,if depth <= 0 then deferDepth runtime else do
-          modify runtime $ \s -> s { lambdaProposals = lambdaProposals s + 1 }
+            queryCheckS expression target $ \term -> use expression term selected
+        ,if depth <= 0 then deferDepthS else do
+          modifyS $ \s -> s { lambdaProposals = lambdaProposals s + 1 }
           let hint = if I.absName codomain `elem` ["", "_"] then "x" else I.absName codomain
-          withFreshName noRange hint $ \name ->
-            addContext (name, domain) $ search runtime inventory (depth-1)
+          name <- liftS $ withFreshName noRange hint pure
+          scopeS (addContext (name, domain)) $ search enableFocused inventory (depth-1)
               (absApp (raise 1 codomain) $ I.Var 0 []) selected $ \body term picked ->
-                escapeContext impossible 1 $
+                scopeS (escapeContext impossible 1) $
                   let info = getArgInfo domain
                       expression = A.Lam exprNoRange (A.mkDomainFree $ Arg info $ unnamed $ A.mkBinder_ name) body
                       value = I.Lam info $ I.Abs hint term
                   in use expression value picked]
     _ -> pure Nothing
-  produce expression picked = queryInfer runtime expression $ \(term, ty) ->
-    choices runtime
+  produce expression picked = queryInferS expression $ \(term, ty) ->
+    choicesS
       [eliminate expression ty (selected ++ picked)
       ,applyMore expression term ty depth (selected ++ picked)]
   -- Elaborate a native application skeleton against the expected result before
@@ -1114,14 +1198,14 @@ search runtime@(Runtime _ _ _ _ _ _ _ _ enableFocused) inventory@(GlobalInventor
   -- operand types keep the constraints belonging to this application spine.
   -- Keep the chosen abstract operands (including generated helpers); reifying
   -- the completed internal term would lose their declaration structure.
-  guidedApplication expression ty remaining holes picked = reduce ty >>= \case
+  guidedApplication expression ty remaining holes picked = liftS (reduce ty) >>= \case
     I.El _ (I.Pi domain codomain)
-      | remaining <= 0 && visible domain -> deferDepth runtime
+      | remaining <= 0 && visible domain -> deferDepthS
       | otherwise -> do
-          scope <- getScope
-          point' <- registerInteractionPoint False noRange Nothing
+          scope <- liftS getScope
+          point' <- liftS $ registerInteractionPoint False noRange Nothing
           let hole = A.QuestionMark (Info.emptyMetaInfo { Info.metaScope = scope }) point'
-          queryCheck runtime hole (I.unDom domain) $ \value ->
+          queryCheckS hole (I.unDom domain) $ \value ->
             guidedApplication (A.app expression [Arg (getArgInfo domain) $ unnamed hole])
               -- A supplied operation is one AND step, regardless of its
               -- arity. The operands recurse at depth-1 below; every generated
@@ -1130,10 +1214,10 @@ search runtime@(Runtime _ _ _ _ _ _ _ _ enableFocused) inventory@(GlobalInventor
               (holes ++ [(point', value, getHiding domain)]) picked
     _ | null holes -> pure Nothing
       | otherwise -> do
-          allowed <- charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }
+          allowed <- chargeS $ \s -> s { checkerQueries = checkerQueries s + 1 }
           if not allowed then pure Nothing else do
-            compareType CmpLeq ty target
-            queryCheck runtime expression target $ \_ ->
+            liftS $ compareType CmpLeq ty target
+            queryCheckS expression target $ \_ ->
               -- Explicit operands carry the evidence that determines hidden
               -- endpoints, carriers and families. Do not guess those hidden
               -- values before giving Agda the operands that constrain them.
@@ -1143,47 +1227,47 @@ search runtime@(Runtime _ _ _ _ _ _ _ _ enableFocused) inventory@(GlobalInventor
     completed <- traverseExpr (\case
       old@(A.QuestionMark _ point') -> pure $ Map.findWithDefault old point' filled
       old -> pure old) expression
-    queryCheck runtime completed target $ \term -> use completed term picked
+    queryCheckS completed target $ \term -> use completed term picked
   fillArguments expression ((point', value, _):rest) filled picked = do
-    instantiated <- instantiateFull value
+    instantiated <- liftS $ instantiateFull value
     if noMetas instantiated then do
-      supplied <- reify instantiated
+      supplied <- liftS $ reify instantiated
       fillArguments expression rest (Map.insert point' supplied filled) picked
     else do
-      ty <- getMetaTypeInContext =<< lookupInteractionId point'
-      search runtime inventory (depth-1) ty picked $ \argument _ selected' -> do
-        allowed <- charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }
+      ty <- liftS $ getMetaTypeInContext =<< lookupInteractionId point'
+      search enableFocused inventory (depth-1) ty picked $ \argument _ selected' -> do
+        allowed <- chargeS $ \s -> s { checkerQueries = checkerQueries s + 1 }
         if not allowed then pure Nothing else do
-          _ <- give_ False WithoutForce point' Nothing argument
+          _ <- liftS $ give_ False WithoutForce point' Nothing argument
           fillArguments expression rest (Map.insert point' argument filled) selected'
   eliminate expression ty picked = do
-    allowed <- charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }
+    allowed <- chargeS $ \s -> s { checkerQueries = checkerQueries s + 1 }
     if not allowed then pure Nothing else do
       -- Use the same Agda operation as absurd-pattern checking before reifying
       -- a complete helper. Unlike a Boolean emptiness test, this also preserves
       -- postponed emptiness constraints; unknown does not become impossible.
-      ensureEmptyType noRange ty
-      modify runtime $ \s -> s { absurdProposals = absurdProposals s + 1 }
-      proposal <- Construction.eliminateEmpty expression ty target
-      queryCheck runtime proposal target $ \term -> use proposal term picked
-  applyMore expression term ty remaining picked = reduce ty >>= \case
+      liftS $ ensureEmptyType noRange ty
+      modifyS $ \s -> s { absurdProposals = absurdProposals s + 1 }
+      proposal <- liftS $ Construction.eliminateEmpty expression ty target
+      queryCheckS proposal target $ \term -> use proposal term picked
+  applyMore expression term ty remaining picked = liftS (reduce ty) >>= \case
     I.El _ (I.Pi domain codomain)
-      | remaining <= 0 -> deferDepth runtime
-      | otherwise -> search runtime inventory (remaining-1) (I.unDom domain) picked $ \argument value selected' -> do
-          modify runtime $ \s -> s { applicationProposals = applicationProposals s + 1 }
+      | remaining <= 0 -> deferDepthS
+      | otherwise -> search enableFocused inventory (remaining-1) (I.unDom domain) picked $ \argument value selected' -> do
+          modifyS $ \s -> s { applicationProposals = applicationProposals s + 1 }
           let info = getArgInfo domain
               applied = A.app expression [Arg info $ unnamed argument]
               nativeTerm = apply term [Arg info value]
               resultType = absApp codomain value
-          choices runtime
-            [queryCheck runtime applied target $ \checked -> use applied checked selected'
+          choicesS
+            [queryCheckS applied target $ \checked -> use applied checked selected'
             ,eliminate applied resultType selected'
-            ,reduce resultType >>= \case
+            ,liftS (reduce resultType) >>= \case
                -- Hidden/instance arguments may occur between explicit ones.
                -- Agda inserts their metas and infers them from later operands;
                -- do not replace that operation with guessing universe values.
                I.El _ (I.Pi nextDomain _) | notVisible nextDomain ->
-                 queryInfer runtime applied $ \(continued, continuedType) ->
+                 queryInferS applied $ \(continued, continuedType) ->
                    applyMore applied continued continuedType (remaining-1) selected'
                _ -> applyMore applied nativeTerm resultType (remaining-1) selected']
     _ -> pure Nothing

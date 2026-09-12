@@ -24,6 +24,7 @@ import AgdaProver.Symbolic.SessionTypes
 data Move s
   = Evidence (S.GoalRef s)
   | SlicedEvidence (S.GoalRef s) Natural E.IterationDepth
+  | ResumeEvidence (S.GoalRef s) Natural (S.EvidenceContinuation s)
   | Term (S.TermProposal s)
   | Clause (S.GoalRef s) ClauseAction
   | PlannedClause (S.ClauseMove s)
@@ -50,11 +51,12 @@ data Config s n = Config
 -- appends after unrelated source goals. Those identifiers are not priorities.
 data SearchState s = SearchState (S.StateRef s) (Maybe (Set.Set Int)) [Int] (Maybe StateKey)
 data Continuation s = RetryEvidence (SearchState s) (S.GoalRef s) Natural E.IterationDepth
+  | RetainedEvidence (SearchState s) (S.GoalRef s) Natural (S.EvidenceContinuation s)
 type Queue s = A.Agenda (SearchState s) (Move s) (Continuation s)
 
 -- An exhausted coarse evidence attempt is censored, not a declined branch.
--- Its queue is retained. This API does not claim to resume inside that attempt:
--- fine-grained checker/search continuations are the separate slicing layer.
+-- Its queue and eligible inner-search progress are retained. Native operations
+-- are atomic; any scope/catalogue replay is charged by the same session ledger.
 data Interruption = SessionFailure Failure | MoveAllowanceExhausted E.SearchStats | PlanningAllowanceExhausted
   | ActionAllowanceExhausted
   deriving (Eq, Show)
@@ -128,7 +130,9 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
           Moves moves -> pure $ A.Open moves
           PlanningCensored -> throwError PlanningAllowanceExhausted
     , A.apply = execute
-    , A.resume = \(RetryEvidence state goal allowance depth) -> execute state $ SlicedEvidence goal allowance depth
+    , A.resume = \case
+        RetryEvidence state goal allowance depth -> execute state $ SlicedEvidence goal allowance depth
+        RetainedEvidence state goal allowance remaining -> execute state $ ResumeEvidence goal allowance remaining
     -- Identical issued keys witness the same immutable branch only. Equal
     -- printed goals and equal endpoint types never authorize state merging.
     , A.sameState = \(SearchState a sa oa pa) (SearchState b sb ob pb) ->
@@ -139,6 +143,7 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
     let goal = case move of
           Evidence g -> g
           SlicedEvidence g _ _ -> g
+          ResumeEvidence g _ _ -> g
           Term proposal -> S.termProposalGoal proposal
           Clause g _ -> g
           PlannedClause proposal -> S.clauseMoveGoal proposal
@@ -153,6 +158,8 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
         Evidence _ -> search current Nothing $ S.solveEvidence session goal (moveLimits config)
           (models config) (ranking config) (scorer config) (focused config)
           (excluded config) (policyTrace config)
+        ResumeEvidence _ allowance remaining -> evidenceSlice current goal allowance $ Just remaining
+        SlicedEvidence _ allowance _ | reuseEvidenceDepth config -> evidenceSlice current goal allowance Nothing
         SlicedEvidence _ allowance depth ->
           -- A soft scheduling slice, not an additional proof-search cutoff.
           -- Retry the unfinished depth from the same immutable parent with an
@@ -168,6 +175,22 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
             (excluded config) (policyTrace config)
         Helper _ view expression -> search current Nothing $ S.solveHelper session goal (moveLimits config)
           (models config) (ranking config) (scorer config) view expression (policyTrace config)
+  evidenceSlice current goal allowance remaining = do
+    let slice = max 1 $ toInteger allowance
+        available = maybe slice (min slice) $ E.workUnitLimit $ moveLimits config
+    (cost, result) <- liftIO $ case remaining of
+      Nothing -> S.solveEvidenceSlice session goal (E.SearchLimits $ Just available)
+        (models config) (ranking config) (scorer config) (focused config) (excluded config) (policyTrace config)
+      Just continuation -> S.resumeEvidenceSlice continuation session goal (E.SearchLimits $ Just available)
+        (scorer config) (policyTrace config)
+    liftIO $ searchCost config cost
+    case result of
+      Left failure -> declined failure
+      Right (E.WorkExhausted, Nothing, _, Just next) ->
+        pure $ A.Deferred (retryPenalty config cost) $ RetainedEvidence current goal (2 * max 1 allowance) next
+      Right (E.FragmentExhausted, Nothing, _, Nothing) -> pure A.Declined
+      Right (E.FoundCandidate, Just next, _, Nothing) -> transition current $ Right next
+      _ -> throwError $ SessionFailure $ KernelFailure "agenda-inconsistent-evidence-continuation"
   search current continuation action = do
     (cost, result) <- liftIO action
     liftIO $ searchCost config cost

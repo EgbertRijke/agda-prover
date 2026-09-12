@@ -55,7 +55,8 @@ library agda28
     AgdaProver.Agda28.HelperConstruction, AgdaProver.Agda28.DraftAssembly,
     AgdaProver.Agda28.Source, AgdaProver.Agda28.Algebra,
     AgdaProver.Agda28.Refutation, AgdaProver.Agda28.Dependencies,
-    AgdaProver.Agda28.PolicyViews, AgdaProver.Agda28.ObservedEquations
+    AgdaProver.Agda28.PolicyViews, AgdaProver.Agda28.ObservedEquations,
+    AgdaProver.Agda28.SearchTask
   build-depends:
     agda-prover-symbolic,
     Agda ==2.8.0,

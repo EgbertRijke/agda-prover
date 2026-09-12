@@ -231,13 +231,16 @@ overlapping routes. The command catalogue and one-step mode are unchanged.
 
 Scheduling slices keep the queue and alternatives after provisional solutions.
 Coarse evidence search runs in soft, increasing work slices and yields to other
-branches; retries are charged, not treated as free continuation inside Agda.
-Retries retain the last unfinished iterative-deepening level with the exact
-parent and goal, avoiding another pass over completed shallower levels. The
-unfinished level is replayed; no speculative substitution or checker stack is
-cached. `evidence_depth_reuse=false` restores restarting at depth zero. The
-setting is reported in the agenda cost receipt and does not change one-step
-operation or the direct `solve-evidence` command.
+branches. It retains pending alternatives, dependent operand substitutions and
+their rollback states for the exact parent and goal. Services, including the
+NNUE scorer and response channel, are supplied anew on each advance. No Agda
+checker call is suspended internally. Native catalogue builders and stateful
+scope operations that cannot yet retain progress are replayed and fully charged;
+the evidence receipt reports `replayed_catalogues` and `replayed_scopes` separately.
+The existing `evidence_depth_reuse=false` ablation restores restarting at depth
+zero; true now retains operand progress as well. The agenda receipt identifies
+this as `evidence_continuation: operand-progress-v1`. Direct `solve-evidence`
+still starts fresh, and one-step behavior is unchanged.
 By default, an exhausted retry's queue priority includes its measured work,
 so doubling allowances cannot monopolize search ahead of cheap alternatives.
 `retry_work_ordering=false` retains the uniform-cost ablation. No continuation
