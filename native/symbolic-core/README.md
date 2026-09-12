@@ -94,8 +94,16 @@ The pure agenda schedules opaque coupled states and typed actions. Stable
 cost-ordered alternatives survive failed descendants and provisional candidate
 rejection. A censored step retains its queue; resumable work advances scheduling
 cost so it cannot permanently starve finite-cost siblings. Ancestry pruning
-requires an exact adapter witness, not a display or hash match. This layer does
-not yet drive autonomous native search or confer proof acceptance.
+requires an exact adapter witness, not a display or hash match.
+
+The native agenda executor connects resident evidence, clause and finite-helper
+moves to that queue. A move must belong to its actual parent; accepted moves
+carry all dependent pending goals, metas and constraints together. Exhausted
+coarse evidence attempts retain the queue as censored work, not refuted branches.
+Retrying such an attempt repeats and charges its work; fine-grained inner
+suspension is still pending. Planners supply moves through the typed adapter
+API; autonomous generation, source export and workflow qualification remain
+migration work. Neither layer confers proof acceptance.
 
 - `core/`: compiler-independent protocol, feature views and NNUE inference; no Agda internals.
 - `adapter/`: Agda 2.8 types, scoped snapshots, and structural codecs.

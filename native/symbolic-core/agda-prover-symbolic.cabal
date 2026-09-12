@@ -43,7 +43,8 @@ library
 library agda28
   import: defaults
   hs-source-dirs: adapter
-  exposed-modules: AgdaProver.Agda28.Observation, AgdaProver.Agda28.Session
+  exposed-modules: AgdaProver.Agda28.Observation, AgdaProver.Agda28.Session,
+    AgdaProver.Agda28.AgendaExecution
   other-modules: Structure, Decode, Atoms, StructureAnnotations,
     AgdaProver.Agda28.EvidenceSearch, AgdaProver.Agda28.Construction,
     AgdaProver.Agda28.Clauses, AgdaProver.Agda28.ClauseExecution,
