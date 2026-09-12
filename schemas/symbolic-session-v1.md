@@ -339,6 +339,23 @@ generated catalogue omits result splitting for a known datatype or sort leaf:
 there are no fields or trailing arguments to expose in its generalized helper.
 Functions, records and unknown/stuck heads retain that alternative.
 
+The autonomous adaptive batch extends a fresh helper using Agda's native
+`SplitClause` values instead of rebuilding each longer prefix. Initial LHS
+recovery uses Agda's make-case context to avoid forcing away splittable patterns.
+Each successful split carries its telescope, patterns, target and checkpoints
+forward; Agda's one-step substitution maps remaining/deferred subject indices
+into each child. Forced nonvariables are removed, and rejected subjects are
+retried only after checked progress. Failed splits restore their checkpoint
+while retaining allocation high-water marks and spent costs. If no subject
+admits a split, the outcome is rejection, not a solved goal. The resulting partial
+helper still passes ordinary checking from the unsplit parent.
+
+This path is restricted to fresh local helpers with no surrounding clauses;
+ordinary explicit source commands continue using Agda's complete `makeCase`
+operation. Single-subject alternatives remain available. Retention within this
+atomic preparation request does not implement mid-request suspend/resume:
+cancellation restores the parent, and a later retry charges repeated work.
+
 Hidden-binder exposure is not mistaken for elimination. Pattern hiding and
 modality are retained. Captured module or lambda variables may become helper
 arguments; scope resolution, coverage and without-K remain Agda's decisions.
@@ -354,9 +371,9 @@ the final check. Native drafts reserve their retained name and interaction ID
 allocation ranges during checking and replay. Generated holes receive distinct
 IDs and scopes; references to absent speculative metas are rejected. Only an
 accepted transition publishes a child. Each entered clause generation, context
-recheck and scaffold check charges the cumulative checking ledger; the two
-generations also charge `clause_queries`. Replay rechecks the retained draft,
-without regenerating clauses or resetting work.
+recheck and scaffold check charges the cumulative checking ledger; every
+generation/split attempt also charges `clause_queries`. Replay rechecks the
+retained draft, without regenerating clauses or resetting work.
 
 These session primitives also feed the autonomous native agenda; their direct
 results are not authorized source patches. In particular, display

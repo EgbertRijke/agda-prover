@@ -589,17 +589,21 @@ view. They never carry anonymous meta identities into source reconstruction;
 checking the proposal in its original branch preserves coupled constraints.
 
 Autonomous case search also offers one compound move for local variables with
-one-constructor inductive types. Within that batch, native type dependencies put
-a dependent witness before its prerequisites; NNUE order breaks ties among
+one-constructor inductive types or inductive records. Within that batch, native
+type dependencies put a dependent witness before its prerequisites; NNUE order breaks ties among
 ready subjects. Dependencies through unselected context entries are retained
 without making those entries new case subjects. Agda owns all dependent
-substitutions and admissibility checks. When the initial batch is rejected,
-the move retains checked prefixes and retries deferred subjects after each
-accepted extension. It returns the last admissible partial draft if no further
-subject can be split. Rejections do not erase that progress or relax Agda's
-rules; explicit user commands still mean exactly the requested splits.
-Individual eliminations retain their
-original ranked order and remain
+substitutions and admissibility checks. The move creates a local helper once,
+then extends Agda's native split clauses with their telescopes, patterns and
+targets intact. Agda's substitutions update pending subject indices; forced
+nonvariables no longer need splitting. Rejected subjects are retried only after
+another successful split changes the context. The assembled partial helper is
+checked from the original parent even if no further subject can be split.
+Rejections preserve accepted progress and charge their work without relaxing
+Agda's rules; explicit user commands still mean exactly the requested splits.
+This reuse is local to one atomic preparation request, not a continuation that
+can resume halfway through a cancelled kernel operation.
+Individual eliminations retain their original ranked order and remain
 available; multi-constructor variables are not combined into an exponential
 case tree. `multi_subject_clauses=false` retains single-subject scheduling for
 comparison without changing the user's resource envelope.

@@ -37,6 +37,7 @@ import Agda.Utils.Lens ((^.))
 import Agda.Utils.BiMap qualified as BiMap
 
 import AgdaProver.Symbolic.Clause (ClauseAction, command)
+import AgdaProver.Agda28.Clauses qualified as Clauses
 
 data PreparationStep = GenerateClauses | CheckContext | CheckScaffold
 
@@ -52,35 +53,6 @@ data Intent = UserAction ClauseAction | BoundSubjects (NonEmpty Name)
 -- already checked global definition. The helper and its case clauses are native
 -- syntax. Ordinary give checks the final draft again from the unsplit parent.
 prepare :: (PreparationStep -> TCM ()) -> InteractionId -> Intent -> TCM A.Expr
-prepare chargeStep point (AdaptiveSubjects chosen) = do
-  -- Keep the existing full batch when Agda accepts it. Otherwise learn an
-  -- admissible sequence from checked prefixes, not from the original types
-  -- alone. An earlier rejection is retried only after another subject has
-  -- changed the context. Every success removes one subject, so this explores
-  -- a finite sequence, not permutations or an uncharged nested proof search.
-  checked (NE.toList chosen) >>= \case
-    Just draft -> registerDraft draft
-    Nothing -> grow [] (NE.toList chosen) [] Nothing
- where
-  checked [] = pure Nothing
-  checked (first:rest) = do
-    before <- getTC
-    (do
-      draft <- prepare chargeStep point $ BoundSubjects (first :| rest)
-      chargeStep CheckScaffold
-      void $ give_ False WithoutForce point Nothing draft
-      restoreAllocations before
-      pure $ Just draft) `catchError` \err -> case err of
-        TypeError{} -> restoreAllocations before >> pure Nothing
-        PatternErr{} -> restoreAllocations before >> pure Nothing
-        _ -> throwError err
-  grow _ [] _ Nothing = genericError "native-clause-no-admissible-subject"
-  grow _ [] _ (Just draft) = registerDraft draft
-  grow prefix (name:rest) deferred latest = do
-    let next = prefix ++ [name]
-    checked next >>= \case
-      Nothing -> grow prefix rest (name:deferred) latest
-      Just draft -> grow next (reverse deferred ++ rest) [] (Just draft)
 prepare chargeStep point (ClosingSubjects chosen) = trySubjects $ NE.toList chosen
  where
   -- A bounded lookahead for an existing inhabitant after one elimination.
@@ -136,7 +108,7 @@ prepare chargeStep point action = withInteractionId point $ do
         signature <- withShowAllArguments $ inTopContext $ addContext (reverse $ drop count context) $
           reify $ telePi suffix target
         let entries = reverse $ take count $ zip context names
-        prepareHelper chargeStep point originalScope signature selected
+        prepareHelperUsing generateClauses chargeStep point originalScope signature selected
           [(getArgInfo entry, name, A.Var $ ctxEntryName entry) | (entry, name) <- entries]
       -- Start with just the subjects and their dependent suffix. Free-variable
       -- scans of indices also include hidden carrier arguments of local
@@ -147,6 +119,9 @@ prepare chargeStep point action = withInteractionId point $ do
         PatternErr{} | count < length context -> retry count
         _ -> throwError err
       retry count = restoreAllocations before >> attempt (count + 1)
+      generateClauses = case action of
+        AdaptiveSubjects{} -> Clauses.extendHelper (chargeStep CheckContext) (chargeStep GenerateClauses)
+        _ -> standardClauses chargeStep
   attempt $ min width $ length context
 
 -- A with-helper has an Agda-inferred closed telescope and an application in
@@ -170,7 +145,18 @@ prepareAbstraction chargeStep point ty arguments selected = withInteractionId po
 
 prepareHelper :: (PreparationStep -> TCM ()) -> InteractionId -> ScopeInfo
               -> A.Expr -> String -> [(ArgInfo, Name, A.Expr)] -> TCM A.Expr
-prepareHelper chargeStep point originalScope signature selected arguments = do
+prepareHelper chargeStep = prepareHelperUsing (standardClauses chargeStep) chargeStep
+
+standardClauses :: (PreparationStep -> TCM ()) -> InteractionId -> String -> TCM [A.Clause]
+standardClauses chargeStep point selected = do
+  chargeStep GenerateClauses
+  (_, _, clauses) <- withShowAllArguments $ makeCase point noRange selected
+  pure clauses
+
+prepareHelperUsing :: (InteractionId -> String -> TCM [A.Clause])
+                   -> (PreparationStep -> TCM ()) -> InteractionId -> ScopeInfo
+                   -> A.Expr -> String -> [(ArgInfo, Name, A.Expr)] -> TCM A.Expr
+prepareHelperUsing generateClauses chargeStep point originalScope signature selected arguments = do
   let patterns = [Arg info $ unnamed $ A.VarP $ A.mkBindName name
                  | (info, name, _) <- arguments]
       operands = [Arg info $ unnamed expression | (info, _, expression) <- arguments]
@@ -189,11 +175,10 @@ prepareHelper chargeStep point originalScope signature selected arguments = do
           (A.RHS hole Nothing) A.noWhereDecls empty
     chargeStep CheckScaffold
     void $ give_ False WithoutForce point Nothing $ build (clause :| [])
-    chargeStep GenerateClauses
     -- Retained drafts are syntax, not a compact display. Hidden patterns must
     -- bind the exact names used by later refinements; otherwise rechecking an
     -- omitted pattern invents fresh identities and leaves spliced terms free.
-    (_, _, generated) <- withShowAllArguments $ makeCase temporary noRange selected
+    generated <- generateClauses temporary selected
     instantiated <- mapM (freshClause originalScope) generated
     restoreAllocations before
     case instantiated of
@@ -239,7 +224,8 @@ subjects chargeStep _ (BoundSubjects chosen) originals renamed = do
       [] -> genericError "native-clause-execution-invalid-subject-index"
   pure (unwords $ map fst mapped, map snd mapped)
 subjects _ _ ClosingSubjects{} _ _ = genericError "native-clause-unprepared-closure"
-subjects _ _ AdaptiveSubjects{} _ _ = genericError "native-clause-unprepared-sequence"
+subjects chargeStep point (AdaptiveSubjects chosen) originals renamed =
+  subjects chargeStep point (BoundSubjects chosen) originals renamed
 subjects chargeStep point (UserAction action) originals renamed
   | command action `elem` ["", "."] = pure (command action, [])
   | otherwise = do
