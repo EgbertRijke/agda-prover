@@ -11,7 +11,7 @@ import Data.Aeson (Value (..), toJSON)
 import Data.Aeson.KeyMap qualified as KM
 import Data.Foldable (toList)
 import Data.IORef
-import Data.List (nub)
+import Data.List (nub, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes)
@@ -211,9 +211,35 @@ describe runtime origin expression = do
 
 rankSeeds :: Runtime s -> Classification.Classification -> I.Type -> [A.Expr] -> TCM [(Seed, [(T.Text, T.Text)])]
 rankSeeds runtime@(Runtime _ ref _ models mode native emit namespace _) classification target globals = do
-  locals <- map (A.Var . ctxEntryName) <$> getContext
+  context <- getContext
+  let locals = map (A.Var . ctxEntryName) context
+      visibleFields = Set.fromList [name | A.Proj _ (I.AmbQ names) <- globals, name <- toList names]
+  observed <- if Set.null visibleFields then pure Nothing else localTCState $ attempt runtime $ do
+    allowed <- charge runtime $ \s -> s
+      { inferenceQueries = inferenceQueries s + 1, recordObservationQueries = recordObservationQueries s + 1 }
+    if not allowed then pure Nothing else Just . concat <$> forM (zip [0..] locals) (\(index, expression) ->
+      typeOfBV index >>= Construction.projectedEvidence visibleFields expression)
+  let projections = nub $ maybe [] id observed
+  appliedFields <- fmap concat $ forM projections $ \function -> do
+    admissible <- localTCState $ attempt runtime $
+      queryInfer runtime function $ \(_, ty) -> reduce ty >>= \case
+        I.El _ (I.Pi domain _) | visible domain -> pure $ Just ()
+        _ -> pure Nothing
+    case admissible of
+      Nothing -> pure []
+      Just () -> fmap catMaybes $ forM locals $ \argument -> localTCState $ attempt runtime $ do
+        let expression = A.app function [defaultArg $ unnamed argument]
+        modify runtime $ \s -> s { applicationProposals = applicationProposals s + 1 }
+        queryInfer runtime expression $ \(value, ty) -> do
+          completeValue <- instantiateFull value
+          completeType <- instantiateFull ty
+          pure $ if noMetas completeValue && noMetas completeType then Just expression else Nothing
+  let recordSeeds = nub $ projections ++ appliedFields
+  modify runtime $ \s -> s { projectedSeeds = projectedSeeds s + fromIntegral (length recordSeeds) }
   seeds <- mapM (uncurry $ describe runtime) $
-    [("local", expression) | expression <- locals] ++ [("visible", expression) | expression <- globals, expression `notElem` locals]
+    [("local", expression) | expression <- locals]
+    ++ [("projected-field", expression) | expression <- recordSeeds]
+    ++ [("visible", expression) | expression <- globals, expression `notElem` locals]
   targetText <- T.pack . prettyShow <$> prettyTCM target
   stats <- liftIO $ readIORef ref
   let ordinal = policyDecisions stats
@@ -433,21 +459,28 @@ search runtime@(Runtime _ _ _ _ _ _ _ _ enableFocused) inventory@(GlobalInventor
           let hole = A.QuestionMark (Info.emptyMetaInfo { Info.metaScope = scope }) point'
           queryCheck runtime hole (I.unDom domain) $ \value ->
             guidedApplication (A.app expression [Arg (getArgInfo domain) $ unnamed hole])
-              (absApp codomain value) (remaining - if visible domain then 1 else 0)
-              (holes ++ [(point', value)]) picked
+              -- A supplied operation is one AND step, regardless of its
+              -- arity. The operands recurse at depth-1 below; every generated
+              -- placeholder/check is still charged to the work allowance.
+              (absApp codomain value) remaining
+              (holes ++ [(point', value, getHiding domain)]) picked
     _ | null holes -> pure Nothing
       | otherwise -> do
           allowed <- charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }
           if not allowed then pure Nothing else do
             compareType CmpLeq ty target
             queryCheck runtime expression target $ \_ ->
-              fillArguments expression holes Map.empty picked
+              -- Explicit operands carry the evidence that determines hidden
+              -- endpoints, carriers and families. Do not guess those hidden
+              -- values before giving Agda the operands that constrain them.
+              -- The final pass still checks every unresolved obligation.
+              fillArguments expression (sortOn (\(_, _, visibility) -> visibility /= NotHidden) holes) Map.empty picked
   fillArguments expression [] filled picked = do
     completed <- traverseExpr (\case
       old@(A.QuestionMark _ point') -> pure $ Map.findWithDefault old point' filled
       old -> pure old) expression
     queryCheck runtime completed target $ \term -> use completed term picked
-  fillArguments expression ((point', value):rest) filled picked = do
+  fillArguments expression ((point', value, _):rest) filled picked = do
     instantiated <- instantiateFull value
     if noMetas instantiated then do
       supplied <- reify instantiated

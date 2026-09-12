@@ -1,7 +1,8 @@
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.Construction
-  ( recordPlan, recordExpression, omittedField, absurdLambda, eliminateEmpty ) where
+  ( recordPlan, recordExpression, projectedEvidence, omittedField, absurdLambda, eliminateEmpty ) where
 
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Set qualified as Set
@@ -37,6 +38,18 @@ recordPlan forbidden target = do
 recordExpression :: [(C.Name, A.Expr)] -> A.Expr
 recordExpression fields = A.Rec empty exprNoRange
   [Left $ FieldAssignment name expression | (name, expression) <- fields]
+
+-- Expose visible fields of an existing typed record as ordinary evidence heads.
+-- In particular, a function-valued field should not require resynthesizing its
+-- record operand each time it is used in a composition. No record is consumed,
+-- no eta law is assumed, and private/excluded fields are not made visible.
+projectedEvidence :: Set.Set QName -> A.Expr -> I.Type -> TCM [A.Expr]
+projectedEvidence visibleFields expression ty = isRecordType ty >>= \case
+  Nothing -> pure []
+  Just (_, _, definition) -> pure
+    [A.app (A.Proj ProjPrefix $ I.AmbQ (name :| [])) [defaultArg $ unnamed expression]
+    | field <- _recFields definition, let name = I.unDom field
+    , Set.member name visibleFields]
 
 -- Omitted hidden fields are inferred in the same branch as subsequent fields.
 -- Instance fields use Agda's instance metavariables, not unification substitutes.
