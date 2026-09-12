@@ -63,14 +63,16 @@ data Scheduling = Scheduling
   { schedulingStructural :: Natural, schedulingMacro :: Natural, schedulingInitial :: Natural
   , schedulingEvidence :: Bool, schedulingDependencies :: Bool, schedulingProgress :: Bool
   , schedulingRetryWork :: Bool, schedulingJointPropagation :: Bool
-  , schedulingMultiSubject :: Bool, schedulingEvidenceDepthReuse :: Bool }
+  , schedulingMultiSubject :: Bool, schedulingEvidenceDepthReuse :: Bool
+  , schedulingCoalesceIntroductions :: Bool }
 
 defaultScheduling :: Scheduling
 defaultScheduling = Scheduling
   { schedulingStructural = 2, schedulingMacro = 8, schedulingInitial = 64
   , schedulingEvidence = True, schedulingDependencies = True, schedulingProgress = True
   , schedulingRetryWork = True, schedulingJointPropagation = True
-  , schedulingMultiSubject = True, schedulingEvidenceDepthReuse = True }
+  , schedulingMultiSubject = True, schedulingEvidenceDepthReuse = True
+  , schedulingCoalesceIntroductions = True }
 
 instance FromJSON Scheduling where
   parseJSON = withObject "scheduling" $ \o -> do
@@ -78,7 +80,7 @@ instance FromJSON Scheduling where
         supplied = Set.fromList (KM.keys o)
         switch key = if KM.member key o then o .: key else pure True
     unless (required `Set.isSubsetOf` supplied && supplied `Set.isSubsetOf`
-      Set.union required (Set.fromList ["dependency_ordering", "progress_ordering", "retry_work_ordering", "joint_constructor_propagation", "multi_subject_clauses", "evidence_depth_reuse"])) $
+      Set.union required (Set.fromList ["dependency_ordering", "progress_ordering", "retry_work_ordering", "joint_constructor_propagation", "multi_subject_clauses", "evidence_depth_reuse", "coalesce_introductions"])) $
       fail "invalid scheduling fields"
     structural <- o .: "structural_delay"
     macro <- o .: "macro_delay"
@@ -90,13 +92,14 @@ instance FromJSON Scheduling where
     jointPropagation <- switch "joint_constructor_propagation"
     multiSubject <- switch "multi_subject_clauses"
     depthReuse <- switch "evidence_depth_reuse"
+    coalesce <- switch "coalesce_introductions"
     unless (initial > 0) $ fail "initial macro allowance must be positive"
     pure Scheduling
       { schedulingStructural = structural, schedulingMacro = macro, schedulingInitial = initial
       , schedulingEvidence = evidence, schedulingDependencies = dependencies
       , schedulingProgress = progress, schedulingRetryWork = retryWork
       , schedulingJointPropagation = jointPropagation, schedulingMultiSubject = multiSubject
-      , schedulingEvidenceDepthReuse = depthReuse }
+      , schedulingEvidenceDepthReuse = depthReuse, schedulingCoalesceIntroductions = coalesce }
 
 protocolFailureName :: ProtocolFailure -> String
 protocolFailureName InvalidFrameBudget = "invalid-frame-budget"
@@ -352,7 +355,8 @@ perform session runs modelCache emit emitRun operation = case operation of
           , G.progressOrdering = schedulingProgress scheduling, G.retryWorkOrdering = schedulingRetryWork scheduling
           , G.jointConstructorPropagation = schedulingJointPropagation scheduling
           , G.multiSubjectClauses = schedulingMultiSubject scheduling
-          , G.evidenceDepthReuse = schedulingEvidenceDepthReuse scheduling } nativePath selection
+          , G.evidenceDepthReuse = schedulingEvidenceDepthReuse scheduling
+          , G.coalesceIntroductions = schedulingCoalesceIntroductions scheduling } nativePath selection
   AdvanceSearch key steps limits actionLimit depthLimit -> Run.advance runs key steps limits actionLimit depthLimit emitRun
   RunCost key -> Run.snapshot runs key
   DiscardSearch key -> Run.discard runs key

@@ -420,12 +420,12 @@ evidence search. `ranker` is `nnue` or `symbolic`; model/native paths are explic
 nullable paths. Models are loaded once for this run. `focused_search` is boolean
 and `exclude_names` is the existing list of forbidden premise names. The optional
 `scheduling` object has the first four required fields below and optional
-`dependency_ordering`, `progress_ordering`, `retry_work_ordering`, `evidence_depth_reuse`,
+`dependency_ordering`, `progress_ordering`, `retry_work_ordering`, `evidence_depth_reuse`, `coalesce_introductions`,
 `joint_constructor_propagation` and `multi_subject_clauses` booleans
 (defaults shown):
 
 ```json
-{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true,"evidence_depth_reuse":true,"joint_constructor_propagation":true,"multi_subject_clauses":true}
+{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true,"evidence_depth_reuse":true,"coalesce_introductions":true,"joint_constructor_propagation":true,"multi_subject_clauses":true}
 ```
 
 Delays are nonnegative scheduling priorities, not proof-depth restrictions.
@@ -465,6 +465,22 @@ agenda cost receipt includes the effective boolean. This additive option does
 not change one-step behavior or the direct `solve-evidence` request, which
 continues to start at zero. Within an attempt, the initial level is recoverable
 as `current_depth - depth_iterations + 1` when at least one iteration ran.
+
+`coalesce_introductions` lets whole search use a generated ordinary lambda to
+expose a function binder without also scheduling a result-split helper for the
+same sealed parent and goal. The witness is a native, domain-free, unannotated,
+non-pattern lambda with one fresh open body, not a printed arrow type. Populated
+or compound lambdas alone do not witness this overlap. All subject splits,
+record-result splits, mismatched parents/goals and unknown cases remain. This
+chooses a binder-introduction route; it does not merge or claim exact equality
+of proof states. Subsequent eliminations still go through Agda.
+
+The setting is effective only for whole search with `evidence_macro` enabled;
+the direct clause catalogue, explicit user commands and `start-step` are
+unchanged. False restores both routes for ablation. The cost receipt includes
+the configured boolean, retained across slices. Like the other switches it
+rejects null, strings, numbers and containers instead of treating them as
+booleans. No resource allowance, model weights or fresh-check policy changes.
 
 `joint_constructor_propagation` offers target-directed constructor closures for
 other selected pending goals with positively observed dependencies on selected

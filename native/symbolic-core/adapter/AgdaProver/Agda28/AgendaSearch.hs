@@ -31,7 +31,7 @@ data Settings = Settings
   , initialMacroWork :: Natural, evidenceMacro :: Bool, actionLimit :: Maybe Integer
   , dependencyOrdering :: Bool, depthLimit :: Maybe Natural, progressOrdering :: Bool
   , retryWorkOrdering :: Bool, jointConstructorPropagation :: Bool, multiSubjectClauses :: Bool
-  , evidenceDepthReuse :: Bool }
+  , evidenceDepthReuse :: Bool, coalesceIntroductions :: Bool }
 
 data Metrics = Metrics
   { schedulerSteps :: !Integer, modelItems :: !Integer, modelNanoseconds :: !Integer
@@ -117,6 +117,7 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "ordering" .= (if progressOrdering settings then "cost-plus-obligations-v2" else "cost-only-v1" :: String),
     "retry_ordering" .= (if retryWorkOrdering settings then "spent-work-v1" else "uniform-v1" :: String),
     "evidence_depth_reuse" .= evidenceDepthReuse settings,
+    "coalesce_introductions" .= coalesceIntroductions settings,
     "joint_constructor_propagation" .= jointConstructorPropagation settings,
     "multi_subject_clauses" .= multiSubjectClauses settings,
     "model_items_scored" .= modelItems measured, "model_elapsed_ns" .= modelNanoseconds measured,
@@ -234,6 +235,8 @@ advance native count run@(Run session settings initial baseline metrics owner tr
                 Left failure -> pure $ Left failure
                 Right S.CensoredClauses{} -> pure $ Right N.PlanningCensored
                 Right (S.CompleteClauses clauseMoves) -> do
+                  let distinctClauses = if evidenceMacro settings && coalesceIntroductions settings
+                        then S.withoutResultIntroductionOverlap termMoves clauseMoves else clauseMoves
                   -- Later selected obligations can constrain earlier definitions
                   -- through Agda unification. Only target-directed constructor
                   -- closures are observed here, not whole premise catalogues or
@@ -249,7 +252,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
                       -- can consume its goals into suspended constraints.
                       A.rankedProposals 0 (map N.Term $ equationMoves ++ closures ++ termMoves)
                       ++ A.rankedProposals (structuralDelay settings)
-                            [N.PlannedClause action | (action, _) <- clauseMoves,
+                            [N.PlannedClause action | (action, _) <- distinctClauses,
                               multiSubjectClauses settings || not (S.clauseMoveIsBatch action)]
                       ++ [A.Proposal (N.SlicedEvidence goal (initialMacroWork settings) E.initialDepth)
                             (macroDelay settings) | evidenceMacro settings]

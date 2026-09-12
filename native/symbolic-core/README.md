@@ -177,6 +177,11 @@ retain hidden patterns explicitly. During source export, Agda freshens nested
 pattern spellings without changing the retained search terms. Known datatype
 and sort leaves omit redundant result-split wrappers; record/function and
 unknown results keep the operation. User clause commands are unchanged.
+Whole search coalesces a function-result split with an already generated
+ordinary lambda-to-hole introduction for the exact same parent and goal.
+It keeps subject eliminations and record-result splits; it does not identify
+their resulting proof states. `coalesce_introductions=false` restores the
+overlapping routes. The command catalogue and one-step mode are unchanged.
 
 Scheduling slices keep the queue and alternatives after provisional solutions.
 Coarse evidence search runs in soft, increasing work slices and yields to other

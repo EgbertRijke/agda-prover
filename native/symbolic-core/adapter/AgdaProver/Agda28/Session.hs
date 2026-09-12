@@ -17,7 +17,7 @@ module AgdaProver.Agda28.Session
   , Refutation.Kind (..)
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
-  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, preferStructures, proposeTerms, proposeStructures, proposeEquations, proposeConstructors, applyTerm
+  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, preferStructures, withoutResultIntroductionOverlap, proposeTerms, proposeStructures, proposeEquations, proposeConstructors, applyTerm
   , ClauseMove, clauseMoveGoal, clauseMoveIsBatch, applyClauseMove, ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
@@ -52,7 +52,7 @@ import Agda.Interaction.Library (getPrimitiveLibDir, getAgdaLibFile, AgdaLibFile
 import Agda.Interaction.Library.Base (agdaLibFiles, runLibM)
 import Agda.Syntax.Abstract qualified as A
 import Agda.Syntax.Abstract.Views (unScope)
-import Agda.Syntax.Common (InteractionId, interactionId, NameId, Arg (..), Named (..))
+import Agda.Syntax.Common (InteractionId, interactionId, NameId, ArgInfo, Arg (..), Named (..))
 import Agda.Syntax.Common.Pretty (prettyShow)
 import Agda.Syntax.Internal qualified as I
 import Agda.Syntax.Position (noRange)
@@ -75,6 +75,7 @@ import AgdaProver.Agda28.Source qualified as Source
 import AgdaProver.Agda28.Refutation qualified as Refutation
 import AgdaProver.Agda28.Dependencies qualified as Dependencies
 import AgdaProver.Symbolic.Clause (ClauseAction)
+import AgdaProver.Symbolic.Clause qualified as Clause
 import AgdaProver.Symbolic.Evidence qualified as Search
 import AgdaProver.Symbolic.NNUE.Native (NativeScorer)
 import AgdaProver.Symbolic.NNUE.Policy qualified as Policy
@@ -171,15 +172,29 @@ termProposalChoices (TermProposal _ _ choices _) = choices
 preferStructures :: [TermProposal s] -> [TermProposal s] -> [TermProposal s]
 preferStructures structures ordinary = structures ++ filter (not . duplicate) ordinary
  where
-  duplicate proposal = case atomicLambda proposal of
+  duplicate proposal = case lambdaIntroduction proposal of
     Nothing -> False
-    Just key -> any ((== Just key) . atomicLambda) structures
-  atomicLambda (TermProposal goal (NativeDraft expression _) _ _) = case unScope expression of
-    A.Lam _ (A.DomainFree tactic (Arg info (Named Nothing (A.Binder Nothing _ _)))) body
-      | tactic == empty, A.QuestionMark{} <- unScope body ->
-          Just (stateKey $ goalState goal, goalId goal, info)
-    _ -> Nothing
-  atomicLambda _ = Nothing
+    Just key -> any ((== Just key) . lambdaIntroduction) structures
+
+lambdaIntroduction :: TermProposal s -> Maybe (StateKey, InteractionId, ArgInfo)
+lambdaIntroduction (TermProposal goal (NativeDraft expression _) _ _) = case unScope expression of
+  A.Lam _ (A.DomainFree tactic (Arg info (Named Nothing (A.Binder Nothing _ _)))) body
+    | tactic == empty, A.QuestionMark{} <- unScope body ->
+        Just (stateKey $ goalState goal, goalId goal, info)
+  _ -> Nothing
+lambdaIntroduction _ = Nothing
+
+-- Autonomous search uses its existing scoped lambda to expose a function
+-- binder instead of also opening a result-split helper for the same goal.
+-- This chooses an introduction route, not equality of the resulting states.
+-- Keep all subject eliminations, actual record-result splits, and unknown
+-- cases. The command catalogue and one-step interaction remain unchanged.
+withoutResultIntroductionOverlap :: [TermProposal s] -> [(ClauseMove s, a)] -> [(ClauseMove s, a)]
+withoutResultIntroductionOverlap terms = filter $ \(ClauseMove goal intent, _) ->
+  intent /= ClauseExecution.UserAction Clause.splitResult ||
+    not (Set.member (stateKey $ goalState goal, goalId goal) introduced)
+ where
+  introduced = Set.fromList [(state, point) | Just (state, point, _) <- map lambdaIntroduction terms]
 
 -- Preserve checked-source abstract syntax as well as internal evidence. Agda's
 -- display reifier may use postfix projections: display syntax is not a draft
