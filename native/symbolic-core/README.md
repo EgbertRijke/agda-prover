@@ -4,7 +4,7 @@ This is the experimental typed Haskell core. It supports resident checking and
 autonomous evidence/application, structural-construction and recursive-call fragments, including
 the bundled NNUE.
 It does **not** replace AgdaProver's current search engine. A default-engine
-switch requires autonomous clause search, coinductive construction, joint-search and qualification work.
+switch requires autonomous clause search, joint-search and qualification work.
 
 ## Build and inspect
 
@@ -156,6 +156,16 @@ parameters. Other application alternatives remain available. A recursive winner
 must pass a non-forced assignment and owner-group termination check inside search;
 rejection resumes alternatives. The final draft is checked again from its parent
 and still requires independent fresh validation.
+
+The `copattern-evidence-v1` fragment also handles finite coinductive observations
+and fills Agda-generated coinductive projection clauses. Native checked patterns
+and their record metadata admit dedicated owner-call proposals; they do not
+assert productivity. The same owner-group check rejects unguarded cycles.
+Dependent and function-valued fields retain ordinary typed application and
+lambda search. Neither inductive case splitting nor eta is assumed for a
+coinductive value. `copattern_proposals` is a subset of `recursive_proposals`.
+This composes the existing `apply-clause` and `solve-evidence` operations;
+autonomous clause selection and full interactive source export remain pending.
 
 Use `ProverApplication.prove_evidence(task, engine=NativeEvidenceEngine(path))`
 from `agdaprover.application.service` and `agdaprover.application.evidence` to

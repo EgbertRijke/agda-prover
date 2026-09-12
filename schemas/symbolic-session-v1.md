@@ -256,6 +256,25 @@ result-type comparisons count as checker queries. Rejected proposals and
 recursive validation work survive rollback. There are no per-term Python
 callbacks, datatype-specific rules or model-weight changes.
 
+`copattern-evidence-v1` adds the existing finite coinductive observation and
+projection-construction slice. Native rechecked clause patterns must contain a
+projection whose owning record Agda identifies as coinductive. This permits a
+dedicated, fully applied source-owner proposal without claiming inductive descent
+or productivity. Ordinary premises still exclude the owner, explicit exclusions
+still apply, and recursive operands cannot recursively expand that owner.
+Original and generated projection clauses use this same path. Dependent fields
+are checked sequentially, with the prior assignments in the branch; function
+fields use ordinary lambda/application search. All complete recursive proposals
+still undergo the non-forced assignment and owner/helper-group termination check.
+No option such as `--guardedness` is enabled by the engine.
+
+`copattern_proposals` counts this subset of `recursive_proposals`; it is not
+an additional work charge or proof credit. Finite projected observations use
+the shared application lane. Construction composes `apply-clause` result
+splitting with `solve-evidence` on its resulting obligations. Autonomous clause
+scheduling and full source export are not implied. This is neither general
+coinductive completeness nor permission to case-split a coinductive record.
+
 Expression displays have column-zero relative Agda layout. The native
 application path preserves and anchors this layout in a parenthesized
 expression; it does not flatten typed let blocks through the legacy formatter.

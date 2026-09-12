@@ -254,7 +254,8 @@ search runtime inventory@(GlobalInventory globals forbidden recursion) depth tar
       ++ [produce expression picked | (Seed expression _ _, picked) <- seeds]
  where
   -- The recursive head is sealed away from ordinary argument search. Only a
-  -- fully applied call using a descent seed is offered as evidence.
+  -- fully applied call using a descent seed or a real coinductive copattern
+  -- context is offered as evidence.
   -- This covers direct children, applications of function-valued children and
   -- reconstructed wrappers through the same typed argument generator. Descent
   -- is a proposal condition, not a replacement for Agda's termination checker;
@@ -286,8 +287,8 @@ search runtime inventory@(GlobalInventory globals forbidden recursion) depth tar
       instantiated <- instantiateFull value
       if not (noMetas instantiated) then pure Nothing else do
         nativeExpression <- reify instantiated
-        if not (Recursion.usesSeed context nativeExpression) then pure Nothing else do
-          modify runtime $ \s -> s { recursiveProposals = recursiveProposals s + 1 }
+        if not (Recursion.eligibleCall context nativeExpression) then pure Nothing else do
+          noteCall context
           use nativeExpression instantiated picked
   arguments context expression ty remaining picked = reduce ty >>= \case
     I.El _ (I.Pi domain codomain)
@@ -302,12 +303,15 @@ search runtime inventory@(GlobalInventory globals forbidden recursion) depth tar
        where
         next argument value selected' =
           arguments context (A.app expression [Arg (getArgInfo domain) $ unnamed argument])
-            (absApp codomain value) (remaining-1) selected'
+            (absApp codomain value) (remaining - if visible domain then 1 else 0) selected'
         advance argument value = next argument value picked
-    _ | Recursion.usesSeed context expression -> do
-          modify runtime $ \s -> s { recursiveProposals = recursiveProposals s + 1 }
+    _ | Recursion.eligibleCall context expression -> do
+          noteCall context
           queryCheck runtime expression target $ \term -> use expression term picked
       | otherwise -> pure Nothing
+  noteCall context = modify runtime $ \s -> s
+    { recursiveProposals = recursiveProposals s + 1
+    , copatternProposals = copatternProposals s + if Recursion.copatternCall context then 1 else 0 }
   constructRecord = Construction.recordPlan forbidden target >>= \case
     Nothing -> pure Nothing
     Just (names, telescope)

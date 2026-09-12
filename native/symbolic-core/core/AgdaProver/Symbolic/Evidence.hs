@@ -31,6 +31,7 @@ data SearchStats = SearchStats
   , lambdaProposals :: !Integer, applicationProposals :: !Integer
   , recordProposals :: !Integer, absurdProposals :: !Integer
   , recursiveContextQueries :: !Integer, recursiveProposals :: !Integer, recursiveValidationQueries :: !Integer
+  , copatternProposals :: !Integer
   , searchNodes :: !Integer, depthIterations :: !Integer, currentDepth :: !Int
   , modelItems :: !Integer, modelNanoseconds :: !Integer, policyDecisions :: !Integer
   , workExhausted :: !Bool }
@@ -42,6 +43,7 @@ emptyStats = SearchStats
   , lambdaProposals = 0, applicationProposals = 0
   , recordProposals = 0, absurdProposals = 0
   , recursiveContextQueries = 0, recursiveProposals = 0, recursiveValidationQueries = 0
+  , copatternProposals = 0
   , searchNodes = 0, depthIterations = 0, currentDepth = 0
   , modelItems = 0, modelNanoseconds = 0, policyDecisions = 0
   , workExhausted = False }
@@ -56,6 +58,7 @@ instance ToJSON SearchStats where
     ,"recursive_context_queries" .= recursiveContextQueries s
     ,"recursive_proposals" .= recursiveProposals s
     ,"recursive_validation_queries" .= recursiveValidationQueries s
+    ,"copattern_proposals" .= copatternProposals s
     ,"depth_iterations" .= depthIterations s, "current_depth" .= currentDepth s
     ,"model_items_scored" .= modelItems s, "model_elapsed_ns" .= modelNanoseconds s
     ,"policy_decisions" .= policyDecisions s, "work_exhausted" .= workExhausted s]

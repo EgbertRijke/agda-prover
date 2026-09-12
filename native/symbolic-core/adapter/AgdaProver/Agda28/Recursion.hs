@@ -2,9 +2,10 @@
 {-# LANGUAGE LambdaCase #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.Recursion
-  ( Owner, owner, ownerName, ownerGroup, checkOwner, CallContext, inspect, callHead, usesSeed, usesOwner ) where
+  ( Owner, owner, ownerName, ownerGroup, checkOwner, CallContext, inspect, callHead
+  , eligibleCall, copatternCall, usesOwner ) where
 
-import Control.Monad (unless)
+import Control.Monad (unless, forM)
 import Data.List (find)
 import Data.Maybe (mapMaybe)
 import Data.Monoid (Any (..))
@@ -18,13 +19,17 @@ import Agda.Syntax.Common
 import Agda.Syntax.Internal qualified as I
 import Agda.Termination.TermCheck (termMutual)
 import Agda.TypeChecking.Monad
+import Agda.TypeChecking.Records (getRecordOfField, getRecordDef)
 
 -- An owner comes only from a checked source clause, never a supplied string.
 -- Child goals inherit it across generated helpers. It does not make the owner
 -- an ordinary visible premise or certify termination of any application.
 newtype Owner = Owner { ownerName :: QName }
-data DescentSeeds = ConstructorDescendants (Set.Set Name) | WithAncestryUnknown (Set.Set Name)
-data CallContext = CallContext Owner DescentSeeds
+data CallAccess
+  = ConstructorDescendants (Set.Set Name)
+  | WithAncestryUnknown (Set.Set Name)
+  | CoinductiveCopattern
+data CallContext = CallContext Owner CallAccess
 
 ownerGroup :: Owner -> TCM (Set.Set QName)
 ownerGroup (Owner function) = do
@@ -72,10 +77,15 @@ inspect point root = do
           available = Set.fromList $ map ctxEntryName current
           retained = Set.intersection available $ Set.fromList names
       definition <- getConstInfo function
+      projections <- forM [field | I.ProjP _ field <- map namedArg $ I.namedClausePats checked] $ \field ->
+        getRecordOfField field >>= \case
+          Nothing -> pure False
+          Just record -> (== Just CoInductive) . _recInduction <$> getRecordDef record
       -- A with-function can abstract away a parent constructor pattern. Its
       -- missing local witness is unknown descent, not evidence of no descent.
       -- Retain a typed fallback; Agda's full owner-group check decides validity.
       let seeds
+            | or projections = Just CoinductiveCopattern
             | not (Set.null retained) = Just $ ConstructorDescendants retained
             | Function { funWith = Just _ } <- theDef definition
             , not (Set.null available) = Just $ WithAncestryUnknown available
@@ -92,10 +102,18 @@ inspect point root = do
 callHead :: CallContext -> A.Expr
 callHead (CallContext (Owner function) _) = A.Def function
 
-usesSeed :: CallContext -> A.Expr -> Bool
-usesSeed (CallContext _ seeds) = getAny . foldExpr (\case
+-- A real coinductive projection admits a fully applied owner proposal without
+-- asserting descent. It does not prove guarding: give and the complete mutual
+-- group's termination/productivity check must still accept the candidate.
+copatternCall :: CallContext -> Bool
+copatternCall (CallContext _ CoinductiveCopattern) = True
+copatternCall _ = False
+
+eligibleCall :: CallContext -> A.Expr -> Bool
+eligibleCall (CallContext _ CoinductiveCopattern) _ = True
+eligibleCall (CallContext _ seeds) expression = getAny $ foldExpr (\case
   A.Var name -> Any $ Set.member name names
-  _ -> Any False)
+  _ -> Any False) expression
  where
   names = case seeds of
     ConstructorDescendants known -> known
