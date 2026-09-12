@@ -572,11 +572,17 @@ case tree. `multi_subject_clauses=false` retains single-subject scheduling for
 comparison without changing the user's resource envelope.
 
 The agenda's optional `progress_ordering` uses spent cost plus sixteen units
-per remaining selected interaction. This soft estimate lets a completed prefix
-advance while retaining every alternative; it is neither a proof-cost lower
-bound nor a discount against resource accounting. Receipts identify
-`cost-plus-obligations-v2`; disabling it retains `cost-only-v1`. One-step ordering
-is unchanged. See the [session contract](../../schemas/symbolic-session-v1.md).
+per remaining selected interaction and unresolved hidden obligation. The latter
+uses the larger of the hidden-meta and constraint counts, since they can overlap.
+Moving an open goal into suspended checking therefore does not masquerade as
+progress. Early constructor propagation also requires a closed checked term
+without increasing outstanding constraints, and an observed newly completed
+assignment to another open source goal. Merely dependent but nonspecifying
+proofs keep their ordinary place in the search. Ordinary search retains deferred
+alternatives. This soft estimate is neither a proof-cost lower bound nor a
+discount against resource accounting. Receipts identify
+`cost-plus-pending-obligations-v3`; disabling it retains `cost-only-v1`. One-step
+ordering is unchanged. See the [session contract](../../schemas/symbolic-session-v1.md).
 
 Use `ProverApplication.prove_evidence(task, engine=NativeEvidenceEngine(path))`
 from `agdaprover.application.service` and `agdaprover.application.evidence` to

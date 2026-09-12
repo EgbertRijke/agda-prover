@@ -56,6 +56,7 @@ import AgdaProver.Agda28.Construction qualified as Construction
 import AgdaProver.Agda28.ContextualEvidence qualified as ContextualEvidence
 import AgdaProver.Agda28.SearchTask qualified as Task
 import AgdaProver.Agda28.ObservedEquations qualified as ObservedEquations
+import AgdaProver.Agda28.Observation (openInteractionPoints)
 import AgdaProver.Agda28.Recursion qualified as Recursion
 import AgdaProver.Agda28.Scheduling qualified as Scheduling
 import AgdaProver.Agda28.PolicyViews qualified as PolicyViews
@@ -707,13 +708,31 @@ equationProposals later stats limits models mode native emit namespace excluded 
 
 -- A cheap target-directed slice for other selected joint obligations. It does
 -- not enumerate their premise catalogues or perform a hidden whole-goal search.
+-- Eager propagation must supply checked information, not merely turn a later
+-- source hole into suspended checking. Ordinary selected-goal construction
+-- still offers the same expressions when their prerequisites become useful.
 constructorProposals :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
                      -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> [String]
                      -> Maybe Recursion.Owner -> InteractionId -> I.Type
                      -> TCM [(A.Expr, [(T.Text, T.Text)])]
-constructorProposals stats limits models mode native emit namespace excluded owner _ target = do
+constructorProposals stats limits models mode native emit namespace excluded owner point target = do
   pruned <- liftIO $ newIORef False
   let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
+      closedAssignment meta = do
+        available <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+        if not available then pure False else lookupLocalMeta meta >>= \variable ->
+          case mvInstantiation variable of
+            InstV solution -> noMetas <$> instantiateFull (instBody solution)
+            _ -> pure False
+  -- A positive dependency is not evidence that this constructor constrains
+  -- that dependency. Observe an actual newly completed source assignment.
+  -- Otherwise leave this later proof for its ordinary turn, rather than
+  -- exploring permutations of provisional proofs ahead of their definitions.
+  others <- filter (/= point) <$> openInteractionPoints
+  unresolved <- fmap catMaybes $ forM others $ \other -> do
+    meta <- lookupInteractionId other
+    complete <- closedAssignment meta
+    pure $ if complete then Nothing else Just meta
   (forbiddenHere, _) <- excludedGlobals excluded
   inherited <- maybe (pure Set.empty) Recursion.ownerGroup owner
   proposals <- Construction.constructorClosures
@@ -721,7 +740,15 @@ constructorProposals stats limits models mode native emit namespace excluded own
     (Set.union forbiddenHere inherited) target
   seeds <- mapM (describe runtime "constructor-closure") proposals
   ranked <- rankDescribed runtime Classification.unknownClassification target seeds
-  pure [(expression, picked) | (Seed expression _ _, picked) <- ranked]
+  catMaybes <$> forM ranked (\(Seed expression _ _, picked) -> localTCState $ attempt runtime $ do
+    before <- length <$> getAllConstraints
+    queryCheck runtime expression target $ \term -> do
+      closed <- instantiateFull term
+      after <- length <$> getAllConstraints
+      informative <- if noMetas closed && after <= before
+        then or <$> mapM closedAssignment unresolved else pure False
+      pure $ if informative
+        then Just (expression, picked) else Nothing)
 
 -- Clause subjects come from native context identities and datatype/record
 -- metadata. Generated actions retain those identities through the session;

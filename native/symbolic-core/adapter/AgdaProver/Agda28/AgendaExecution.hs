@@ -49,7 +49,7 @@ data Config s n = Config
 -- Retain the branch's AND order separately from Agda's interaction identifiers.
 -- A refinement replaces one obligation with fresh identifiers, which Agda
 -- appends after unrelated source goals. Those identifiers are not priorities.
-data SearchState s = SearchState (S.StateRef s) (Maybe (Set.Set Int)) [Int] (Maybe StateKey)
+data SearchState s = SearchState (S.StateRef s) (Maybe (Set.Set Int)) [Int] (Maybe StateKey) Natural
 data Continuation s = RetryEvidence (SearchState s) (S.GoalRef s) Natural E.IterationDepth
   | RetainedEvidence (SearchState s) (S.GoalRef s) Natural (S.EvidenceContinuation s)
 type Queue s = A.Agenda (SearchState s) (Move s) (Continuation s)
@@ -65,18 +65,18 @@ data Outcome s
   | Paused (Queue s) | DepthPaused (Queue s) | Interrupted Interruption (Queue s) | Exhausted
 
 start :: S.StateRef s -> [Int] -> Queue s
-start state obligations = A.start $ SearchState state Nothing obligations Nothing
+start state obligations = A.start $ SearchState state Nothing obligations Nothing 0
 
 startSelected :: S.StateRef s -> [Int] -> [Int] -> Queue s
 startSelected state selected allGoals = A.start $
-  SearchState state (Just $ Set.fromList selected) allGoals Nothing
+  SearchState state (Just $ Set.fromList selected) allGoals Nothing 0
 
 -- A step proposes one checked transition from the original parent. Its open
 -- descendants are deliberately not solved. Rejected source handoffs can resume
 -- the same root alternatives; neither a fresh search nor Python planning occurs.
 startOneMove :: S.StateRef s -> Int -> [Int] -> Queue s
 startOneMove state selected allGoals = A.start $
-  SearchState state (Just $ Set.singleton selected) allGoals (Just $ S.stateKey state)
+  SearchState state (Just $ Set.singleton selected) allGoals (Just $ S.stateKey state) 0
 
 -- A goal generally needs more than one inspect/apply pair (introductions,
 -- elimination and closure). A soft eight-pair estimate gives a completed
@@ -84,16 +84,20 @@ startOneMove state selected allGoals = A.start $
 -- early constructions. This is weighted search, not an admissible lower bound.
 -- All alternatives keep finite priorities and strictly increasing spent cost;
 -- no type names, independence claim or extra checking is involved. One-step
--- search deliberately retains its order.
+-- search deliberately retains its order. A disappearing interaction point is
+-- not progress when checking merely replaces it with hidden metas or suspended
+-- constraints. Include their observed burden, without summing overlapping
+-- counts or claiming independence from unselected goals. Transition receipts
+-- already contain these counts; scheduling performs no additional kernel work.
 prioritizeProgress :: Queue s -> Queue s
-prioritizeProgress = A.prioritize $ \(SearchState _ selected order stepParent) ->
-  if stepParent /= Nothing then 0 else 16 * fromIntegral
-    (length $ maybe order (\chosen -> filter (`Set.member` chosen) order) selected)
+prioritizeProgress = A.prioritize $ \(SearchState _ selected order stepParent debt) ->
+  if stepParent /= Nothing then 0 else 16 * (debt + fromIntegral
+    (length $ maybe order (\chosen -> filter (`Set.member` chosen) order) selected))
 
 frontier :: Queue s -> (Int, Maybe (S.StateRef s, Natural, Natural))
 frontier queue = (A.pending queue, fmap unwrap $ A.principal queue)
  where
-  unwrap (SearchState state _ _ _, priority, depth) = (state, priority, depth)
+  unwrap (SearchState state _ _ _ _, priority, depth) = (state, priority, depth)
 
 step :: S.Session s -> Config s n -> Queue s -> IO (Outcome s)
 step = stepWithDepth Nothing
@@ -111,7 +115,7 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
   hooks = A.Hooks
     { A.charge = liftIO $ chargeStep config
     , A.observe = liftIO . observe config
-    , A.inspect = \(SearchState state selected order stepParent) -> do
+    , A.inspect = \(SearchState state selected order stepParent _) -> do
         obligations <- require $ S.pending session state
         let live = Set.fromList $ pendingGoals obligations
             ordered = filter (`Set.member` live) order ++
@@ -135,9 +139,9 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
         RetainedEvidence state goal allowance remaining -> execute state $ ResumeEvidence goal allowance remaining
     -- Identical issued keys witness the same immutable branch only. Equal
     -- printed goals and equal endpoint types never authorize state merging.
-    , A.sameState = \(SearchState a sa oa pa) (SearchState b sb ob pb) ->
+    , A.sameState = \(SearchState a sa oa pa _) (SearchState b sb ob pb _) ->
         pure $ S.stateKey a == S.stateKey b && sa == sb && oa == ob && pa == pb }
-  execute current@(SearchState state selected _ _) move = do
+  execute current@(SearchState state selected _ _ _) move = do
     allowed <- liftIO $ chargeMove config
     if not allowed then throwError ActionAllowanceExhausted else pure ()
     let goal = case move of
@@ -202,7 +206,7 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
       Right (E.FragmentExhausted, Nothing, _) -> pure A.Declined
       Right (E.FoundCandidate, Just next, _) -> transition current $ Right next
       _ -> throwError $ SessionFailure $ KernelFailure "agenda-inconsistent-search-result"
-  transition (SearchState parent selected previousOrder stepParent) = \case
+  transition (SearchState parent selected previousOrder stepParent _) = \case
     Left failure -> declined failure
     Right next -> do
       -- The all-goal entry point is lazy about its initial pending query. Read
@@ -211,14 +215,17 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
       before <- if null previousOrder then pendingGoals <$> require (S.pending session parent)
         else pure previousOrder
       liftIO $ accepted config next
-      let current = pendingGoals $ S.transitionPending next
+      let obligations = S.transitionPending next
+          current = pendingGoals obligations
+          debt = fromIntegral $ max 0 $ max (pendingConstraints obligations)
+            (pendingMetas obligations - length current)
           previousGoals = Set.fromList before
           after = Set.fromList current
           children = filter (`Set.notMember` previousGoals) current
           order = children ++ filter (`Set.member` after) before
           chosen = fmap (\active -> Set.union (Set.intersection active after)
             (Set.difference after previousGoals)) selected
-      pure $ A.Advanced $ SearchState (S.transitionState next) chosen order stepParent
+      pure $ A.Advanced $ SearchState (S.transitionState next) chosen order stepParent debt
   declined = \case
     KernelRejected{} -> pure A.Declined
     KernelBlocked{} -> pure A.Declined

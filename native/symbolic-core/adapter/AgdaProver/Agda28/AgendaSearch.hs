@@ -115,7 +115,7 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "action_limit" .= actionLimit settings,
     "depth_limit" .= depthLimit settings, "depth_deferred" .= depthDeferred measured,
     "depth_unit" .= ("accepted-native-branch-transition" :: String),
-    "ordering" .= (if progressOrdering settings then "cost-plus-obligations-v2" else "cost-only-v1" :: String),
+    "ordering" .= (if progressOrdering settings then "cost-plus-pending-obligations-v3" else "cost-only-v1" :: String),
     "retry_ordering" .= (if retryWorkOrdering settings then "spent-work-v1" else "uniform-v1" :: String),
     "evidence_depth_reuse" .= evidenceDepthReuse settings,
     "evidence_continuation" .= (if evidenceDepthReuse settings then "operand-progress-v1" else "restart-v1" :: String),

@@ -468,13 +468,17 @@ fragment and must not be confused with a general impossibility result.
 `dependency_ordering` enables the conservative read described below. It changes
 goal order, never the authorized selection or coupled-state semantics.
 `progress_ordering` orders branches by spent scheduling cost plus sixteen units per
-remaining selected native interaction (a soft estimate of eight inspect/apply pairs,
-allowing introductions, elimination and closure). It does not
+remaining selected native interaction and unresolved hidden obligation (a soft
+estimate of eight inspect/apply pairs, allowing introductions, elimination and
+closure). Hidden obligations use the larger of outstanding constraints and
+open metas not represented by source interactions. These overlapping counts
+are not summed. They come from the accepted transition receipt, without another
+checking query; merely suspending a source hole no longer earns progress. It does not
 infer independence, remove obligations, rebate work or prune alternatives.
 The estimate is not an admissible proof-cost bound. Stable serial ties, finite
 alternative costs and increasing spent cost preserve fallback fairness. One-step
 search uses zero remaining-work estimate and keeps its previous ordering.
-The cost receipt records `ordering: cost-plus-obligations-v2`; disabling the
+The cost receipt records `ordering: cost-plus-pending-obligations-v3`; disabling the
 switch records `cost-only-v1`. This is an internal native scheduling option,
 not a change to Python defaults or the public task's resource envelope.
 
@@ -623,7 +627,16 @@ goals, before broad alternatives for the primary goal. It reuses the native
 dependency snapshot (`constructor_probe_goals`); missing or censored edges leave
 the ordinary schedule intact and do not establish independence.
 The adapter introduces the native telescope and proposes visible constructors
-with no fields; Agda checks all indices and implicit parameters. These checked
+with no fields; Agda checks all indices and implicit parameters in an isolated
+speculation. Only a closed checked term that does not increase the constraint
+count and newly completes another open source assignment receives this
+early-propagation priority. The observed effect, not a dependency edge alone,
+distinguishes an informative specification from a merely dependent proof. This
+is a sufficient scheduling hint, not a decision procedure for which theorems
+specify their dependencies. Every probe is charged and its
+state is restored before the next; applying the issued proposal rechecks it in
+its immutable parent. Deferred constructions remain available through ordinary
+primary-goal search. These checked
 proposals can constrain earlier definitions without assuming that any goals
 are independent. Unselected goals never receive these moves. Censored planning
 retains the frontier; every observation/check is charged. The cost receipt
