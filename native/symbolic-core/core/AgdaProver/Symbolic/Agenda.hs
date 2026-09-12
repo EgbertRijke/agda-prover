@@ -59,6 +59,10 @@ data Inspection action result = Open [Proposal action] | Candidate result | Stuc
 data Transition state action continuation
   = Advanced state
   | AdvancedWithRemainder state Natural continuation
+  -- A completed original stage starts a new local priority, not a new budget
+  -- or proof depth. The adapter must certify a strictly smaller finite set of
+  -- original obligations; arbitrary refinements cannot request this reset.
+  | Checkpoint state (Maybe (Natural, continuation))
   | Planned [Proposal action]
   | Deferred Natural continuation | Declined
   deriving (Eq, Show)
@@ -175,6 +179,13 @@ stepWithDepth requested hooks input = case Map.minViewWithKey queue of
               if cyclic then event CyclePruned >> pure (Progress $ retain remaining)
               else event AdvancedState >> pure
                 (Progress $ retain $ insert (spent+1) (Inspect next $ parent:ancestors) remaining)
+            Checkpoint next remainder -> do
+              let retain = maybe id (\(extra, continuation) ->
+                    insert (spent+1+extra) (Resume parent continuation ancestors)) remainder
+              cyclic <- anyM (sameState hooks next) (parent:ancestors)
+              if cyclic then event CyclePruned >> pure (Progress $ retain remaining)
+              else event AdvancedState >> pure
+                (Progress $ retain $ insert 0 (Inspect next $ parent:ancestors) remaining)
             Advanced next -> do
               cyclic <- anyM (sameState hooks next) (parent:ancestors)
               if cyclic then event CyclePruned >> pure (Progress remaining)

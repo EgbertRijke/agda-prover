@@ -17,17 +17,18 @@ module AgdaProver.Agda28.Session
   , Refutation.Kind (..)
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
+  , RetainedGoal, retainGoal, applyRetainedGoal, retainedGoalOrigin
   , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, preferStructures, withoutResultIntroductionOverlap, proposeTerms, proposeTermsWithOptions, proposeLocalClosures, proposeStructures, proposeEquations, proposeConstructors, proposePropagation, applyTerm
   , TermPreparation, prepareTermsSlice, resumeTermsSlice
   , ClauseMove, clauseMoveGoal, clauseMoveIsBatch, applyClauseMove, ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
-  , transitionState, transitionKind, transitionPending, transitionEvidence
+  , transitionState, transitionKind, transitionPending, transitionEvidence, transitionGoal
   , evict, release, retention, replay, close, cancel, work, evidenceView
   ) where
 
 import Control.Concurrent (MVar, ThreadId, myThreadId, newMVar, modifyMVar, readMVar, withMVar)
 import Control.Exception qualified as E
-import Control.Monad (unless, when, forM)
+import Control.Monad (unless, when, forM, forM_)
 import Control.Monad.Except (catchError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (runStateT)
@@ -52,12 +53,15 @@ import Agda.Interaction.Base (UseForce (WithoutForce))
 import Agda.Interaction.Library (getPrimitiveLibDir, getAgdaLibFile, AgdaLibFile (..))
 import Agda.Interaction.Library.Base (agdaLibFiles, runLibM)
 import Agda.Syntax.Abstract qualified as A
-import Agda.Syntax.Abstract.Views (unScope)
+import Agda.Syntax.Abstract.Views (unScope, foldExpr)
+import Data.Monoid (Any (..))
 import Agda.Syntax.Common (InteractionId, interactionId, NameId, ArgInfo, Arg (..), Named (..))
 import Agda.Syntax.Common.Pretty (prettyShow)
 import Agda.Syntax.Internal qualified as I
+import Agda.Syntax.Internal.MetaVars (noMetas)
 import Agda.Syntax.Position (noRange)
 import Agda.TypeChecking.Errors (prettyError)
+import Agda.TypeChecking.Constraints (reallyNoConstraints)
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Pretty (prettyTCM)
 import Agda.TypeChecking.Reduce (instantiateFull)
@@ -105,7 +109,17 @@ data CheckedEvidence s = CheckedEvidence
 type role Transition nominal
 data Transition s = Transition
   { transitionState :: StateRef s, transitionKind :: TransitionKind
-  , transitionPending :: Pending, transitionEvidence :: CheckedEvidence s }
+  , transitionPending :: Pending, transitionEvidence :: CheckedEvidence s
+  , transitionGoal :: InteractionId }
+
+-- An assembled proposal, not transportable checked evidence. Both branches
+-- must descend from the same source parent; the receiving kernel checks it
+-- again while other pre-existing metas are frozen.
+type role RetainedGoal nominal
+data RetainedGoal s = RetainedGoal (StateRef s) (StateRef s) InteractionId A.Expr !Allocation
+
+retainedGoalOrigin :: RetainedGoal s -> StateKey
+retainedGoalOrigin (RetainedGoal _ donor _ _ _) = stateKey donor
 
 -- A planning snapshot is not an accepted child state. Native syntax and the
 -- state in which it was generated travel together under the parent's brand.
@@ -207,6 +221,7 @@ withoutResultIntroductionOverlap terms = filter $ \(ClauseMove goal intent, _) -
 -- it is replayed: its source checkpoint may be evicted long before then.
 data Allocation = Allocation !NameId !InteractionId
 data Draft = TextDraft DraftExpression | NativeDraft A.Expr !Allocation
+  | IndependentDraft A.Expr !Allocation
 data DraftAction = DraftAction !InteractionId !Draft
 -- Agda's A.Expr equality deliberately ignores some scope/presentation fields.
 -- Do not use it (or a rendered/hashed type) as an exact application witness.
@@ -914,16 +929,39 @@ check session owner parent initial (DraftAction point expression) isReplay = do
       meta <- lookupInteractionId point
       target <- getMetaTypeInContext meta
       telescope <- getContextTelescope
+      -- Freeze only pre-existing metas, excluding the requested goal. Fresh
+      -- elaboration metas remain available. Keep this guard in the replay
+      -- recipe so a replay cannot acquire additional assignment authority.
+      (protected, frozen) <- case expression of
+        IndependentDraft{} -> do
+          constraints <- getAllConstraints
+          unless (null constraints) $ genericError "retained-goal-coupled-constraints"
+          others <- Map.delete meta <$> useTC stOpenMetaStore
+          newlyFrozen <- freezeMetas others
+          pure (Map.keysSet others, newlyFrozen)
+        _ -> pure (Set.empty, Set.empty)
       scoped <- case expression of
         TextDraft text -> parseExprIn point noRange (draftSource text)
         NativeDraft scoped allocation -> reserveAllocation allocation >> ClauseExecution.registerDraft scoped
+        IndependentDraft scoped allocation -> reserveAllocation allocation >> ClauseExecution.registerDraft scoped
       -- Same transition as Agda's give, retaining its *returned* internal term
       -- rather than guessing how the meta's context permutation applies.
-      checked <- give_ False WithoutForce point Nothing scoped
+      checked <- case expression of
+        IndependentDraft{} -> reallyNoConstraints $ give_ False WithoutForce point Nothing scoped
+        _ -> give_ False WithoutForce point Nothing scoped
       maybe (pure ()) (`Recursion.checkOwner` scoped) origin
       removeInteractionPoint point
       display <- prettyShow <$> prettyTCM scoped
       term <- instantiateFull checked
+      case expression of
+        IndependentDraft{} -> unless (noMetas term) $ genericError "retained-goal-unresolved-evidence"
+        _ -> pure ()
+      -- Agda may eta-expand even frozen metas. Conservative reuse must not
+      -- publish those assignments either: normal search can still try them.
+      unless (Set.null protected) $ do
+        stillOpen <- Map.keysSet <$> useTC stOpenMetaStore
+        unless (Set.isSubsetOf protected stillOpen) $ genericError "retained-goal-assigned-other-meta"
+      forM_ frozen $ \m -> updateMetaVar m $ \mv -> mv { mvFrozen = Instantiable }
       obligations <- pendingTC
       newWarnings <- Set.difference <$> useTC stTCWarnings <*> pure warnings
       let bad = filter (not . expectedWarning) (Set.toAscList newWarnings)
@@ -940,7 +978,10 @@ check session owner parent initial (DraftAction point expression) isReplay = do
           origins = Map.fromList
             [(p, Map.findWithDefault origin p previous)
             | number' <- pendingGoals obligations, let p = fromIntegral number']
-          draft = DraftAction point $ nativeDraft scoped child
+          sealed = nativeDraft scoped child
+          draft = DraftAction point $ case (expression, sealed) of
+            (IndependentDraft{}, NativeDraft body allocation) -> IndependentDraft body allocation
+            _ -> sealed
           branch = Branch (Just child) (Just (keyBranch $ stateKey parent, draft)) origins Nothing 0 CallerRetained
           next = owner { ownerNext = number + 1,
                          ownerBranches = Map.insert number branch $
@@ -949,8 +990,8 @@ check session owner parent initial (DraftAction point expression) isReplay = do
           kind | not (null $ pendingGoals obligations) = AcceptedPartial
                | pendingMetas obligations > 0 || pendingConstraints obligations > 0 = AcceptedBlocked
                | otherwise = ApparentlyClosed
-      draft `seq` pure (next, Right $ Transition ref kind obligations $
-        CheckedEvidence ref abstract term target telescope)
+      draft `seq` pure (next, Right $ Transition ref kind obligations
+        (CheckedEvidence ref abstract term target telescope) point)
 
 expectedWarning :: TCWarning -> Bool
 expectedWarning warning = case tcWarning warning of
@@ -963,6 +1004,42 @@ expectedWarning warning = case tcWarning warning of
 -- branch, then check the assembled expression again from the original parent.
 -- This neither serializes TCState nor mistakes the last solved leaf for the
 -- complete source proof. Parent/descendant states and external costs survive.
+retainGoal :: Session s -> StateRef s -> InteractionId -> StateRef s
+           -> IO (Either Failure (RetainedGoal s))
+retainGoal session root point donor = request session root $ \owner initial ->
+  case reconstructionDrafts session owner root donor of
+    Left failure -> pure (owner, Left failure)
+    Right (expressions, allocations) -> do
+      charge (sessionWork session) $ \w -> w
+        { symbolicActions = symbolicActions w + 1 + toInteger (length expressions) }
+      (valid, _) <- kernel session initial $ elem point <$> openInteractionPoints
+      let assembled = case valid of
+            Left failure -> Left failure
+            Right False -> Left UnknownGoal
+            Right True -> case Assembly.assemble point expressions of
+              Left reason -> Left $ KernelRejected reason
+              Right body | getAny $ foldExpr (\case A.QuestionMark{} -> Any True; _ -> Any False) body ->
+                Left $ KernelBlocked "retained-goal-open-descendants"
+              Right body -> Right $ RetainedGoal root donor point body $
+                foldr maximumAllocation
+                  (Allocation (initial ^. stFreshNameId) (initial ^. stFreshInteractionId)) allocations
+      pure (owner, assembled)
+
+applyRetainedGoal :: Session s -> GoalRef s -> RetainedGoal s
+                  -> IO (Either Failure (Transition s))
+applyRetainedGoal session goal (RetainedGoal root donor point expression allocation) =
+  request session (goalState goal) $ \owner initial ->
+    if goalId goal /= point then pure (owner, Left UnknownGoal) else
+      case (reconstructionDrafts session owner root (goalState goal),
+            reconstructionDrafts session owner root donor) of
+        (Left failure, _) -> pure (owner, Left failure)
+        (_, Left failure) -> pure (owner, Left failure)
+        (Right (receiving, _), Right (origin, _)) -> do
+          charge (sessionWork session) $ \w -> w { symbolicActions = symbolicActions w + 1 +
+            toInteger (length receiving + length origin) }
+          check session owner (goalState goal) initial
+            (DraftAction point $ IndependentDraft expression allocation) False
+
 reconstructGoal :: Session s -> GoalRef s -> StateRef s
                 -> IO (Either Failure (Transition s))
 reconstructGoal session goal descendant = fmap (fmap $ snd . NE.head) $
@@ -1062,6 +1139,8 @@ reconstructionDrafts session owner parent descendant = drafts descendant >>= nat
   nativeActions (DraftAction point (NativeDraft expression allocation):rest) = do
     (expressions, allocations) <- nativeActions rest
     pure ((point, expression):expressions, allocation:allocations)
+  nativeActions (DraftAction point (IndependentDraft expression allocation):rest) =
+    nativeActions (DraftAction point (NativeDraft expression allocation):rest)
   nativeActions _ = Left $ KernelFailure "native-reconstruction-missing-scoped-draft"
 
 maximumAllocation :: Allocation -> Allocation -> Allocation

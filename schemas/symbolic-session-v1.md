@@ -556,7 +556,7 @@ retained for retry, not declared complete or silently discarded. This is
 between-family reuse, not mid-checker suspension or full native qualification.
 `dependency_ordering` enables the conservative read described below. It changes
 goal order, never the authorized selection or coupled-state semantics.
-`progress_ordering` orders branches by spent scheduling cost plus sixteen units per
+`progress_ordering` orders branches by local spent scheduling cost plus sixteen units per
 remaining selected native interaction and unresolved hidden obligation (a soft
 estimate of eight inspect/apply pairs, allowing introductions, elimination and
 closure). Hidden obligations use the larger of outstanding constraints and
@@ -565,11 +565,31 @@ are not summed. They come from the accepted transition receipt, without another
 checking query; merely suspending a source hole no longer earns progress. It does not
 infer independence, remove obligations, rebate work or prune alternatives.
 The estimate is not an admissible proof-cost bound. Stable serial ties, finite
-alternative costs and increasing spent cost preserve fallback fairness. One-step
+alternative costs and increasing local spent cost preserve fallbacks. One-step
 search uses zero remaining-work estimate and keeps its previous ordering.
-The cost receipt records `ordering: cost-plus-pending-obligations-v3`; disabling the
+For a staged joint selection with evidence macros, closing an original entry
+and all its generated children
+resets that descendant's scheduling cost to zero when no hidden debt remains.
+Only the finite original-entry set grants these checkpoints; arbitrary partial
+refinements do not. Parent alternatives, cumulative work and accepted depth
+survive unchanged. The cost receipt records
+`ordering: entry-local-pending-obligations-v4` and `entry_checkpoints`; disabling the
 switch records `cost-only-v1`. This is an internal native scheduling option,
 not a change to Python defaults or the public task's resource envelope.
+
+With staged planning, the same option retains one recently assembled native
+draft per completed original entry. It is a proposal, not transferable checked
+evidence. Both recipient and donor must descend from the run's original parent.
+Agda rechecks the draft in the recipient with every other pre-existing open meta
+frozen. Existing constraints, newly deferred constraints and unresolved proof
+terms prevent independent reuse. Newly introduced elaboration metas may be
+solved; assignments to other pre-existing metas (including eta expansion) are
+rejected, and only metas frozen by this operation are thawed afterward. Replay keeps
+the same guard. Ordinary alternatives remain available after rejection.
+The run-local cache contains no TCState or callback; ancestry/assembly and
+receiving checks are charged. `entry-checkpoint`, `retained-goal-reused` and
+`retained-goal-rejected` are generic `agdaprover.symbolic-agenda-event.v1` events,
+not verification certificates. There is no cross-run cache or state merge.
 
 `contextual_evidence` enables target-directed composition of already available
 evidence, including closed recursive calls and pointwise premises. Agda infers

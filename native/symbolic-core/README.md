@@ -677,7 +677,7 @@ available; multi-constructor variables are not combined into an exponential
 case tree. `multi_subject_clauses=false` retains single-subject scheduling for
 comparison without changing the user's resource envelope.
 
-The agenda's optional `progress_ordering` uses spent cost plus sixteen units
+The agenda's optional `progress_ordering` uses local spent cost plus sixteen units
 per remaining selected interaction and unresolved hidden obligation. The latter
 uses the larger of the hidden-meta and constraint counts, since they can overlap.
 Moving an open goal into suspended checking therefore does not masquerade as
@@ -686,9 +686,23 @@ without increasing outstanding constraints, and an observed newly completed
 assignment to another open source goal. Merely dependent but nonspecifying
 proofs keep their ordinary place in the search. Ordinary search retains deferred
 alternatives. This soft estimate is neither a proof-cost lower bound nor a
-discount against resource accounting. Receipts identify
-`cost-plus-pending-obligations-v3`; disabling it retains `cost-only-v1`. One-step
-ordering is unchanged. See the [session contract](../../schemas/symbolic-session-v1.md).
+discount against resource accounting. In staged joint search with evidence
+macros, closing an original entry, including its
+generated children, starts the next entry with fresh scheduling priority when
+no hidden checking debt remains. It resets neither the physical ledger nor
+accepted proof depth; earlier alternatives keep their original priorities.
+
+In staged joint search, completed entries also supply one recent assembled
+proposal per original goal. A sibling branch can reuse that proposal only by
+checking it again in its own Agda state, with other pre-existing metas frozen.
+Changed dependencies, shared unresolved assignments or constraints can reject
+reuse; normal alternatives remain available. The guard survives replay.
+No resident states are merged, and fresh source validation remains mandatory.
+This is conservative checked reuse, not an incremental declaration editor or a
+claim that the entire joint-search problem is solved. Receipts identify
+`entry-local-pending-obligations-v4` and whether `entry_checkpoints` is enabled;
+disabling `progress_ordering` retains `cost-only-v1` and disables this reuse.
+One-step ordering is unchanged. See the [session contract](../../schemas/symbolic-session-v1.md).
 
 Use `ProverApplication.prove_evidence(task, engine=NativeEvidenceEngine(path))`
 from `agdaprover.application.service` and `agdaprover.application.evidence` to

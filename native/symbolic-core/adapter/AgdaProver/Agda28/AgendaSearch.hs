@@ -12,6 +12,7 @@ import Data.Aeson (Value, object, (.=))
 import Data.IORef
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
+import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Agda.Syntax.Common (InteractionId, interactionId)
 import Numeric.Natural (Natural)
@@ -40,6 +41,13 @@ data Metrics = Metrics
   , depthDeferred :: !Integer }
 data Run s = Run (S.Session s) Settings (N.Queue s) Integer
   (IORef Metrics) (MVar ()) (Value -> IO ()) (S.Transition s -> IO ()) (Maybe (S.GoalRef s, Natural))
+  (Maybe (JointCache s))
+
+-- One recent assembled proposal per original entry; alternatives still belong
+-- to the ordinary agenda. No TCState, checker callback or cross-run cache.
+data JointCache s = JointCache (S.StateRef s) (Set.Set Int)
+  (IORef (Map.Map Int (S.RetainedGoal s)))
+  (IORef (Set.Set (StateKey, Int, StateKey)))
 data PauseReason = SliceEnded | AllowanceSpent | ActionsSpent | DepthSpent | CancelledByCaller deriving (Eq, Show)
 data Result s = Paused PauseReason (Run s) | Candidate (S.StateRef s) (Run s)
   | Refutation (S.RefutationProposal s) (Run s) | Exhausted | Failed Failure (Run s)
@@ -82,29 +90,33 @@ beginWithStep oneMove selection session state supplied trace accepted = S.pendin
           [point] | not oneMove && keyBranch (S.stateKey state) == 0 -> either (const Nothing) (\goal -> Just (goal, initialMacroWork settings)) $
             S.restoreGoalReference session (S.stateKey state) (fromIntegral point)
           _ -> Nothing
-    pure $ Right $ Run session settings queue baseline metrics owner trace accepted refutationGoal
+    joint <- if not oneMove && progressOrdering settings && evidenceMacro settings &&
+        stagedPlanning settings && length selected > 1
+      then Just <$> (JointCache state (Set.fromList selected) <$> newIORef Map.empty <*> newIORef Set.empty)
+      else pure Nothing
+    pure $ Right $ Run session settings queue baseline metrics owner trace accepted refutationGoal joint
 
 -- Raising an allowance never resets accumulated work or restores spent budget.
 withLimits :: E.SearchLimits -> Run s -> Run s
-withLimits allowance (Run session settings queue baseline metrics owner trace accepted refutationGoal) =
-  Run session settings { limits = allowance } queue baseline metrics owner trace accepted refutationGoal
+withLimits allowance (Run session settings queue baseline metrics owner trace accepted refutationGoal joint) =
+  Run session settings { limits = allowance } queue baseline metrics owner trace accepted refutationGoal joint
 
 withActionLimit :: Maybe Integer -> Run s -> Run s
-withActionLimit limit (Run session settings queue baseline metrics owner trace accepted refutationGoal) =
-  Run session settings { actionLimit = limit } queue baseline metrics owner trace accepted refutationGoal
+withActionLimit limit (Run session settings queue baseline metrics owner trace accepted refutationGoal joint) =
+  Run session settings { actionLimit = limit } queue baseline metrics owner trace accepted refutationGoal joint
 
 withDepthLimit :: Maybe Natural -> Run s -> Run s
-withDepthLimit limit (Run session settings queue baseline metrics owner trace accepted refutationGoal) =
-  Run session settings { depthLimit = limit } queue baseline metrics owner trace accepted refutationGoal
+withDepthLimit limit (Run session settings queue baseline metrics owner trace accepted refutationGoal joint) =
+  Run session settings { depthLimit = limit } queue baseline metrics owner trace accepted refutationGoal joint
 
 -- A resumed protocol request has a new response channel/request ID. Do not
 -- retain the callback of the request that originally created this frontier.
 withObservers :: (Value -> IO ()) -> (S.Transition s -> IO ()) -> Run s -> Run s
-withObservers trace accepted (Run session settings queue baseline metrics owner _ _ refutationGoal) =
-  Run session settings queue baseline metrics owner trace accepted refutationGoal
+withObservers trace accepted (Run session settings queue baseline metrics owner _ _ refutationGoal joint) =
+  Run session settings queue baseline metrics owner trace accepted refutationGoal joint
 
 cost :: Run s -> IO Value
-cost (Run session settings _ baseline metrics _ _ _ _) = do
+cost (Run session settings _ baseline metrics _ _ _ _ joint) = do
   physical <- S.work session
   measured <- readIORef metrics
   let steps = schedulerSteps measured
@@ -115,7 +127,8 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "action_limit" .= actionLimit settings,
     "depth_limit" .= depthLimit settings, "depth_deferred" .= depthDeferred measured,
     "depth_unit" .= ("accepted-native-branch-transition" :: String),
-    "ordering" .= (if progressOrdering settings then "cost-plus-pending-obligations-v3" else "cost-only-v1" :: String),
+    "ordering" .= (if progressOrdering settings then "entry-local-pending-obligations-v4" else "cost-only-v1" :: String),
+    "entry_checkpoints" .= maybe False (const True) joint,
     "retry_ordering" .= (if retryWorkOrdering settings then "spent-work-v1" else "uniform-v1" :: String),
     "evidence_depth_reuse" .= evidenceDepthReuse settings,
     "evidence_continuation" .= (if evidenceDepthReuse settings then "operand-progress-v1" else "restart-v1" :: String),
@@ -131,13 +144,13 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "models" .= P.modelIdentities (models settings), "session_cost" .= physical]
 
 frontier :: Run s -> (Int, Maybe (S.StateRef s, Natural, Natural))
-frontier (Run _ _ queue _ _ _ _ _ _) = N.frontier queue
+frontier (Run _ _ queue _ _ _ _ _ _ _) = N.frontier queue
 
 -- A slice ends between native operations, retaining the exact queue and coarse
 -- evidence operands. Atomic catalogue/scope retries stay explicitly charged.
 -- No pause claims to checkpoint the interior of an Agda checker call.
 advance :: Maybe (NativeScorer n) -> Natural -> Run s -> IO (Result s)
-advance native count run@(Run session settings initial baseline metrics owner trace accepted refutationGoal) =
+advance native count run@(Run session settings initial baseline metrics owner trace accepted refutationGoal joint) =
   withMVar owner $ \_ -> if count == 0 then pure $ Paused SliceEnded run else
     case refutationGoal of
       Nothing -> go Nothing count initial
@@ -153,7 +166,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
               _ -> go Nothing count initial
  where
   saved refutation queue = case run of
-    Run s cfg _ base meter lock emit accept _ -> Run s cfg queue base meter lock emit accept refutation
+    Run s cfg _ base meter lock emit accept _ cache -> Run s cfg queue base meter lock emit accept refutation cache
   allowance = do
     physical <- S.work session
     steps <- schedulerSteps <$> readIORef metrics
@@ -198,8 +211,11 @@ advance native count run@(Run session settings initial baseline metrics owner tr
     [] -> pure $ Right $ N.Moves []
     point:_ -> case S.restoreGoalReference session (S.stateKey state) (fromIntegral point) of
       Left failure -> pure $ Left failure
-      Right goal | evidenceMacro settings && stagedPlanning settings -> pure $ Right $ N.Moves
-        [A.Proposal (N.Prepare $ N.Preparation goal obligations constraining N.PrepareLocals) 0]
+      Right goal | evidenceMacro settings && stagedPlanning settings -> do
+        reused <- reuseProposal goal
+        pure $ Right $ N.Moves $ reused ++
+          [A.Proposal (N.Prepare $ N.Preparation goal obligations constraining N.PrepareLocals)
+            (if null reused then 0 else 1)]
       Right goal -> do
         budget <- moveAllowance
         let operands = E.PrimitiveOptions
@@ -397,6 +413,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
           -- Staged planning owns closure for every goal. Do not also run the
           -- legacy clause-only pass and then repeat its exact-parent probes.
           (evidenceMacro settings && contextualEvidence settings && not (stagedPlanning settings))
+          (maybe False (const True) joint) rememberEntries
     N.stepWithDepth (depthLimit settings) session config queue >>= \case
       N.Progress next -> go refutation (remaining-1) next
       N.Candidate state next -> pure $ Candidate state $ saved refutation next
@@ -413,6 +430,37 @@ advance native count run@(Run session settings initial baseline metrics owner tr
         N.MoveAllowanceExhausted{} -> Paused AllowanceSpent $ saved refutation next
         N.SessionFailure Cancelled -> Paused CancelledByCaller $ saved refutation next
         N.SessionFailure failure -> Failed failure $ saved refutation next
+
+  reuseProposal goal = case joint of
+    Nothing -> pure []
+    Just (JointCache _ originals cache attempts) -> do
+      let point = interactionId $ S.goalId goal
+      candidate <- Map.lookup point <$> readIORef cache
+      case candidate of
+        Just retained | Set.member point originals -> do
+          let key = (S.stateKey $ S.goalState goal, point, S.retainedGoalOrigin retained)
+          fresh <- atomicModifyIORef' attempts $ \seen ->
+            (Set.insert key seen, Set.notMember key seen)
+          pure [A.Proposal (N.ReuseGoal goal retained) 0 | fresh]
+        _ -> pure []
+  rememberEntries state points = case joint of
+    Nothing -> pure $ Right ()
+    Just (JointCache root originals cache _) -> remember root cache
+      (filter (`Set.member` originals) points)
+   where
+    remember _ _ [] = pure $ Right ()
+    remember root cache (point:rest) = S.retainGoal session root (fromIntegral point) state >>= \case
+      Right retained -> do
+        modifyIORef' cache $ Map.insert point retained
+        trace $ object ["schema_version" .= ("agdaprover.symbolic-agenda-event.v1" :: String),
+          "event" .= ("entry-checkpoint" :: String), "goal_id" .= point, "state" .= S.stateKey state]
+        remember root cache rest
+      -- Failure to assemble a closed draft is not failure of the branch.
+      -- Cancellation and invalid parent/epoch failures propagate; no failed
+      -- capture is published as proof or swallowed as an ordinary rejection.
+      Left KernelRejected{} -> remember root cache rest
+      Left KernelBlocked{} -> remember root cache rest
+      Left failure -> pure $ Left failure
 
 nativeWork :: Work -> Integer
 nativeWork ledger = checkingAttempts ledger + symbolicActions ledger
