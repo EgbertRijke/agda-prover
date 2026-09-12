@@ -143,6 +143,15 @@ The Haskell API exposes generic agenda events and cost snapshots. Autonomous
 helper-application invention, joint/source selection, protocol controls and full
 OS-resource integration are not implied by this controller checkpoint.
 
+The resident protocol exposes `start-search`, `advance-search`, `search-cost`
+and `discard-search`. An advance uses a configurable scheduling quantum and
+returns a revised run handle; it retains alternatives after provisional
+candidates. Allowances can be increased without erasing spent work. Existing
+`cancel` interrupts the active request while preserving a resumable/discardable
+run. Versioned progress events use the current request ID. The caller still
+supervises process resources and freshly validates reconstructed source.
+See the session schema for exact fields and revision/cancellation semantics.
+
 - `core/`: compiler-independent protocol, feature views and NNUE inference; no Agda internals.
 - `adapter/`: Agda 2.8 types, scoped snapshots, and structural codecs.
 - `app/`: process entrypoint and response/error framing.

@@ -5,7 +5,7 @@
 -- Native controller. All source obligations remain coupled; source selection
 -- and final independent validation belong to the application boundary.
 module AgdaProver.Agda28.AgendaSearch
-  ( Run, Settings (..), Result (..), PauseReason (..), begin, advance, withLimits, cost ) where
+  ( Run, Settings (..), Result (..), PauseReason (..), begin, advance, withLimits, withObservers, cost ) where
 
 import Control.Concurrent (MVar, newMVar, withMVar)
 import Data.Aeson (Value, object, (.=))
@@ -49,6 +49,12 @@ begin session state settings trace accepted = S.pending session state >>= \case
 withLimits :: E.SearchLimits -> Run s -> Run s
 withLimits allowance (Run session settings queue baseline metrics owner trace accepted) =
   Run session settings { limits = allowance } queue baseline metrics owner trace accepted
+
+-- A resumed protocol request has a new response channel/request ID. Do not
+-- retain the callback of the request that originally created this frontier.
+withObservers :: (Value -> IO ()) -> (S.Transition s -> IO ()) -> Run s -> Run s
+withObservers trace accepted (Run session settings queue baseline metrics owner _ _) =
+  Run session settings queue baseline metrics owner trace accepted
 
 cost :: Run s -> IO Value
 cost (Run session _ _ baseline metrics _ _ _) = do

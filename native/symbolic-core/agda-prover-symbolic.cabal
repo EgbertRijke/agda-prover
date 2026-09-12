@@ -67,7 +67,7 @@ executable agdaprover-symbolic
   import: defaults
   hs-source-dirs: app
   main-is: Main.hs
-  other-modules: SessionProtocol
+  other-modules: SessionProtocol, RunControl
   ghc-options: -threaded -rtsopts
   build-depends:
     agda-prover-symbolic,

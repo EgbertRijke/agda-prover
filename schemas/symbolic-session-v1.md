@@ -55,6 +55,10 @@ Each operation permits only its listed additional fields:
 | `apply-clause` | `state`, `goal_id`, `action` | Checked native helper/clause child, evidence view and dependent obligations |
 | `reconstruct-goal` | `state`, `goal_id`, `descendant` | Assemble native drafts from a descendant, recheck from the original goal's parent, return a provisional checked transition |
 | `reconstruct-goals` | `state`, `goal_ids`, `descendant` | Reconstruct a nonempty ordered selection into one new coupled branch; return all entries and final pending obligations |
+| `start-search` | `state`, `limits`, `ranker`, `model_path`, `focused_model_path`, `native_path`, `focused_search`, `exclude_names`; optional `scheduling` | Create a retained autonomous run over the source state's pending goals |
+| `advance-search` | `run`, `steps`, `limits` | Advance a scheduling slice; return a new run revision or terminal finite exhaustion |
+| `search-cost` | `run` | Retained run cost snapshot |
+| `discard-search` | `run` | Retire the run handle/frontier, retaining its cost receipt |
 | `infer-helper` | `state`, `goal_id`, `mode`, `application` | Parent-bound native helper signature, not a proof transition |
 | `solve-helper` | `state`, `goal_id`, `mode`, `application`, `limits`, `ranker`, `model_path`, `native_path` | Finite native helper search with the ordinary provisional candidate/cost result |
 | `solve-evidence` | `state`, `goal_id`, `limits`, `ranker`, `model_path`, `native_path`, `exclude_names`; optional `focused_model_path`, `focused_search` | Search status, provisional child/evidence, cumulative search cost, selected policy choices |
@@ -218,6 +222,65 @@ coupled branch. Unselected source goals and hidden obligations remain pending.
 An apparently closed batch is not independently verified and is not a source
 patch. Validate the reconstructed source together, not individual proof terms
 against unrelated copies of the original file.
+
+## Resident search runs
+
+`start-search` creates a native controller without advancing its frontier.
+`limits` has the same `{ "work_units": positive-integer-or-null }` format as
+evidence search. `ranker` is `nnue` or `symbolic`; model/native paths are explicit
+nullable paths. Models are loaded once for this run. `focused_search` is boolean
+and `exclude_names` is the existing list of forbidden premise names. The optional
+`scheduling` object has exactly these fields (defaults shown):
+
+```json
+{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true}
+```
+
+Delays are nonnegative scheduling priorities, not proof-depth restrictions.
+The initial macro slice is positive and grows on retry. `evidence_macro` is a
+feature flag for the coarse fallback; disabling it restricts the configured
+fragment and must not be confused with a general impossibility result.
+
+Success returns `status: ready`, `run`, `cost`, `proof_authority: false`.
+A run key has exactly `{session, epoch, run, revision}`; all counters are
+nonnegative integers. It is distinct from a branch key. Every completed
+`advance-search` consumes that revision and returns a new revision if retained.
+Old revisions are rejected as `stale-run`; retired handles as `unknown-run`.
+Foreign sessions and changed source epochs cannot resume the frontier.
+
+`steps` is a nonnegative scheduling quantum; zero advances no search steps.
+Each `advance-search` supplies the total work allowance for the run, not an
+additional grant. Raising it retains all already spent work. It returns:
+
+- `paused` with `reason: slice-ended|allowance-spent|cancelled` and a new `run`;
+- `candidate` with a provisional native `state` and a retained `run` containing
+  alternatives, suitable for reconstruction and subsequent fresh validation;
+- `failed` with precise `failure` and a retained `run`;
+- `unsolved` for an empty configured finite frontier, retiring the run.
+
+Every outcome preserves a cost receipt and has no proof authority. Ordinary
+`cancel` interrupts the active advance request; it does not discard the run.
+If cancellation happens outside a native operation, the existing key remains
+valid; otherwise use the updated key returned in the operation result. Both
+retain charged work. Discard is an idle work request; cancel an active advance
+first. Session snapshots/replay ancestry have their own eviction lifecycle and
+are not all freed merely by discarding the frontier.
+
+`search-progress` events are tagged with the **current advance request ID** and
+contain a `payload`: existing versioned NNUE traces, generic
+`agdaprover.symbolic-agenda-event.v1` events, or
+`agdaprover.symbolic-progress.v1` checked-state/pending observations. These are
+diagnostic/progress hooks, not source edits or accepted proof certificates.
+No retained callback writes events under the old start-request ID.
+
+Costs include scheduler steps, model work and the native session ledger.
+`work_units` charges native checking since this run was started plus its own
+scheduler steps. Other work deliberately performed in the same session during
+a pause also consumes that shared-session allowance; do not sum overlapping
+run receipts as disjoint costs. OS CPU/RSS/I/O/temporary-storage supervision,
+stop escalation and source patch validation remain the application's duty.
+Current slices stop between atomic Agda operations, not inside them. Wire
+controls alone are not yet full editor or installed-workflow qualification.
 
 ## Helper inference
 

@@ -18,11 +18,13 @@ import Data.IORef
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Set qualified as Set
+import Numeric.Natural (Natural)
 import System.Environment (lookupEnv)
 import System.IO (stdin)
 import Text.Read (readMaybe)
 import Agda.Syntax.Common (InteractionId, interactionId)
 import AgdaProver.Agda28.Session qualified as S
+import AgdaProver.Agda28.AgendaSearch qualified as G
 import AgdaProver.Symbolic.Protocol qualified as P
 import AgdaProver.Symbolic.SessionTypes hiding (Pending)
 import AgdaProver.Symbolic.Evidence qualified as Search
@@ -30,6 +32,7 @@ import AgdaProver.Symbolic.Clause (ClauseAction)
 import AgdaProver.Symbolic.NNUE.Model qualified as Model
 import AgdaProver.Symbolic.NNUE.Policy qualified as Policy
 import AgdaProver.Symbolic.NNUE.Native (withNativeScorer)
+import RunControl qualified as Run
 
 data Operation = Pending StateKey | Observe StateKey InteractionId P.ObservationMode
   | Give StateKey InteractionId DraftExpression | Evict StateKey | Replay StateKey
@@ -38,6 +41,10 @@ data Operation = Pending StateKey | Observe StateKey InteractionId P.Observation
   | ApplyClause StateKey InteractionId ClauseAction
   | ReconstructGoal StateKey InteractionId StateKey
   | ReconstructGoals StateKey (NonEmpty InteractionId) StateKey
+  | StartSearch StateKey Search.SearchLimits Policy.RankingMode (Maybe FilePath)
+      (Maybe FilePath) (Maybe FilePath) Bool [String] Scheduling
+  | AdvanceSearch Run.Key Natural Search.SearchLimits
+  | RunCost Run.Key | DiscardSearch Run.Key
   | InferHelper StateKey InteractionId P.ObservationMode DraftExpression
   | SolveHelper StateKey InteractionId Search.SearchLimits Policy.RankingMode (Maybe FilePath) (Maybe FilePath)
       P.ObservationMode DraftExpression
@@ -47,6 +54,17 @@ data Active = Active Integer ThreadId (MVar ())
 data ProtocolFailure = InvalidFrameBudget | UnterminatedFrame | FrameBudgetExhausted
   deriving Show
 instance E.Exception ProtocolFailure
+
+-- Soft ordering/slice settings, not proof-size or depth restrictions.
+data Scheduling = Scheduling Natural Natural Natural Bool
+instance FromJSON Scheduling where
+  parseJSON = withObject "scheduling" $ \o -> do
+    unless (Set.fromList (KM.keys o) == Set.fromList
+      ["structural_delay", "macro_delay", "initial_macro_work", "evidence_macro"]) $ fail "invalid scheduling fields"
+    scheduling@(Scheduling _ _ initial _) <- Scheduling <$> o .: "structural_delay"
+      <*> o .: "macro_delay" <*> o .: "initial_macro_work" <*> o .: "evidence_macro"
+    unless (initial > 0) $ fail "initial macro allowance must be positive"
+    pure scheduling
 
 protocolFailureName :: ProtocolFailure -> String
 protocolFailureName InvalidFrameBudget = "invalid-frame-budget"
@@ -99,6 +117,22 @@ parseRequest = withObject "session request" $ \o -> do
         [] -> fail "empty goal selection"
         first:rest -> ReconstructGoals <$> o .: "state"
           <*> pure (fmap fromInteger $ first :| rest) <*> o .: "descendant"
+    "start-search" -> do
+      fields $ ["state", "limits", "ranker", "model_path", "focused_model_path",
+        "native_path", "focused_search", "exclude_names"] ++ filter (`KM.member` o) ["scheduling"]
+      mode <- o .: "ranker" >>= \case
+        ("nnue" :: String) -> pure Policy.Learned
+        "symbolic" -> pure Policy.Symbolic
+        _ -> fail "unknown ranker"
+      scheduling <- if KM.member "scheduling" o then o .: "scheduling" else pure $ Scheduling 2 8 64 True
+      StartSearch <$> o .: "state" <*> o .: "limits" <*> pure mode <*> o .: "model_path"
+        <*> o .: "focused_model_path" <*> o .: "native_path" <*> o .: "focused_search"
+        <*> o .: "exclude_names" <*> pure scheduling
+    "advance-search" -> do
+      fields ["run", "steps", "limits"]
+      AdvanceSearch <$> o .: "run" <*> o .: "steps" <*> o .: "limits"
+    "search-cost" -> fields ["run"] >> RunCost <$> o .: "run"
+    "discard-search" -> fields ["run"] >> DiscardSearch <$> o .: "run"
     "solve-helper" -> do
       fields ["state", "goal_id", "limits", "ranker", "model_path", "native_path", "mode", "application"]
       mode <- o .: "ranker" >>= \case
@@ -147,6 +181,7 @@ failureView failure = object
 -- a killed process leaves its completion/cost *unknown*, never an invented zero.
 serve :: (Value -> IO ()) -> S.Session s -> S.StateRef s -> IO ()
 serve output session root = do
+  runs <- Run.newStore session root
   outputLock <- newMVar ()
   active <- newMVar Nothing
   serial <- newIORef (-1)
@@ -175,7 +210,9 @@ serve output session root = do
             E.finally (do
               let emitSearch trace = emit $ event "search-policy"
                     ["request_id" .= number, "trace" .= trace]
-              outcome <- (takeMVar gate >> unmask (perform session emitSearch operation)) `E.catches`
+                  emitRun payload = emit $ event "search-progress"
+                    ["request_id" .= number, "payload" .= payload]
+              outcome <- (takeMVar gate >> unmask (perform session runs emitSearch emitRun operation)) `E.catches`
                 [ E.Handler $ \(err :: E.AsyncException) -> case err of
                     E.ThreadKilled -> pure (failureView Cancelled)
                     _ -> E.throwIO err
@@ -222,8 +259,18 @@ serve output session root = do
   cost <- S.work session
   emit $ event "session-end" ["cost" .= cost]
 
-perform :: S.Session s -> (Value -> IO ()) -> Operation -> IO Value
-perform session emit operation = case operation of
+perform :: S.Session s -> Run.Store s -> (Value -> IO ()) -> (Value -> IO ()) -> Operation -> IO Value
+perform session runs emit emitRun operation = case operation of
+  StartSearch key limits mode modelPath focusedPath nativePath focused excluded (Scheduling structural macro initial enabled) ->
+    resolved key $ \root -> do
+      loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
+      focusedModel <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.FocusedBranch)) focusedPath
+      case ((++) <$> loaded <*> focusedModel) >>= Policy.models of
+        Left reason -> pure $ failureView $ KernelFailure ("model-configuration:" ++ reason)
+        Right models -> Run.start runs root (G.Settings limits mode models focused excluded structural macro initial enabled) nativePath
+  AdvanceSearch key steps limits -> Run.advance runs key steps limits emitRun
+  RunCost key -> Run.snapshot runs key
+  DiscardSearch key -> Run.discard runs key
   Pending key -> resolved key $ \ref -> result toJSON <$> S.pending session ref
   Observe key goal mode -> resolvedGoal key goal $ \ref -> result id <$> S.inspect session ref mode
   MakeClause key goal action -> resolvedGoal key goal $ \ref ->
