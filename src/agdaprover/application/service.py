@@ -18,6 +18,7 @@ from ..principal_variation import PrincipalVariationObserver
 from ..search import prove
 from ..step import propose_step
 from .entry_testing import test_entries
+from .evidence import NativeEvidenceEngine
 from .inspection import CommandResult
 
 
@@ -45,6 +46,12 @@ class ProverApplication:
             session_factory=self.session_factory,
             progress_observer=progress_observer,
         )
+
+    def prove_evidence(
+        self, task: TaskSpec, *, engine: NativeEvidenceEngine
+    ) -> ProverResult:
+        """Explicit native first slice; production engine selection is unchanged."""
+        return engine.prove(task, session_factory=self.session_factory)
 
     def step(self, task: TaskSpec, *, collect_all: bool = False) -> StepResult:
         return propose_step(

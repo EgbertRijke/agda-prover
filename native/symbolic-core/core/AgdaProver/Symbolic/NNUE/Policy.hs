@@ -3,7 +3,7 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Symbolic.NNUE.Policy
   ( Models, models, RankingDomain (..), RankingMode (..), Candidate (..)
-  , RankedBatch (..), DecisionTrace, traceView, rankBatch ) where
+  , RankedBatch (..), DecisionTrace, traceView, traceItemsScored, traceModelNanoseconds, rankBatch ) where
 
 import Control.Monad (unless)
 import Data.Aeson (Value, object, (.=))
@@ -39,6 +39,11 @@ data DecisionTrace = DecisionTrace
   { decisionName :: Text, domain :: RankingDomain, selectedModel :: Maybe Model
   , fallbackReason :: Maybe String, symbolicOrder :: [Text], rankedOrder :: [Text]
   , priorities :: [Int], scoring :: Maybe ScoredBatch, rankingElapsedNanoseconds :: Integer }
+
+traceItemsScored :: DecisionTrace -> Int
+traceItemsScored = maybe 0 itemsScored . scoring
+traceModelNanoseconds :: DecisionTrace -> Integer
+traceModelNanoseconds = rankingElapsedNanoseconds
 
 roleFor :: RankingDomain -> ModelRole
 roleFor ProofTerms = ProofTerm

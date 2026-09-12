@@ -20,10 +20,12 @@ import Text.Read (readMaybe)
 
 import Agda.Interaction.Imports
   ( Mode (TypeCheck), crMode, crWarnings, crInterface, parseSource, typeCheckMain )
-import Agda.Interaction.Options (CommandLineOptions (..), defaultOptions)
+import Agda.Interaction.Options (CommandLineOptions (..), defaultOptions, runOptM, parsePragmaOptions)
+import Agda.Interaction.Library (OptionsPragma (..))
 import Agda.Main (Interactor, runAgdaWithOptions, runTCMPrettyErrors)
 import Agda.Setup qualified
 import Agda.Syntax.Common (InteractionId)
+import Agda.Syntax.Position (noRange)
 import Agda.TypeChecking.Monad
 import Agda.Utils.FileName (absolute)
 import Agda.Version (version)
@@ -95,14 +97,18 @@ run emit sessionFailure = do
   args <- getArgs
   case args of
     ["capabilities"] -> emit P.capabilities
-    "session" : file : includes
-      | isAbsolute file, all isAbsolute includes -> do
+    "session" : file : arguments
+      | let (includes, suffix) = break (== "--") arguments
+      , isAbsolute file, all isAbsolute includes -> do
         Agda.Setup.setup False
         program <- getProgName
-        let opts = defaultOptions
+        let initial = defaultOptions
               { optUseLibs = False, optDefaultLibs = False
               , optIgnoreInterfaces = True
               , optIncludePaths = takeDirectory file : includes }
+        opts <- case runOptM $ parsePragmaOptions (OptionsPragma (drop 1 suffix) noRange) initial of
+          (Right pragmas, []) -> pure initial { optPragmaOptions = pragmas }
+          _ -> reject "unsupported-checking-options"
         runTCMPrettyErrors $ runAgdaWithOptions (session emit sessionFailure file) program opts
     "observe" : file : goal : mode : includes
       | isAbsolute file, all isAbsolute includes

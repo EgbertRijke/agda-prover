@@ -34,8 +34,10 @@ capabilities = object
   , "ghc_version" .= ("9.6.7" :: String)
   , "operations" .= (["capabilities", "observe-goal", "resident-session"] :: [String])
   , "session_operations" .=
-      (["pending", "observe", "give", "evict", "replay", "cost", "cancel", "close"] :: [String])
+      (["pending", "observe", "give", "solve-evidence", "evict", "replay", "cost", "cancel", "close"] :: [String])
   , "observation_modes" .= map modeName [minBound .. maxBound]
-  , "search_available" .= False
+  , "search_available" .= True
+  , "search_fragments" .= (["evidence-application-v1"] :: [String])
+  , "production_default" .= False
   , "proof_authority" .= False
   ]

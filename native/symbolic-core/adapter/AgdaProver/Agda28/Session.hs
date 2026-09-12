@@ -10,6 +10,7 @@ module AgdaProver.Agda28.Session
   ( Session, StateRef, GoalRef, CheckedEvidence, Transition
   , withSession, stateKey, restoreReference, restoreGoalReference, goalState, goalId
   , inspect, pending, tryExpression
+  , solveEvidence
   , transitionState, transitionKind, transitionPending, transitionEvidence
   , evict, replay, close, cancel, work, evidenceView
   ) where
@@ -25,6 +26,7 @@ import Data.ByteString qualified as BS
 import Data.IORef
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
+import Data.Text qualified as T
 import Data.Text.Lazy qualified as TL
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
@@ -35,6 +37,7 @@ import System.Random (randomIO)
 
 import Agda.Interaction.BasicOps (parseExprIn, give_)
 import Agda.Interaction.Base (UseForce (WithoutForce))
+import Agda.Syntax.Abstract qualified as A
 import Agda.Syntax.Common (InteractionId, interactionId)
 import Agda.Syntax.Common.Pretty (prettyShow)
 import Agda.Syntax.Internal qualified as I
@@ -46,6 +49,10 @@ import Agda.TypeChecking.Reduce (instantiateFull)
 import Agda.Utils.FileName (filePath)
 import Agda.Utils.IO.UTF8 qualified as UTF8
 import AgdaProver.Agda28.Observation (observeGoal, encodeGoal, openInteractionPoints)
+import AgdaProver.Agda28.EvidenceSearch qualified as Search
+import AgdaProver.Symbolic.Evidence qualified as Search
+import AgdaProver.Symbolic.NNUE.Native (NativeScorer)
+import AgdaProver.Symbolic.NNUE.Policy qualified as Policy
 import AgdaProver.Symbolic.Protocol (ObservationMode)
 import AgdaProver.Symbolic.SessionTypes
 import Structure qualified as S
@@ -72,7 +79,11 @@ data Transition s = Transition
   { transitionState :: StateRef s, transitionKind :: TransitionKind
   , transitionPending :: Pending, transitionEvidence :: CheckedEvidence s }
 
-data DraftAction = DraftAction InteractionId DraftExpression
+-- Preserve checked-source abstract syntax as well as internal evidence. Agda's
+-- display reifier may use postfix projections: display syntax is not a draft
+-- to send straight back to checkExpr without scope elaboration.
+data Draft = TextDraft DraftExpression | NativeDraft A.Expr
+data DraftAction = DraftAction InteractionId Draft
 data Branch = Branch { branchState :: Maybe TCState, branchTrail :: Maybe (Integer, DraftAction) }
 data Owner = Owner
   { ownerEpoch :: Integer, ownerClosed :: Bool, ownerNext :: Integer
@@ -251,7 +262,40 @@ inspect session goal mode = request session (goalState goal) $ \owner state -> d
 tryExpression :: Session s -> GoalRef s -> DraftExpression
               -> IO (Either Failure (Transition s))
 tryExpression session goal expression = request session (goalState goal) $ \owner state ->
-  check session owner (goalState goal) state (DraftAction (goalId goal) expression) False
+  check session owner (goalState goal) state (DraftAction (goalId goal) $ TextDraft expression) False
+
+-- One coarse request owns all speculative choices. Costs live outside TCM and
+-- survive cancellation. A winning native term is rechecked from the ORIGINAL
+-- parent: no speculative constraints or warnings are silently published.
+solveEvidence :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
+              -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String]
+              -> (Value -> IO ())
+              -> IO (Search.SearchStats, Either Failure
+                   (Search.SearchStatus, Maybe (Transition s), [(T.Text,T.Text)]))
+solveEvidence session goal limits models mode native excluded emit = do
+  stats <- newIORef Search.emptyStats
+  outcome <- request session (goalState goal) $ \owner state -> do
+    ledger <- work session
+    let point = goalId goal
+        namespace = show (stateKey $ goalState goal) ++ ":" ++ show (requests ledger)
+    (searched, _) <- kernel session state $ do
+      exists <- elem point <$> openInteractionPoints
+      if not exists then pure $ Left UnknownGoal else withInteractionId point $ do
+        meta <- lookupInteractionId point
+        target <- getMetaTypeInContext meta
+        Right <$> Search.run stats limits models mode native emit namespace excluded target
+    case searched >>= id of
+      Left failure -> pure (owner, Left failure)
+      Right (Search.Result status Nothing selected) -> pure (owner, Right (status, Nothing, selected))
+      Right (Search.Result status (Just term) selected) -> do
+        (next, checked) <- check session owner (goalState goal) state
+          (DraftAction point $ NativeDraft term) False
+        pure (next, (\transition -> (status, Just transition, selected)) <$> checked)
+  observed <- readIORef stats
+  charge (sessionWork session) $ \w -> w
+    { checkingAttempts = checkingAttempts w + Search.workUnits observed
+    , rejectedChecks = rejectedChecks w + Search.rejectedQueries observed }
+  pure (observed, outcome)
 
 check :: Session s -> Owner -> StateRef s -> TCState -> DraftAction -> Bool
       -> IO (Owner, Either Failure (Transition s))
@@ -266,7 +310,9 @@ check session owner parent initial draft@(DraftAction point expression) isReplay
       meta <- lookupInteractionId point
       target <- getMetaTypeInContext meta
       telescope <- getContextTelescope
-      scoped <- parseExprIn point noRange (draftSource expression)
+      scoped <- case expression of
+        TextDraft text -> parseExprIn point noRange (draftSource text)
+        NativeDraft scoped -> pure scoped
       -- Same transition as Agda's give, retaining its *returned* internal term
       -- rather than guessing how the meta's context permutation applies.
       checked <- give_ False WithoutForce point Nothing scoped

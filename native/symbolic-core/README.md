@@ -1,8 +1,9 @@
 # Haskell symbolic core
 
-This is the experimental native observation and checking boundary for the typed symbolic
-engine migration. It does **not** replace AgdaProver's current search engine.
-There is no search operation or default-engine switch yet.
+This is the experimental typed Haskell core. It supports resident checking and
+an autonomous evidence/application search fragment, including the bundled NNUE.
+It does **not** replace AgdaProver's current search engine. A default-engine
+switch requires the remaining construction, joint-search and qualification work.
 
 ## Build and inspect
 
@@ -25,7 +26,7 @@ The resulting executable accepts:
 ```text
 agdaprover-symbolic capabilities
 agdaprover-symbolic observe ABSOLUTE-FILE GOAL MODE [ABSOLUTE-INCLUDE ...]
-agdaprover-symbolic session ABSOLUTE-FILE [ABSOLUTE-INCLUDE ...]
+agdaprover-symbolic session ABSOLUTE-FILE [ABSOLUTE-INCLUDE ...] [-- CHECKING-OPTIONS ...]
 ```
 
 Use a prepared project copy and ordinary process supervision for observations.
@@ -42,8 +43,8 @@ never a verified proof and never edits goal bodies.
 
 `session` loads once and reads newline-delimited JSON requests. It supports
 observations, speculative `give`, retained branches, eviction/replay, cost
-snapshots, cancellation, and close. It does not choose candidates or solve goals
-autonomously. See [the session protocol](../../schemas/symbolic-session-v1.md)
+snapshots, cancellation, and close. `solve-evidence` additionally chooses typed
+applications and lambdas inside that resident checker. See [the session protocol](../../schemas/symbolic-session-v1.md)
 for fields, events, resource supervision, and failure semantics.
 
 All requests address a session/epoch/branch key. A successful check returns a
@@ -104,6 +105,34 @@ include ordering, weights, backend, fallbacks and elapsed work, but cannot grant
 proof credit. Only the application's independent fresh validation may do that.
 See [the ranking contract](../../schemas/symbolic-ranking-v1.md).
 
-Action generation, integration with autonomous search, and engine selection
-are subsequent migration tasks. Current production search and model bytes
-remain unchanged until those tasks are qualified.
+## Evidence search
+
+The first native fragment handles exact local/global evidence, lambda
+introduction, partial applications, hidden/instance inference, dependent
+arguments and function-valued record projections. All semantic terms retain
+Agda abstract/internal structure. NNUE presentation features do not decide
+typing or scope. A failed later argument can revisit earlier argument choices
+with the full checker state restored.
+
+Use `ProverApplication.prove_evidence(task, engine=NativeEvidenceEngine(path))`
+from `agdaprover.application.service` and `agdaprover.application.evidence` to
+exercise the explicit application path. `path` is the built executable, not a
+source directory. It uses the bundled OR model unless `task.ranker` is
+`symbolic`; `policy_model` and `native_scorer` select user-supplied inference
+assets. No model bytes or training policy change in this milestone.
+
+The application prepares an immutable project overlay, supervises its worker,
+reconstructs the candidate and freshly validates it with ordinary Agda before
+reporting `verified`. This slice accepts standalone projects and explicit
+source imports; `.agda-lib` manifest routing awaits H8 and is explicitly
+rejected here, never silently ignored. Existing production library support is
+unchanged. Construction, induction, joint solving and editor migration remain
+later milestones, not implied by `search_available`.
+
+`work_units` optionally limits native inference/checking queries. Its default
+`None` widens search depth under the caller's physical resource envelope and
+cancellation, without a fixed proof-depth or 20-second cutoff. The current
+implementation is a first functional slice, not a performance claim: repeated
+scope preparation and iterative deepening can be expensive. Broader agenda and
+reuse work follows in H7. Exhaustion and failure to find evidence are not
+impossibility certificates. Full benchmarks run at H10, not after every edit.

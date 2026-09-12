@@ -1,0 +1,248 @@
+{-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+-- SPDX-License-Identifier: GPL-3.0-or-later
+module AgdaProver.Agda28.EvidenceSearch (run, Result (..)) where
+
+import Control.Monad (forM)
+import Control.Monad.Except (catchError, runExceptT, throwError)
+import Control.Monad.IO.Class (liftIO)
+import Data.Aeson (Value)
+import Data.Foldable (toList)
+import Data.IORef
+import Data.List (nub)
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.Maybe (catMaybes)
+import Data.Set qualified as Set
+import Data.Text qualified as T
+
+import Agda.Syntax.Abstract qualified as A
+import Agda.Syntax.Abstract.Name (QName)
+import Agda.Syntax.Common
+import Agda.Syntax.Common.Pretty (prettyShow)
+import Agda.Syntax.Concrete.Name qualified as C
+import Agda.Syntax.Info (exprNoRange)
+import Agda.Syntax.Internal qualified as I
+import Agda.Syntax.Internal.MetaVars (noMetas)
+import Agda.Syntax.Position (noRange)
+import Agda.Syntax.Scope.Base
+import Agda.Syntax.Scope.Monad (tryResolveName)
+import Agda.TypeChecking.Monad
+import Agda.TypeChecking.Pretty (prettyTCM)
+import Agda.TypeChecking.Reduce (instantiateFull, reduce)
+import Agda.TypeChecking.Rules.Term (checkExpr, inferExpr, inferExpr')
+import Agda.TypeChecking.Substitute (absApp, apply, raise)
+import Agda.Utils.Impossible (impossible)
+
+import AgdaProver.Symbolic.Evidence
+import AgdaProver.Symbolic.NNUE.Features qualified as F
+import AgdaProver.Symbolic.NNUE.Native (NativeScorer)
+import AgdaProver.Symbolic.NNUE.Policy qualified as P
+
+-- This module is private to the versioned adapter. Drafts remain Agda abstract
+-- syntax; checked values/types remain Agda internal syntax under the live TCM.
+-- A continuation keeps dependent argument choices and all their constraints in
+-- the same branch. No inferred type containing fresh metas escapes rollback.
+data Result = Result SearchStatus (Maybe A.Expr) [(T.Text, T.Text)]
+data Runtime s = Runtime SearchLimits (IORef SearchStats) (IORef Bool)
+  P.Models P.RankingMode (Maybe (NativeScorer s)) (Value -> IO ()) T.Text
+data Seed = Seed A.Expr String String
+
+run :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode -> Maybe (NativeScorer s)
+    -> (Value -> IO ()) -> String -> [String] -> I.Type -> TCM Result
+run stats limits models mode native emit namespace excluded target = do
+  pruned <- liftIO $ newIORef False
+  let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace)
+  forbidden <- excludedGlobals excluded
+  globals <- visibleGlobals forbidden
+  let iterateDepth depth = do
+        liftIO $ writeIORef pruned False
+        modify runtime $ \s -> s { depthIterations = depthIterations s + 1, currentDepth = depth }
+        found <- search runtime globals depth target [] $ \expression term selected -> do
+          closed <- instantiateFull term
+          pure $ if noMetas closed then Just (expression, selected) else Nothing
+        observed <- liftIO $ readIORef stats
+        widened <- liftIO $ readIORef pruned
+        case found of
+          Just (term, selected) -> pure $ Result FoundCandidate (Just term) selected
+          Nothing | workExhausted observed -> pure $ Result WorkExhausted Nothing []
+          Nothing | not widened -> pure $ Result FragmentExhausted Nothing []
+          Nothing -> iterateDepth (depth + 1)
+  iterateDepth 0
+
+modify :: Runtime s -> (SearchStats -> SearchStats) -> TCM ()
+modify (Runtime _ ref _ _ _ _ _ _) f = liftIO $ atomicModifyIORef' ref $ \s -> (f s, ())
+stopped :: Runtime s -> TCM Bool
+stopped (Runtime _ ref _ _ _ _ _ _) = workExhausted <$> liftIO (readIORef ref)
+charge :: Runtime s -> (SearchStats -> SearchStats) -> TCM Bool
+charge (Runtime limits ref _ _ _ _ _ _) f = liftIO $ atomicModifyIORef' ref $ \s ->
+  if workExhausted s || maybe False (workUnits s >=) (workUnitLimit limits)
+    then (s { workExhausted = True }, False)
+    else (f s { workUnits = workUnits s + 1 }, True)
+deferDepth :: Runtime s -> TCM (Maybe a)
+deferDepth (Runtime _ _ ref _ _ _ _ _) = liftIO (writeIORef ref True) >> pure Nothing
+
+-- Only ordinary type rejection/postponement are search outcomes. Internal,
+-- parser or IO failures propagate to the session's precise failure boundary.
+attempt :: Runtime s -> TCM (Maybe a) -> TCM (Maybe a)
+attempt runtime action = do
+  initial <- getTC
+  result <- action `catchError` \err -> case err of
+    TypeError{} -> modify runtime (\s -> s { rejectedQueries = rejectedQueries s + 1 }) >> pure Nothing
+    PatternErr{} -> modify runtime (\s -> s { blockedQueries = blockedQueries s + 1 }) >> pure Nothing
+    _ -> throwError err
+  case result of
+    Nothing -> putTC initial >> pure Nothing
+    Just _ -> pure result
+
+choices :: Runtime s -> [TCM (Maybe a)] -> TCM (Maybe a)
+choices _ [] = pure Nothing
+choices runtime (action:rest) = do
+  done <- stopped runtime
+  if done then pure Nothing else attempt runtime action >>= \case
+    Just result -> pure $ Just result
+    Nothing -> choices runtime rest
+
+queryCheck :: Runtime s -> A.Expr -> I.Type -> (I.Term -> TCM (Maybe a)) -> TCM (Maybe a)
+queryCheck runtime expression target use = do
+  allowed <- charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }
+  if allowed then checkExpr expression target >>= use else pure Nothing
+
+queryInfer :: Runtime s -> A.Expr -> ((I.Term, I.Type) -> TCM (Maybe a)) -> TCM (Maybe a)
+queryInfer runtime expression use = do
+  allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+  if allowed then inferExpr' ExpandLast expression >>= use else pure Nothing
+
+-- Current recursive definitions are not evidence in this first slice. Agda
+-- supplies the exact mutual group; H5 introduces guarded structural recursion.
+-- User exclusions are resolved before any premise typing or ranking.
+excludedGlobals :: [String] -> TCM (Set.Set QName)
+excludedGlobals names = do
+  group <- asksTC envMutualBlock >>= maybe (pure Set.empty) (fmap mutualNames . lookupMutualBlock)
+  scope <- getScope
+  resolutions <- forM (Set.toAscList $ concreteNamesInScope scope) $ \alias ->
+    if prettyShow alias `elem` names then do
+      resolved <- runExceptT $ tryResolveName allKindsOfNames Nothing alias
+      pure $ either (const []) globalsOf resolved
+    else pure []
+  pure $ Set.union group $ Set.fromList $ concat resolutions
+ where
+  globalsOf (DefinedName _ name _) = [anameName name]
+  globalsOf (FieldName fields) = map anameName $ toList fields
+  globalsOf (ConstructorName _ constructors) = map anameName $ toList constructors
+  globalsOf _ = []
+
+visibleGlobals :: Set.Set QName -> TCM [A.Expr]
+visibleGlobals forbidden = do
+  scope <- getScope
+  resolved <- forM (Set.toAscList $ concreteNamesInScope scope) $ \alias ->
+    if not (all (\n -> not (C.isNoName n) && C.isInScope n == C.InScope) $ C.qnameParts alias)
+      then pure Nothing else do
+        meaning <- runExceptT $ tryResolveName allKindsOfNames Nothing alias
+        pure $ case meaning of
+          Right value@(DefinedName _ name _)
+            | not (Set.member (anameName name) forbidden) -> case A.nameToExpr value of
+                expression@A.Def'{} -> Just expression
+                _ -> Nothing
+          Right (FieldName fields) -> case filter (not . (`Set.member` forbidden) . anameName) (toList fields) of
+            [] -> Nothing
+            -- This is a prefix function head, not a postfix projection
+            -- elimination. Preserve that distinction through reconstruction.
+            name:names -> Just $ A.Proj ProjPrefix $ I.AmbQ (anameName name :| map anameName names)
+          Right value@VarName{} -> Just $ A.nameToExpr value
+          _ -> Nothing
+  pure $ nub $ catMaybes resolved
+
+-- No inferred Agda term/type is retained by describe. Its presentation is used
+-- solely by the unchanged NNUE feature vocabulary. Actual use re-elaborates in
+-- the appropriate branch with native operands and expected dependent types.
+describe :: Runtime s -> String -> A.Expr -> TCM Seed
+describe runtime origin expression = do
+  info <- localTCState $ attempt runtime $ do
+    allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+    if not allowed then pure Nothing else do
+      (_, ty) <- inferExpr expression
+      Just . prettyShow <$> prettyTCM ty
+  pure $ Seed expression origin (maybe "unknown" id info)
+
+rankSeeds :: Runtime s -> I.Type -> [A.Expr] -> TCM [(Seed, [(T.Text, T.Text)])]
+rankSeeds runtime@(Runtime _ ref _ models mode native emit namespace) target globals = do
+  locals <- map (A.Var . ctxEntryName) <$> getContext
+  seeds <- mapM (uncurry $ describe runtime) $
+    [("local", expression) | expression <- locals] ++ [("visible", expression) | expression <- globals, expression `notElem` locals]
+  targetText <- T.pack . prettyShow <$> prettyTCM target
+  stats <- liftIO $ readIORef ref
+  let ordinal = policyDecisions stats
+      decision = namespace <> ":evidence:" <> T.pack (show ordinal)
+      contextText = [T.pack typeText | Seed _ "local" typeText <- seeds]
+      goal = F.GoalView targetText contextText Nothing
+  candidates <- forM (zip [0 :: Int ..] seeds) $ \(index, seed@(Seed expression origin typeText)) -> do
+    display <- T.pack . prettyShow <$> prettyTCM expression
+    let view = F.CandidateView "evidence-application-v1" "native-evidence" (T.pack typeText) display 1 [("origin", T.pack origin)]
+    pure $ P.Candidate (T.pack $ show index) display 0 (Right $ F.candidateTokens goal view) seed
+  ranked <- liftIO $ P.rankBatch native models mode (P.ORFamily "evidence-application-v1") decision
+    (F.policyStateTokens goal F.unknownClassification) candidates
+  -- The router counts inference; this ledger also retains preparation work on
+  -- interrupted/rejected attempts through the surrounding session dispatch.
+  case ranked of
+    Left reason -> genericError $ "native-policy-batch:" ++ reason
+    Right batch -> do
+      modify runtime $ \s -> s { policyDecisions = ordinal + 1
+        , modelItems = modelItems s + fromIntegral (P.traceItemsScored $ P.decisionTrace batch)
+        , modelNanoseconds = modelNanoseconds s + P.traceModelNanoseconds (P.decisionTrace batch) }
+      liftIO $ emit $ P.traceView $ P.decisionTrace batch
+      pure [(P.candidateValue candidate, if length candidates > 1 then [(decision, P.candidateId candidate)] else [])
+            | candidate <- P.rankedCandidates batch]
+
+-- Continuations implement the AND part: if a later argument or final check
+-- fails, search revisits earlier argument choices with the original TCState.
+search :: Runtime s -> [A.Expr] -> Int -> I.Type -> [(T.Text,T.Text)]
+       -> (A.Expr -> I.Term -> [(T.Text,T.Text)] -> TCM (Maybe a)) -> TCM (Maybe a)
+search runtime globals depth target selected use = do
+  done <- stopped runtime
+  if done then pure Nothing else do
+    modify runtime $ \s -> s { searchNodes = searchNodes s + 1 }
+    seeds <- rankSeeds runtime target globals
+    choices runtime $
+      [queryCheck runtime expression target $ \term -> use expression term (selected ++ picked)
+       | (Seed expression _ _, picked) <- seeds]
+      ++ [introduce]
+      ++ [produce expression picked | (Seed expression _ _, picked) <- seeds]
+ where
+  introduce = reduce target >>= \case
+    I.El _ (I.Pi domain codomain)
+      | depth <= 0 -> deferDepth runtime
+      | otherwise -> do
+          modify runtime $ \s -> s { lambdaProposals = lambdaProposals s + 1 }
+          let hint = if I.absName codomain `elem` ["", "_"] then "x" else I.absName codomain
+          withFreshName noRange hint $ \name ->
+            addContext (name, domain) $ search runtime globals (depth-1)
+              (absApp (raise 1 codomain) $ I.Var 0 []) selected $ \body term picked ->
+                escapeContext impossible 1 $
+                  let info = getArgInfo domain
+                      expression = A.Lam exprNoRange (A.mkDomainFree $ Arg info $ unnamed $ A.mkBinder_ name) body
+                      value = I.Lam info $ I.Abs hint term
+                  in use expression value picked
+    _ -> pure Nothing
+  produce expression picked = queryInfer runtime expression $ \(term, ty) ->
+    applyMore expression term ty depth (selected ++ picked)
+  applyMore expression term ty remaining picked = reduce ty >>= \case
+    I.El _ (I.Pi domain codomain)
+      | remaining <= 0 -> deferDepth runtime
+      | otherwise -> search runtime globals (remaining-1) (I.unDom domain) picked $ \argument value selected' -> do
+          modify runtime $ \s -> s { applicationProposals = applicationProposals s + 1 }
+          let info = getArgInfo domain
+              applied = A.app expression [Arg info $ unnamed argument]
+              nativeTerm = apply term [Arg info value]
+              resultType = absApp codomain value
+          choices runtime
+            [queryCheck runtime applied target $ \checked -> use applied checked selected'
+            ,reduce resultType >>= \case
+               -- Hidden/instance arguments may occur between explicit ones.
+               -- Agda inserts their metas and infers them from later operands;
+               -- do not replace that operation with guessing universe values.
+               I.El _ (I.Pi nextDomain _) | notVisible nextDomain ->
+                 queryInfer runtime applied $ \(continued, continuedType) ->
+                   applyMore applied continued continuedType (remaining-1) selected'
+               _ -> applyMore applied nativeTerm resultType (remaining-1) selected']
+    _ -> pure Nothing

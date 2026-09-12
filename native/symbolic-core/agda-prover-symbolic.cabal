@@ -16,6 +16,7 @@ library
   exposed-modules:
     AgdaProver.Symbolic.Protocol,
     AgdaProver.Symbolic.SessionTypes,
+    AgdaProver.Symbolic.Evidence,
     AgdaProver.Symbolic.NNUE.Hash,
     AgdaProver.Symbolic.NNUE.Model,
     AgdaProver.Symbolic.NNUE.Sparse,
@@ -38,7 +39,7 @@ library agda28
   import: defaults
   hs-source-dirs: adapter
   exposed-modules: AgdaProver.Agda28.Observation, AgdaProver.Agda28.Session
-  other-modules: Structure, Decode, Atoms, StructureAnnotations
+  other-modules: Structure, Decode, Atoms, StructureAnnotations, AgdaProver.Agda28.EvidenceSearch
   build-depends:
     agda-prover-symbolic,
     Agda ==2.8.0,

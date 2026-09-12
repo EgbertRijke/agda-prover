@@ -23,9 +23,14 @@ import Agda.Syntax.Common (InteractionId)
 import AgdaProver.Agda28.Session qualified as S
 import AgdaProver.Symbolic.Protocol qualified as P
 import AgdaProver.Symbolic.SessionTypes hiding (Pending)
+import AgdaProver.Symbolic.Evidence qualified as Search
+import AgdaProver.Symbolic.NNUE.Model qualified as Model
+import AgdaProver.Symbolic.NNUE.Policy qualified as Policy
+import AgdaProver.Symbolic.NNUE.Native (withNativeScorer)
 
 data Operation = Pending StateKey | Observe StateKey InteractionId P.ObservationMode
   | Give StateKey InteractionId DraftExpression | Evict StateKey | Replay StateKey
+  | SolveEvidence StateKey InteractionId Search.SearchLimits Policy.RankingMode (Maybe FilePath) (Maybe FilePath) [String]
   | Cost | Cancel | Close
 data Request = Request Integer Operation
 data Active = Active Integer ThreadId (MVar ())
@@ -62,6 +67,14 @@ parseRequest = withObject "session request" $ \o -> do
     "give" -> do
       fields ["state", "goal_id", "expression"]
       Give <$> o .: "state" <*> goal <*> (DraftExpression <$> o .: "expression")
+    "solve-evidence" -> do
+      fields ["state", "goal_id", "limits", "ranker", "model_path", "native_path", "exclude_names"]
+      mode <- o .: "ranker" >>= \case
+        ("nnue" :: String) -> pure Policy.Learned
+        "symbolic" -> pure Policy.Symbolic
+        _ -> fail "unknown ranker"
+      SolveEvidence <$> o .: "state" <*> goal <*> o .: "limits" <*> pure mode
+        <*> o .: "model_path" <*> o .: "native_path" <*> o .: "exclude_names"
     "evict" -> fields ["state"] >> Evict <$> o .: "state"
     "replay" -> fields ["state"] >> Replay <$> o .: "state"
     "cost" -> fields [] >> pure Cost
@@ -116,7 +129,9 @@ serve output session root = do
                 _ -> currentWorker
           thread <- forkIOWithUnmask $ \unmask ->
             E.finally (do
-              outcome <- (takeMVar gate >> unmask (perform session operation)) `E.catches`
+              let emitSearch trace = emit $ event "search-policy"
+                    ["request_id" .= number, "trace" .= trace]
+              outcome <- (takeMVar gate >> unmask (perform session emitSearch operation)) `E.catches`
                 [ E.Handler $ \(err :: E.AsyncException) -> case err of
                     E.ThreadKilled -> pure (failureView Cancelled)
                     _ -> E.throwIO err
@@ -163,8 +178,8 @@ serve output session root = do
   cost <- S.work session
   emit $ event "session-end" ["cost" .= cost]
 
-perform :: S.Session s -> Operation -> IO Value
-perform session operation = case operation of
+perform :: S.Session s -> (Value -> IO ()) -> Operation -> IO Value
+perform session emit operation = case operation of
   Pending key -> resolved key $ \ref -> result toJSON <$> S.pending session ref
   Observe key goal mode -> resolvedGoal key goal $ \ref -> result id <$> S.inspect session ref mode
   Give key goal expression -> resolvedGoal key goal $ \ref -> do
@@ -174,6 +189,24 @@ perform session operation = case operation of
       Right checked -> case S.evidenceView (S.transitionEvidence checked) of
         Left reason -> S.close session >> pure (failureView $ KernelFailure reason)
         Right evidence -> pure $ transition checked evidence
+  SolveEvidence key goal limits mode modelPath nativePath excluded -> resolvedGoal key goal $ \ref -> do
+    loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
+    case loaded >>= Policy.models of
+      Left reason -> pure $ failureView $ KernelFailure ("model-configuration:" ++ reason)
+      Right models -> withNativeScorer nativePath $ \native -> do
+        (stats, answer) <- S.solveEvidence session ref limits models mode native excluded emit
+        case answer of
+          Left failure -> pure $ object ["search_cost" .= stats, "failure" .= failureView failure]
+          Right (status, candidate, selected) -> do
+            value <- case candidate of
+              Nothing -> pure Null
+              Just checked -> case S.evidenceView (S.transitionEvidence checked) of
+                Left reason -> S.close session >> pure (failureView $ KernelFailure reason)
+                Right evidence -> pure $ transition checked evidence
+            pure $ object ["status" .= Search.statusName status, "search_cost" .= stats,
+              "candidate" .= value, "selected_choices" .= selected,
+              "model_id" .= either (const Nothing) (fmap Model.modelId . safeHead) loaded,
+              "proof_authority" .= False]
   Evict key -> resolved key $ \ref -> result (const $ object ["status" .= ("evicted" :: String)]) <$> S.evict session ref
   Replay key -> resolved key $ \ref -> result (\state -> object ["state" .= S.stateKey state]) <$> S.replay session ref
   _ -> pure $ failureView (KernelFailure "control-dispatched-as-work")
@@ -181,6 +214,8 @@ perform session operation = case operation of
   resolved key action = either (pure . failureView) action (S.restoreReference session key)
   resolvedGoal key goal action = either (pure . failureView) action (S.restoreGoalReference session key goal)
   result encodeResult = either failureView encodeResult
+  safeHead [] = Nothing
+  safeHead (x:_) = Just x
   transition t evidence = object
       ["status" .= kindName (S.transitionKind t), "state" .= S.stateKey (S.transitionState t),
        "pending" .= S.transitionPending t, "evidence" .= evidence, "proof_authority" .= False]

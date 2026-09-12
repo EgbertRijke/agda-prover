@@ -1,8 +1,8 @@
 # Resident symbolic session v1
 
-H2 implementation scope: single-owner checking, retained branches, explicit
-eviction/replay, source invalidation, and cumulative work. No search policy,
-NNUE changes, patch application, or proof verification is introduced here.
+H2 provides single-owner checking, retained branches, explicit eviction/replay,
+source invalidation, and cumulative work. H4 adds the coarse `solve-evidence`
+operation below. Neither grants proof verification authority or edits user files.
 
 ## Invariants
 
@@ -50,6 +50,7 @@ Each operation permits only its listed additional fields:
 | `pending` | `state` | Open goal IDs, open metas, constraints |
 | `observe` | `state`, `goal_id`, `mode` | Structured observation v1 |
 | `give` | `state`, `goal_id`, `expression` | Child state, native evidence view, obligations |
+| `solve-evidence` | `state`, `goal_id`, `limits`, `ranker`, `model_path`, `native_path`, `exclude_names` | Search status, provisional child/evidence, cumulative search cost, selected policy choices |
 | `evict` | `state` | Drop child snapshot; preserve replay ancestry |
 | `replay` | `state` | Rechecked state key (resident states are returned unchanged) |
 | `cost` | none | Current cumulative native-operation counters |
@@ -102,6 +103,41 @@ Checks compare witnesses before and after an operation. Drift clears the branch
 table and advances the epoch, even if the old bytes are subsequently restored.
 Reloading requires a new session; no unchecked key can resurrect an old branch.
 The source tree's declaration bodies are never rewritten by this interface.
+
+## Evidence operation
+
+`limits` is exactly `{"work_units": positive-integer-or-null}`. It bounds
+inference/checking queries, not proof size or depth. Null leaves the run under
+external CPU/memory/I/O and cancellation supervision; depth widens. `ranker` is
+`nnue` or `symbolic`. `model_path` is an OR-decision APNNUE artifact path or null;
+`native_path` optionally selects the existing ABI3 scoring library. Null model
+uses symbolic order and is reported as unavailable, not as learned inference.
+The application normally supplies the pinned bundled OR artifact. The response
+includes its loaded hash, checked against the application's pinned model.
+
+`exclude_names` lists visible global aliases to exclude after Agda resolution.
+The current mutual group is excluded automatically: recursion is outside H4.
+Locals, scoped globals and projected functions are ranked as complete candidate
+sets. `search-policy` events bind each ranking trace to the active request;
+NNUE decisions never prune candidates or authorize proofs.
+
+Search returns `candidate`, `unsolved`, or `resource-exhausted`. Candidate has
+the ordinary provisional transition under `candidate`; the two failures have
+null candidate. Rejected/cancelled checker operations return `failure` and
+`search_cost`. Search costs are outside rollback and survive cancellation.
+`selected_choices` are decision/candidate pairs on the chosen path, not proof
+credit. Only fresh validation of the reconstructed result can grant credit;
+native traces remain a distinct versioned format, not legacy training examples.
+
+Successful native drafts preserve their Agda abstract syntax and internal
+checked evidence. A winner is checked again from the untouched parent before
+publishing its child. Prefix projections remain prefix heads; display reification
+is not used as a substitute for source expression structure. Native drafts also
+retain structured replay ancestry. No per-candidate callback to Python occurs.
+
+The process accepts checking pragmas after `--`, parsed by Agda's own option
+parser. The application passes its resolved command options explicitly. Library
+manifest routing and full editor workflow parity await H8.
 
 ## Targeted acceptance
 
