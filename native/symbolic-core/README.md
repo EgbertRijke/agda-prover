@@ -172,6 +172,10 @@ unknown results keep the operation. User clause commands are unchanged.
 Scheduling slices keep the queue and alternatives after provisional solutions.
 Coarse evidence search runs in soft, increasing work slices and yields to other
 branches; retries are charged, not treated as free continuation inside Agda.
+By default, an exhausted retry's queue priority includes its measured work,
+so doubling allowances cannot monopolize search ahead of cheap alternatives.
+`retry_work_ordering=false` retains the uniform-cost ablation. No continuation
+is removed and the physical resource counters are unchanged.
 Increasing a run's work allowance does not reset accumulated work. Typed
 catalogue censorship pauses the run rather than discarding unexplored moves.
 The Haskell API exposes generic agenda events and cost snapshots. Autonomous

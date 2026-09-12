@@ -22,7 +22,9 @@ rankedProposals :: Natural -> [action] -> [Proposal action]
 rankedProposals delay = zipWith (flip Proposal) [delay..]
 data Inspection action result = Open [Proposal action] | Candidate result | Stuck
   deriving (Eq, Show)
-data Transition state continuation = Advanced state | Deferred continuation | Declined
+-- A deferred operation can report additional spent scheduling work. It is not
+-- a second budget charge: the owner's physical ledger remains authoritative.
+data Transition state continuation = Advanced state | Deferred Natural continuation | Declined
   deriving (Eq, Show)
 data Event = Expanded Int | Attempted | Resumed | AdvancedState | Yielded
   | Rejected | CyclePruned | Proposed | Stalled | DepthDeferred
@@ -124,8 +126,8 @@ stepWithDepth requested hooks input = case Map.minViewWithKey queue of
           event = observe hooks
           transition parent ancestors result = case result of
             Declined -> event Rejected >> pure (Progress remaining)
-            Deferred continuation -> event Yielded >> pure
-              (Progress $ insert (spent+1) (Resume parent continuation ancestors) remaining)
+            Deferred extra continuation -> event Yielded >> pure
+              (Progress $ insert (spent+1+extra) (Resume parent continuation ancestors) remaining)
             Advanced next -> do
               cyclic <- anyM (sameState hooks next) (parent:ancestors)
               if cyclic then event CyclePruned >> pure (Progress remaining)

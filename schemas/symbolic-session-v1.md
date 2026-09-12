@@ -420,10 +420,11 @@ evidence search. `ranker` is `nnue` or `symbolic`; model/native paths are explic
 nullable paths. Models are loaded once for this run. `focused_search` is boolean
 and `exclude_names` is the existing list of forbidden premise names. The optional
 `scheduling` object has the first four required fields below and optional
-`dependency_ordering` and `progress_ordering` booleans (defaults shown):
+`dependency_ordering`, `progress_ordering` and `retry_work_ordering` booleans
+(defaults shown):
 
 ```json
-{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true}
+{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true}
 ```
 
 Delays are nonnegative scheduling priorities, not proof-depth restrictions.
@@ -442,6 +443,14 @@ search uses zero remaining-work estimate and keeps its previous ordering.
 The cost receipt records `ordering: cost-plus-obligations-v2`; disabling the
 switch records `cost-only-v1`. This is an internal native scheduling option,
 not a change to Python defaults or the public task's resource envelope.
+
+`retry_work_ordering` adds the exhausted macro attempt's measured work units to
+its continuation priority. Its next allowance still grows, but an exponential
+increase in work cannot buy repeated near-zero-cost queue turns. Every
+continuation retains finite priority and remains available. This is scheduling
+weight only: the physical ledger is neither charged twice nor reset. The cost
+receipt reports `retry_ordering: spent-work-v1`, or `uniform-v1` for the explicit
+false ablation. One-step search has no macro retries and is unaffected.
 
 Success returns `status: ready`, `run`, `cost`, `proof_authority: false`.
 A run key has exactly `{session, epoch, run, revision}`; all counters are

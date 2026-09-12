@@ -39,6 +39,7 @@ data Config s n = Config
   , chargeStep :: IO Bool, chargeMove :: IO Bool, observe :: A.Event -> IO ()
   , policyTrace :: Value -> IO ()
   , searchCost :: E.SearchStats -> IO ()
+  , retryPenalty :: E.SearchStats -> Natural
   , accepted :: S.Transition s -> IO () }
 
 -- Selection is caller authority, not an independence claim. Unselected goals
@@ -168,7 +169,7 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
     case result of
       Left failure -> declined failure
       Right (E.WorkExhausted, _, _) -> case continuation of
-        Just again -> pure $ A.Deferred again
+        Just again -> pure $ A.Deferred (retryPenalty config cost) again
         Nothing -> throwError $ MoveAllowanceExhausted cost
       Right (E.FragmentExhausted, Nothing, _) -> pure A.Declined
       Right (E.FoundCandidate, Just next, _) -> transition current $ Right next

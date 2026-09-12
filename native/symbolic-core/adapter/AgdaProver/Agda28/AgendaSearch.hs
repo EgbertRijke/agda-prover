@@ -29,7 +29,8 @@ data Settings = Settings
   -- Soft priorities, not cutoffs: structural and macro alternatives stay queued.
   , structuralDelay :: Natural, macroDelay :: Natural
   , initialMacroWork :: Natural, evidenceMacro :: Bool, actionLimit :: Maybe Integer
-  , dependencyOrdering :: Bool, depthLimit :: Maybe Natural, progressOrdering :: Bool }
+  , dependencyOrdering :: Bool, depthLimit :: Maybe Natural, progressOrdering :: Bool
+  , retryWorkOrdering :: Bool }
 
 data Metrics = Metrics
   { schedulerSteps :: !Integer, modelItems :: !Integer, modelNanoseconds :: !Integer
@@ -113,6 +114,7 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "depth_limit" .= depthLimit settings, "depth_deferred" .= depthDeferred measured,
     "depth_unit" .= ("accepted-native-branch-transition" :: String),
     "ordering" .= (if progressOrdering settings then "cost-plus-obligations-v2" else "cost-only-v1" :: String),
+    "retry_ordering" .= (if retryWorkOrdering settings then "spent-work-v1" else "uniform-v1" :: String),
     "model_items_scored" .= modelItems measured, "model_elapsed_ns" .= modelNanoseconds measured,
     "models" .= P.modelIdentities (models settings), "session_cost" .= physical]
 
@@ -208,7 +210,9 @@ advance native count run@(Run session settings initial baseline metrics owner tr
           (focused settings) (excluded settings) planner
           (allowance >>= \left -> if left == Just 0 then pure False else
             modifyIORef' metrics (\m -> m { schedulerSteps = schedulerSteps m + 1 }) >> pure True)
-          chargeAction recordEvent trace recordSearch accepted
+          chargeAction recordEvent trace recordSearch
+          (\stats -> if retryWorkOrdering settings then fromInteger $ max 0 $ E.workUnits stats else 0)
+          accepted
     N.stepWithDepth (depthLimit settings) session config queue >>= \case
       N.Progress next -> go refutation (remaining-1) next
       N.Candidate state next -> pure $ Candidate state $ saved refutation next
