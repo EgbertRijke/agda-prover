@@ -11,7 +11,7 @@ module AgdaProver.Agda28.Session
   , withSession, stateKey, restoreReference, restoreGoalReference, goalState, goalId
   , inspect, pending, tryExpression
   , solveEvidence
-  , ClauseProposal, makeClauses, clauseView
+  , ClauseProposal, makeClauses, clauseView, applyClause
   , transitionState, transitionKind, transitionPending, transitionEvidence
   , evict, replay, close, cancel, work, evidenceView
   ) where
@@ -39,7 +39,7 @@ import System.Random (randomIO)
 import Agda.Interaction.BasicOps (parseExprIn, give_)
 import Agda.Interaction.Base (UseForce (WithoutForce))
 import Agda.Syntax.Abstract qualified as A
-import Agda.Syntax.Common (InteractionId, interactionId)
+import Agda.Syntax.Common (InteractionId, interactionId, NameId)
 import Agda.Syntax.Common.Pretty (prettyShow)
 import Agda.Syntax.Internal qualified as I
 import Agda.Syntax.Position (noRange)
@@ -49,9 +49,11 @@ import Agda.TypeChecking.Pretty (prettyTCM)
 import Agda.TypeChecking.Reduce (instantiateFull)
 import Agda.Utils.FileName (filePath)
 import Agda.Utils.IO.UTF8 qualified as UTF8
+import Agda.Utils.Lens ((^.))
 import AgdaProver.Agda28.Observation (observeGoal, encodeGoal, openInteractionPoints)
 import AgdaProver.Agda28.EvidenceSearch qualified as Search
 import AgdaProver.Agda28.Clauses qualified as Clauses
+import AgdaProver.Agda28.ClauseExecution qualified as ClauseExecution
 import AgdaProver.Symbolic.Clause (ClauseAction)
 import AgdaProver.Symbolic.Evidence qualified as Search
 import AgdaProver.Symbolic.NNUE.Native (NativeScorer)
@@ -90,7 +92,8 @@ data ClauseProposal s = ClauseProposal (GoalRef s) Clauses.ClauseSnapshot TCStat
 -- Preserve checked-source abstract syntax as well as internal evidence. Agda's
 -- display reifier may use postfix projections: display syntax is not a draft
 -- to send straight back to checkExpr without scope elaboration.
-data Draft = TextDraft DraftExpression | NativeDraft A.Expr
+data Allocation = Allocation NameId InteractionId
+data Draft = TextDraft DraftExpression | NativeDraft A.Expr Allocation
 data DraftAction = DraftAction InteractionId Draft
 data Branch = Branch { branchState :: Maybe TCState, branchTrail :: Maybe (Integer, DraftAction) }
 data Owner = Owner
@@ -291,6 +294,33 @@ clauseView (ClauseProposal goal snapshot _) = object
   ["parent" .= stateKey (goalState goal), "goal_id" .= interactionId (goalId goal)
   ,"proposal" .= Clauses.view snapshot, "proof_authority" .= False]
 
+applyClause :: Session s -> GoalRef s -> ClauseAction -> IO (Either Failure (Transition s))
+applyClause session goal action = request session (goalState goal) $ \owner state -> do
+  let chargeStep step = liftIO $ charge (sessionWork session) $ \w -> w
+        { checkingAttempts = checkingAttempts w + 1
+        , clauseQueries = clauseQueries w + case step of
+            ClauseExecution.GenerateClauses -> 1
+            _ -> 0 }
+  (prepared, allocation) <- kernel session state $ do
+    exists <- elem (goalId goal) <$> openInteractionPoints
+    if not exists then pure $ Left UnknownGoal
+      else Right <$> ClauseExecution.prepare chargeStep (goalId goal) action
+  case prepared >>= id of
+    Left failure -> do
+      charge (sessionWork session) $ \w -> w { rejectedChecks = rejectedChecks w + 1 }
+      pure (owner, Left failure)
+    Right expression -> check session owner (goalState goal) allocation
+      (DraftAction (goalId goal) $ nativeDraft expression allocation) False
+
+nativeDraft :: A.Expr -> TCState -> Draft
+nativeDraft expression state = NativeDraft expression $
+  Allocation (state ^. stFreshNameId) (state ^. stFreshInteractionId)
+
+reserveAllocation :: Allocation -> TCM ()
+reserveAllocation (Allocation name point) = do
+  stFreshNameId `modifyTCLens` max name
+  stFreshInteractionId `modifyTCLens` max point
+
 -- One coarse request owns all speculative choices. Costs live outside TCM and
 -- survive cancellation. A winning native term is rechecked from the ORIGINAL
 -- parent: no speculative constraints or warnings are silently published.
@@ -305,7 +335,7 @@ solveEvidence session goal limits models mode native excluded emit = do
     ledger <- work session
     let point = goalId goal
         namespace = show (stateKey $ goalState goal) ++ ":" ++ show (requests ledger)
-    (searched, _) <- kernel session state $ do
+    (searched, allocation) <- kernel session state $ do
       exists <- elem point <$> openInteractionPoints
       if not exists then pure $ Left UnknownGoal else withInteractionId point $ do
         meta <- lookupInteractionId point
@@ -316,7 +346,7 @@ solveEvidence session goal limits models mode native excluded emit = do
       Right (Search.Result status Nothing selected) -> pure (owner, Right (status, Nothing, selected))
       Right (Search.Result status (Just term) selected) -> do
         (next, checked) <- check session owner (goalState goal) state
-          (DraftAction point $ NativeDraft term) False
+          (DraftAction point $ nativeDraft term allocation) False
         pure (next, (\transition -> (status, Just transition, selected)) <$> checked)
   observed <- readIORef stats
   charge (sessionWork session) $ \w -> w
@@ -339,7 +369,7 @@ check session owner parent initial draft@(DraftAction point expression) isReplay
       telescope <- getContextTelescope
       scoped <- case expression of
         TextDraft text -> parseExprIn point noRange (draftSource text)
-        NativeDraft scoped -> pure scoped
+        NativeDraft scoped allocation -> reserveAllocation allocation >> ClauseExecution.registerDraft scoped
       -- Same transition as Agda's give, retaining its *returned* internal term
       -- rather than guessing how the meta's context permutation applies.
       checked <- give_ False WithoutForce point Nothing scoped

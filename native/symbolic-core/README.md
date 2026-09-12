@@ -4,7 +4,7 @@ This is the experimental typed Haskell core. It supports resident checking and
 autonomous evidence/application and structural-construction fragments, including
 the bundled NNUE.
 It does **not** replace AgdaProver's current search engine. A default-engine
-switch requires the remaining clause, recursion, joint-search and qualification work.
+switch requires autonomous clause search, recursion, joint-search and qualification work.
 
 ## Build and inspect
 
@@ -43,7 +43,8 @@ never a verified proof and never edits goal bodies.
 ## Resident checking
 
 `session` loads once and reads newline-delimited JSON requests. It supports
-observations, speculative `give`, native `make-clause` proposals, retained branches,
+observations, speculative `give`, native `make-clause` proposals and checked
+`apply-clause` transitions, retained branches,
 eviction/replay, cost snapshots, cancellation, and close. `solve-evidence` additionally chooses typed
 applications and lambdas inside that resident checker. See [the session protocol](../../schemas/symbolic-session-v1.md)
 for fields, events, resource supervision, and failure semantics.
@@ -65,6 +66,15 @@ result splitting and ellipsis expansion to Agda. It retains native clauses and
 generation state internally, rendering with Agda's own interaction printer.
 Generation is not acceptance: no source is edited, no child is issued, and no
 proof is claimed. Autonomous use of these proposals is still migration work.
+
+`apply-clause` executes an admissible action through a checked local dependent
+helper. Agda generates the helper's native clauses and checks the final draft;
+new goals retain their dependent types and can be split or filled in subsequent
+branches. The original global definitions and parent remain intact. Rejections,
+cancellation and replay preserve the same transaction/cost rules as `give`.
+This is not yet autonomous clause search or full source export: displayed
+evidence can require exposing hidden parent binders before insertion. Full
+proof-plan reconstruction and fresh workflow qualification remain required.
 
 ## Boundaries
 

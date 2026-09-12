@@ -2,8 +2,8 @@
 
 H2 provides single-owner checking, retained branches, explicit eviction/replay,
 source invalidation, and cumulative work. H4 adds the coarse `solve-evidence`
-operation; H5.2 adds Agda-native clause proposals. None grants proof verification
-authority or edits user files.
+operation; H5.2 adds Agda-native clause proposals and checked clause transitions.
+None grants proof verification authority or edits user files.
 
 ## Invariants
 
@@ -52,6 +52,7 @@ Each operation permits only its listed additional fields:
 | `observe` | `state`, `goal_id`, `mode` | Structured observation v1 |
 | `give` | `state`, `goal_id`, `expression` | Child state, native evidence view, obligations |
 | `make-clause` | `state`, `goal_id`, `action` | Parent-bound native clause proposal, not a child state |
+| `apply-clause` | `state`, `goal_id`, `action` | Checked native helper/clause child, evidence view and dependent obligations |
 | `solve-evidence` | `state`, `goal_id`, `limits`, `ranker`, `model_path`, `native_path`, `exclude_names` | Search status, provisional child/evidence, cumulative search cost, selected policy choices |
 | `evict` | `state` | Drop child snapshot; preserve replay ancestry |
 | `replay` | `state` | Rechecked state key (resident states are returned unchanged) |
@@ -121,8 +122,8 @@ results into copatterns, and expand ellipses. Its options, without-K restriction
 scope, and preceding/following clauses remain authoritative. Named splitting
 does not make module-, let-, or lambda-bound variables into clause parameters.
 
-Success returns `parent`, `goal_id`, and `proposal`; it does **not** issue a child
-key. The proposal schema is `agdaprover.symbolic-clauses.v1`, with
+`make-clause` success returns `parent`, `goal_id`, and `proposal`; it does **not**
+issue a child key. The proposal schema is `agdaprover.symbolic-clauses.v1`, with
 `status: "proposed"`, echoed `action`, `variant` (`Function` or `ExtendedLambda`), a
 structured `function` identity with a presentation `display`, `clause_count`,
 and Agda-rendered `clauses`. `source_range` and `goal_range` are zero-based,
@@ -132,16 +133,51 @@ point. They are observational ranges, not authorization to replace source.
 
 Internally the opaque, parent-branded proposal retains Agda abstract clauses,
 case context, and the generation checking state. Rendering is only a view;
-future clause execution must use the native structure with a validated parent,
-not reconstitute semantics from that display. A wire response does not persist
+clause execution uses native structure with a validated parent and never
+reconstitutes semantics from that display. A wire response does not persist
 an executable proposal handle. Generation leaves the parent unchanged, including
 on failure/cancellation, and charges `checking_attempts` and `clause_queries`.
 It does not charge `accepted_checks` or count the generated holes as accepted
 subgoals. Replay an evicted parent first and regenerate against its new key.
 
-This operation is the clause primitive, not autonomous clause search. Executing
-generated clauses, integrating them into search, reconstructing authorized
-patches, and freshly validating them remain separate responsibilities.
+### Checked clause execution
+
+`apply-clause` accepts the same action schema and returns the ordinary checked
+transition (`status`, new `state`, `pending`, native `evidence`, and false
+`proof_authority`). The named goal must still be open in the requested branch.
+It does not consume or parse the displayed `make-clause` response.
+
+Execution first asks Agda whether the original action is admissible. It then
+abstracts the goal's dependent context into a native local helper, using Agda's
+telescope/type reification, and resolves the selected subjects by native name
+identity. Agda generates the corresponding helper clauses. This preserves the
+parent's global definitions rather than mutating an already checked declaration
+or its compiled clauses. The final native helper is checked through non-forced
+`give` from the unsplit parent. Nested splits can operate on its new goals.
+Dependent field/branch obligations live in Agda's shared child state; they are
+not independent text placeholders.
+
+Hidden-binder exposure is not mistaken for elimination. Pattern hiding and
+modality are retained, and module-, let-, lambda-bound or without-K-forbidden
+subjects remain subject to the original `makeCase` rejection. Helper clauses may
+cover more cases than an original clause filtered by surrounding clauses; they
+must themselves pass Agda's coverage/checking. No original source is rewritten.
+
+Speculative helper assignments/definitions/constraints are rolled back before
+the final check. Native drafts reserve their retained name and interaction ID
+allocation ranges during checking and replay. Generated holes receive distinct
+IDs and scopes; references to absent speculative metas are rejected. Only an
+accepted transition publishes a child. Each entered clause generation, context
+recheck and scaffold check charges the cumulative checking ledger; the two
+generations also charge `clause_queries`. Replay rechecks the retained draft,
+without regenerating clauses or resetting work.
+
+These are session primitives, not autonomous clause search or authorized source
+patches. Full proof-plan reconstruction belongs to H8: in particular, display
+text can mention a hidden parent binder that must first be exposed in source.
+Do not paste it blindly or interpret a closed native branch as `verified`.
+Independent fresh checking remains mandatory. Clause selection/recursion and
+full workflow integration are separate migration tasks.
 
 ## Evidence operation
 

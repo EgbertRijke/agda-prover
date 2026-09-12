@@ -33,6 +33,7 @@ data Operation = Pending StateKey | Observe StateKey InteractionId P.Observation
   | Give StateKey InteractionId DraftExpression | Evict StateKey | Replay StateKey
   | SolveEvidence StateKey InteractionId Search.SearchLimits Policy.RankingMode (Maybe FilePath) (Maybe FilePath) [String]
   | MakeClause StateKey InteractionId ClauseAction
+  | ApplyClause StateKey InteractionId ClauseAction
   | Cost | Cancel | Close
 data Request = Request Integer Operation
 data Active = Active Integer ThreadId (MVar ())
@@ -72,6 +73,9 @@ parseRequest = withObject "session request" $ \o -> do
     "make-clause" -> do
       fields ["state", "goal_id", "action"]
       MakeClause <$> o .: "state" <*> goal <*> o .: "action"
+    "apply-clause" -> do
+      fields ["state", "goal_id", "action"]
+      ApplyClause <$> o .: "state" <*> goal <*> o .: "action"
     "solve-evidence" -> do
       fields ["state", "goal_id", "limits", "ranker", "model_path", "native_path", "exclude_names"]
       mode <- o .: "ranker" >>= \case
@@ -189,13 +193,12 @@ perform session emit operation = case operation of
   Observe key goal mode -> resolvedGoal key goal $ \ref -> result id <$> S.inspect session ref mode
   MakeClause key goal action -> resolvedGoal key goal $ \ref ->
     result S.clauseView <$> S.makeClauses session ref action
+  ApplyClause key goal action -> resolvedGoal key goal $ \ref -> do
+    answer <- S.applyClause session ref action
+    checkedResult answer
   Give key goal expression -> resolvedGoal key goal $ \ref -> do
     answer <- S.tryExpression session ref expression
-    case answer of
-      Left failure -> pure $ failureView failure
-      Right checked -> case S.evidenceView (S.transitionEvidence checked) of
-        Left reason -> S.close session >> pure (failureView $ KernelFailure reason)
-        Right evidence -> pure $ transition checked evidence
+    checkedResult answer
   SolveEvidence key goal limits mode modelPath nativePath excluded -> resolvedGoal key goal $ \ref -> do
     loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
     case loaded >>= Policy.models of
@@ -223,6 +226,10 @@ perform session emit operation = case operation of
   result encodeResult = either failureView encodeResult
   safeHead [] = Nothing
   safeHead (x:_) = Just x
+  checkedResult = either (pure . failureView) $ \checked ->
+    case S.evidenceView (S.transitionEvidence checked) of
+      Left reason -> S.close session >> pure (failureView $ KernelFailure reason)
+      Right evidence -> pure $ transition checked evidence
   transition t evidence = object
       ["status" .= kindName (S.transitionKind t), "state" .= S.stateKey (S.transitionState t),
        "pending" .= S.transitionPending t, "evidence" .= evidence, "proof_authority" .= False]
