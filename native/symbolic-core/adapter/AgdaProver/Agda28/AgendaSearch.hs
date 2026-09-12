@@ -30,7 +30,7 @@ data Settings = Settings
   , structuralDelay :: Natural, macroDelay :: Natural
   , initialMacroWork :: Natural, evidenceMacro :: Bool, actionLimit :: Maybe Integer
   , dependencyOrdering :: Bool, depthLimit :: Maybe Natural, progressOrdering :: Bool
-  , retryWorkOrdering :: Bool, jointConstructorPropagation :: Bool }
+  , retryWorkOrdering :: Bool, jointConstructorPropagation :: Bool, multiSubjectClauses :: Bool }
 
 data Metrics = Metrics
   { schedulerSteps :: !Integer, modelItems :: !Integer, modelNanoseconds :: !Integer
@@ -116,6 +116,7 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "ordering" .= (if progressOrdering settings then "cost-plus-obligations-v2" else "cost-only-v1" :: String),
     "retry_ordering" .= (if retryWorkOrdering settings then "spent-work-v1" else "uniform-v1" :: String),
     "joint_constructor_propagation" .= jointConstructorPropagation settings,
+    "multi_subject_clauses" .= multiSubjectClauses settings,
     "model_items_scored" .= modelItems measured, "model_elapsed_ns" .= modelNanoseconds measured,
     "models" .= P.modelIdentities (models settings), "session_cost" .= physical]
 
@@ -218,7 +219,8 @@ advance native count run@(Run session settings initial baseline metrics owner tr
                     Right (S.CompleteTerms closures) -> Right $ N.Moves $
                       A.rankedProposals 0 (map N.Term $ closures ++ termMoves)
                       ++ A.rankedProposals (structuralDelay settings)
-                            [N.PlannedClause action | (action, _) <- clauseMoves]
+                            [N.PlannedClause action | (action, _) <- clauseMoves,
+                              multiSubjectClauses settings || not (S.clauseMoveIsBatch action)]
                       ++ [A.Proposal (N.SlicedEvidence goal $ initialMacroWork settings)
                             (macroDelay settings) | evidenceMacro settings]
   constructorGoals _ [] = pure $ Right $ S.CompleteTerms []

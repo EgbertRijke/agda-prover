@@ -347,6 +347,13 @@ reintroduced as explicit, fresh interaction holes through Agda's elaboration
 view. They never carry anonymous meta identities into source reconstruction;
 checking the proposal in its original branch preserves coupled constraints.
 
+Autonomous case search also offers one compound move for local variables with
+one-constructor inductive types, in the ranked subject order. Agda owns all
+dependent substitutions and admissibility checks. Individual eliminations remain
+available; multi-constructor variables are not combined into an exponential
+case tree. `multi_subject_clauses=false` retains single-subject scheduling for
+comparison without changing the user's resource envelope.
+
 The agenda's optional `progress_ordering` uses spent cost plus sixteen units
 per remaining selected interaction. This soft estimate lets a completed prefix
 advance while retaining every alternative; it is neither a proof-cost lower

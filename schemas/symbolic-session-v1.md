@@ -420,12 +420,12 @@ evidence search. `ranker` is `nnue` or `symbolic`; model/native paths are explic
 nullable paths. Models are loaded once for this run. `focused_search` is boolean
 and `exclude_names` is the existing list of forbidden premise names. The optional
 `scheduling` object has the first four required fields below and optional
-`dependency_ordering`, `progress_ordering`, `retry_work_ordering` and
-`joint_constructor_propagation` booleans
+`dependency_ordering`, `progress_ordering`, `retry_work_ordering`,
+`joint_constructor_propagation` and `multi_subject_clauses` booleans
 (defaults shown):
 
 ```json
-{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true,"joint_constructor_propagation":true}
+{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true,"joint_constructor_propagation":true,"multi_subject_clauses":true}
 ```
 
 Delays are nonnegative scheduling priorities, not proof-depth restrictions.
@@ -465,6 +465,17 @@ are independent. Unselected goals never receive these moves. Censored planning
 retains the frontier; every observation/check is charged. The cost receipt
 records this flag. Disabling it retains primary-goal construction and existing
 evidence fallbacks. No whole-goal search is hidden inside this propagation pass.
+
+`multi_subject_clauses` queues one compound elimination of the local variables
+whose types have positively observed one-constructor inductive metadata. It
+uses the native case-subject ranking order, then Agda's multi-variable case
+operation; it does not enumerate subsets or multiply constructor branches.
+Every individual subject remains an alternative. Agda still rejects inadmissible
+dependent elimination, including violations of `--without-K`. The existing
+refinement role can rank the compound move; it is not credited as a choice of
+several mutually exclusive single-subject model actions. The cost receipt
+records this switch. False omits compound moves from the queue, retaining the
+same catalogue checks and all single-subject moves.
 
 When unification solves a source meta indirectly, Agda may retain its interaction
 point for source bookkeeping. The native catalogue retrieves Agda's scoped

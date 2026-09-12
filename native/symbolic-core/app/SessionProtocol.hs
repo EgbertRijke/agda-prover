@@ -59,21 +59,22 @@ data ProtocolFailure = InvalidFrameBudget | UnterminatedFrame | FrameBudgetExhau
 instance E.Exception ProtocolFailure
 
 -- Soft ordering/slice settings, not proof-size or depth restrictions.
-data Scheduling = Scheduling Natural Natural Natural Bool Bool Bool Bool Bool
+data Scheduling = Scheduling Natural Natural Natural Bool Bool Bool Bool Bool Bool
 instance FromJSON Scheduling where
   parseJSON = withObject "scheduling" $ \o -> do
     let required = Set.fromList ["structural_delay", "macro_delay", "initial_macro_work", "evidence_macro"]
         supplied = Set.fromList (KM.keys o)
         switch key = if KM.member key o then o .: key else pure True
     unless (required `Set.isSubsetOf` supplied && supplied `Set.isSubsetOf`
-      Set.union required (Set.fromList ["dependency_ordering", "progress_ordering", "retry_work_ordering", "joint_constructor_propagation"])) $
+      Set.union required (Set.fromList ["dependency_ordering", "progress_ordering", "retry_work_ordering", "joint_constructor_propagation", "multi_subject_clauses"])) $
       fail "invalid scheduling fields"
-    scheduling@(Scheduling _ _ initial _ _ _ _ _) <- Scheduling <$> o .: "structural_delay"
+    scheduling@(Scheduling _ _ initial _ _ _ _ _ _) <- Scheduling <$> o .: "structural_delay"
       <*> o .: "macro_delay" <*> o .: "initial_macro_work" <*> o .: "evidence_macro"
       <*> switch "dependency_ordering"
       <*> switch "progress_ordering"
       <*> switch "retry_work_ordering"
       <*> switch "joint_constructor_propagation"
+      <*> switch "multi_subject_clauses"
     unless (initial > 0) $ fail "initial macro allowance must be positive"
     pure scheduling
 
@@ -159,7 +160,7 @@ parseRequest = withObject "session request" $ \o -> do
         ("nnue" :: String) -> pure Policy.Learned
         "symbolic" -> pure Policy.Symbolic
         _ -> fail "unknown ranker"
-      scheduling <- if KM.member "scheduling" o then o .: "scheduling" else pure $ Scheduling 2 8 64 True True True True True
+      scheduling <- if KM.member "scheduling" o then o .: "scheduling" else pure $ Scheduling 2 8 64 True True True True True True
       StartSearch (opName == "start-step") <$> o .: "state" <*> o .: "limits" <*> pure mode <*> o .: "model_path"
         <*> primaryPath <*> o .: "native_path" <*> o .: "focused_search"
         <*> o .: "exclude_names" <*> pure scheduling
@@ -315,13 +316,13 @@ loadPrimary oneMove (Just path) = do
 
 perform :: S.Session s -> Run.Store s -> (Value -> IO ()) -> (Value -> IO ()) -> Operation -> IO Value
 perform session runs emit emitRun operation = case operation of
-  StartSearch oneMove key limits mode modelPath focusedPath nativePath focused excluded (Scheduling structural macro initial enabled dependenciesEnabled progressEnabled retryWorkEnabled jointPropagationEnabled) selection actionLimit depthLimit ->
+  StartSearch oneMove key limits mode modelPath focusedPath nativePath focused excluded (Scheduling structural macro initial enabled dependenciesEnabled progressEnabled retryWorkEnabled jointPropagationEnabled multiSubjectEnabled) selection actionLimit depthLimit ->
     resolved key $ \root -> do
       loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
       focusedModel <- loadPrimary oneMove focusedPath
       case ((++) <$> loaded <*> focusedModel) >>= Policy.models of
         Left reason -> pure $ failureView $ KernelFailure ("model-configuration:" ++ reason)
-        Right models -> Run.start oneMove runs root (G.Settings limits mode models focused excluded structural macro initial enabled actionLimit dependenciesEnabled depthLimit progressEnabled retryWorkEnabled jointPropagationEnabled) nativePath selection
+        Right models -> Run.start oneMove runs root (G.Settings limits mode models focused excluded structural macro initial enabled actionLimit dependenciesEnabled depthLimit progressEnabled retryWorkEnabled jointPropagationEnabled multiSubjectEnabled) nativePath selection
   AdvanceSearch key steps limits actionLimit depthLimit -> Run.advance runs key steps limits actionLimit depthLimit emitRun
   RunCost key -> Run.snapshot runs key
   DiscardSearch key -> Run.discard runs key

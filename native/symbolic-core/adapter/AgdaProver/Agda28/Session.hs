@@ -18,7 +18,7 @@ module AgdaProver.Agda28.Session
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
   , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, proposeTerms, proposeConstructors, applyTerm
-  , ClauseMove, clauseMoveGoal, applyClauseMove, ClauseProposals (..), proposeClauseActions
+  , ClauseMove, clauseMoveGoal, clauseMoveIsBatch, applyClauseMove, ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
   , evict, replay, close, cancel, work, evidenceView
@@ -151,6 +151,10 @@ data ClauseProposals s = CompleteClauses [(ClauseMove s, [(T.Text, T.Text)])]
 
 clauseMoveGoal :: ClauseMove s -> GoalRef s
 clauseMoveGoal (ClauseMove goal _) = goal
+
+clauseMoveIsBatch :: ClauseMove s -> Bool
+clauseMoveIsBatch (ClauseMove _ (ClauseExecution.BoundSubjects (_ :| (_:_)))) = True
+clauseMoveIsBatch _ = False
 
 termProposalGoal :: TermProposal s -> GoalRef s
 termProposalGoal (TermProposal goal _ _ _) = goal

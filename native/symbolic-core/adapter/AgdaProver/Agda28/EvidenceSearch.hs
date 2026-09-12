@@ -13,6 +13,7 @@ import Data.Foldable (toList)
 import Data.IORef
 import Data.List (nub, sortOn)
 import Data.List.NonEmpty (NonEmpty (..))
+import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes)
 import Data.Set qualified as Set
@@ -330,16 +331,16 @@ clauseProposals stats limits models mode native emit namespace target = do
     allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
     if not allowed then pure Nothing else do
       ty <- typeOfBV index
-      reducible <- reduce ty >>= \case
+      splitting <- reduce ty >>= \case
         I.El _ (I.Def name _) -> getConstInfo name >>= \definition -> pure $ case theDef definition of
-          Datatype{} -> True
-          RecordDefn record -> _recInduction record /= Just CoInductive
-          _ -> False
-        _ -> pure False
+          Datatype { dataCons = constructors } -> Just $ length constructors == 1
+          RecordDefn record | _recInduction record /= Just CoInductive -> Just True
+          _ -> Nothing
+        _ -> pure Nothing
       rendered <- prettyShow <$> prettyTCM ty
       let name = prettyShow $ A.nameConcrete $ ctxEntryName entry
-          subject = if reducible then Just (name, rendered,
-            ClauseExecution.BoundSubjects (ctxEntryName entry :| [])) else Nothing
+          subject = fmap (\single -> (name, rendered, single,
+            ClauseExecution.BoundSubjects (ctxEntryName entry :| []))) splitting
       pure $ Just (rendered, subject)
   targetText <- T.pack . prettyShow <$> prettyTCM target
   let subjects = catMaybes $ map snd observed
@@ -348,7 +349,7 @@ clauseProposals stats limits models mode native emit namespace target = do
       candidates = [P.Candidate (T.pack $ show index) (T.pack name) 0
         (Right $ F.candidateTokens goal $ F.CandidateView "case-variable" "split"
           (T.pack ty) (T.pack name) 1 []) action
-        | (index, (name, ty, action)) <- zip [0 :: Int ..] subjects]
+        | (index, (name, ty, _, action)) <- zip [0 :: Int ..] subjects]
   ordered <- if null candidates then pure [] else do
     ranked <- liftIO $ P.rankBatch native models mode (P.ORFamily "case-variable") decision
       (F.policyStateTokens goal Classification.unknownClassification) candidates
@@ -361,13 +362,24 @@ clauseProposals stats limits models mode native emit namespace target = do
         liftIO $ emit $ P.traceView $ P.decisionTrace batch
         pure [(P.candidateValue candidate, [(decision, P.candidateId candidate)])
           | candidate <- P.rankedCandidates batch]
+  -- A single finite batch exposes the existing multi-subject Agda operation
+  -- to autonomous search. Positive one-constructor metadata avoids a product
+  -- of case branches; admissibility and dependent substitution remain Agda's
+  -- responsibility. Preserve every single-subject alternative.
+  let linearNames = Set.fromList [name | (_, _, True, ClauseExecution.BoundSubjects names) <- subjects,
+        name <- NE.toList names]
+      linearSubjects = [name | (ClauseExecution.BoundSubjects names, _) <- ordered,
+        name <- NE.toList names, Set.member name linearNames]
+      batches = case linearSubjects of
+        first:second:rest -> [(ClauseExecution.BoundSubjects (first :| (second:rest)), [])]
+        _ -> []
+      features action = case [(ty) | (_, ty, _, proposed) <- subjects, proposed == action] of
+        ty:_ -> Just $ F.refinementTokens goal "case-split" (Just $ T.pack ty)
+        [] -> Just $ F.refinementTokens goal "case-split" Nothing
+  refinements <- rankCompatible runtime P.Refinements goal
+    [(0, features action, item) | item@(action, _) <- batches ++ ordered]
   -- Result splitting also exposes binders that are absent from the local
   -- context. Keep that Agda operation; do not guess a telescope from text.
-  let features action = case [(ty) | (_, ty, proposed) <- subjects, proposed == action] of
-        ty:_ -> Just $ F.refinementTokens goal "case-split" (Just $ T.pack ty)
-        [] -> Nothing
-  refinements <- rankCompatible runtime P.Refinements goal
-    [(0, features action, item) | item@(action, _) <- ordered]
   resultAvailable <- attempt runtime $ do
     allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
     if not allowed then pure Nothing else reduce target >>= \case
