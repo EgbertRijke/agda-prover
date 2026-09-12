@@ -306,6 +306,12 @@ or growing families do not cause unbounded scaffold generation. This is a
 proposal termination guard, not an assertion about Agda termination or logical
 impossibility. Original alternatives remain available.
 
+Types containing native metavariables also remain ordinary obligations instead
+of being eagerly expanded. This avoids multiplying postponed substitutions
+while building a compound proposal. Atomic refinement and dependent elimination
+remain available to constrain those types; this restriction applies only to
+the optimization, not to solvability, proof size, or the user's search budget.
+
 The compound construction uses the session's usual state-bound proposal,
 checking, budget, exclusion and replay contracts. Its individual observations
 and checks count toward work, even though it is one agenda action. It is

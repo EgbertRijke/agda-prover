@@ -68,9 +68,9 @@ constructorClosures charge forbidden target = charge >>= \allowed ->
     _ -> pure []
 
 -- Expose a finite introduction tree, closing uniquely matching local leaves.
--- Nondecreasing repeated families and genuine choices remain explicit goals;
--- the ordinary agenda retains all alternatives. Each hole is created in its
--- native dependent context, and the finished draft is still kernel-checked.
+-- Unresolved types, nondecreasing repeated families and genuine choices remain
+-- explicit goals; the ordinary agenda retains all alternatives. Each hole is
+-- created in its native context, and the finished draft is kernel-checked.
 -- This is not used by the cheap later-goal constructor-closure probe.
 constructionScaffold :: TCM Bool -> TCM Bool -> Set.Set QName -> I.Type -> TCM (Maybe A.Expr)
 constructionScaffold inspect charge forbidden target = do
@@ -85,7 +85,15 @@ constructionScaffold inspect charge forbidden target = do
     pure (expression, value)
   build seen ty = do
     allowed <- inspect
-    if not allowed then genericError "native-construction-allowance-spent" else reduce ty >>= \case
+    if not allowed then genericError "native-construction-allowance-spent"
+    -- This eager optimization needs an established dependent type. Expanding
+    -- a constructor telescope against unresolved indices can multiply Agda's
+    -- postponed substitutions before control returns to the agenda. Leave an
+    -- ordinary obligation instead: atomic refinement can still instantiate
+    -- those indices, and a later invocation can build their resolved shape.
+    -- Inspect the native tree before reducing/instantiating it; this is not a
+    -- size limit or a rejection of the branch's mathematical goal.
+    else if not (noMetas ty) then unresolved ty else reduce ty >>= \case
       I.El _ (I.Pi domain body) -> do
         let hint = if I.absName body `elem` ["", "_"] then "x" else I.absName body
         withFreshName noRange hint $ \name -> do
