@@ -3,7 +3,8 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Symbolic.Evidence
   ( SearchLimits (..), SearchStats (..), emptyStats, SearchStatus (..), statusName
-  , IterationDepth, initialDepth, retryDepth, iterationDepth ) where
+  , IterationDepth, initialDepth, retryDepth, iterationDepth
+  , PrimitiveOptions (..), defaultPrimitiveOptions ) where
 
 import Control.Monad (unless)
 import Data.Aeson
@@ -13,6 +14,16 @@ import Data.Set qualified as S
 -- Caller-supplied work allowance, not a hard proof-size/depth bound. Nothing
 -- means supervised/cancellable search without a work-unit cap. Depth widens.
 newtype SearchLimits = SearchLimits { workUnitLimit :: Maybe Integer } deriving (Eq, Show)
+
+-- Independent proposal ablations; neither changes checker authority or limits.
+data PrimitiveOptions = PrimitiveOptions
+  { goalFunctionOperands :: Bool, recursiveEvidenceOperands :: Bool }
+  deriving (Eq, Show)
+
+defaultPrimitiveOptions :: PrimitiveOptions
+defaultPrimitiveOptions = PrimitiveOptions
+  { goalFunctionOperands = True, recursiveEvidenceOperands = True }
+
 instance FromJSON SearchLimits where
   parseJSON = withObject "evidence search limits" $ \o -> do
     unless (S.fromList (KM.keys o) == S.fromList ["work_units"]) $ fail "invalid search limits"

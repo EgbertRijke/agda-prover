@@ -17,7 +17,7 @@ module AgdaProver.Agda28.Session
   , Refutation.Kind (..)
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
-  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, preferStructures, withoutResultIntroductionOverlap, proposeTerms, proposeTermsWithTargetOperands, proposeStructures, proposeEquations, proposeConstructors, applyTerm
+  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, preferStructures, withoutResultIntroductionOverlap, proposeTerms, proposeTermsWithOptions, proposeStructures, proposeEquations, proposeConstructors, applyTerm
   , ClauseMove, clauseMoveGoal, clauseMoveIsBatch, applyClauseMove, ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
@@ -589,12 +589,12 @@ solveHelper session goal limits models mode native view expression emit =
 proposeTerms :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
              -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
              -> IO (Search.SearchStats, Either Failure (TermProposals s))
-proposeTerms = proposeTermsWithTargetOperands True
+proposeTerms = proposeTermsWithOptions Search.defaultPrimitiveOptions
 
-proposeTermsWithTargetOperands :: Bool -> Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
-                             -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
-                             -> IO (Search.SearchStats, Either Failure (TermProposals s))
-proposeTermsWithTargetOperands enabled = proposeTermsUsing $ Search.primitiveProposals enabled
+proposeTermsWithOptions :: Search.PrimitiveOptions -> Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
+                       -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
+                       -> IO (Search.SearchStats, Either Failure (TermProposals s))
+proposeTermsWithOptions options = proposeTermsUsing $ Search.primitiveProposals options
 
 proposeStructures :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
                   -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())

@@ -4,7 +4,7 @@
 module AgdaProver.Agda28.Construction
   ( recordPlan, recordExpression, projectedEvidence, omittedField, absurdLambda, eliminateEmpty
   , constructorClosures, constructionScaffold, emptyResultApplication, completeLocalOperands
-  , ArgumentWrapper (..), argumentWrappers ) where
+  , determinedOperands, ArgumentWrapper (..), argumentWrappers, preservingAllocations ) where
 
 import Control.Monad (filterM, forM)
 import Control.Monad.Except (catchError, throwError)
@@ -355,6 +355,32 @@ completeLocalOperands inspect charge expression target = preservingAllocations $
   retainsHelpers = getAny $ foldExpr (\case
     A.ExtendedLam{} -> Any True
     _ -> Any False) expression
+
+-- A composition hint is useful when its known operands and expected result
+-- determine the remaining obligations. Do not promote a speculative spine
+-- with extra unification metas or blocked domains. This is only an additional
+-- proposal filter; the ordinary application remains available, and acceptance
+-- still goes through the normal source-owner/termination boundary.
+determinedOperands :: TCM Bool -> TCM Bool -> A.Expr -> I.Type -> TCM (Maybe A.Expr)
+determinedOperands inspect charge expression target = preservingAllocations $ do
+  allowed <- charge
+  if not allowed then pure Nothing else do
+    before <- Set.fromList <$> getOpenMetas
+    _ <- noConstraints $ checkExpr expression target
+    let points = Set.toList $ foldExpr (\case
+          A.QuestionMark _ point -> Set.singleton point
+          _ -> Set.empty) expression
+    holes <- forM points $ \point -> do
+      available <- inspect
+      if not available then pure Nothing else lookupInteractionMeta point >>= \case
+        Nothing -> pure Nothing
+        Just meta -> withInteractionId point $ do
+          ty <- instantiateFull =<< getMetaTypeInContext meta
+          pure $ if noMetas ty then Just meta else Nothing
+    remaining <- Set.fromList <$> getOpenMetas
+    pure $ if all (/= Nothing) holes &&
+      (remaining `Set.difference` before) `Set.isSubsetOf` Set.fromList (catMaybes holes)
+      then Just expression else Nothing
 
 -- Reified drafts can bind freshly allocated names. Retain only their small
 -- allocation watermarks, never the speculative checking state or assignments.

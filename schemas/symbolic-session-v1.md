@@ -421,11 +421,12 @@ nullable paths. Models are loaded once for this run. `focused_search` is boolean
 and `exclude_names` is the existing list of forbidden premise names. The optional
 `scheduling` object has the first four required fields below and optional
 `dependency_ordering`, `progress_ordering`, `retry_work_ordering`, `evidence_depth_reuse`, `coalesce_introductions`,
-`target_function_operands`, `joint_constructor_propagation` and `multi_subject_clauses` booleans
+`target_function_operands`, `recursive_evidence_operands`,
+`joint_constructor_propagation` and `multi_subject_clauses` booleans
 (defaults shown):
 
 ```json
-{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true,"evidence_depth_reuse":true,"coalesce_introductions":true,"target_function_operands":true,"joint_constructor_propagation":true,"multi_subject_clauses":true}
+{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true,"evidence_depth_reuse":true,"coalesce_introductions":true,"target_function_operands":true,"recursive_evidence_operands":true,"joint_constructor_propagation":true,"multi_subject_clauses":true}
 ```
 
 Delays are nonnegative scheduling priorities, not proof-depth restrictions.
@@ -491,9 +492,8 @@ or proof authority. All hiding and modality annotations remain on the native
 application spine. This includes callables with only hidden/instance arguments,
 function-valued projections and functions supplied as values.
 
-Each additional proposal fixes one function slot; other slots remain ordinary
-obligations or inferred arguments. No Cartesian enumeration of simultaneous
-operand choices is added. Existing application prefixes remain available and
+Each proposal from this option fixes one function slot; other slots remain
+ordinary obligations or inferred arguments. Existing application prefixes remain available and
 the existing head NNUE ordering is retained. False skips the extra observations
 and specializations. The strict boolean is recorded in the agenda receipt and
 retained across slices. This option applies to the primitive application
@@ -503,6 +503,32 @@ counter charges each constructed specialized-spine node to both `work_units`
 and the session's `symbolic_actions`. Domain observations remain separately
 charged as inference queries. Censorship retains the normal typed paused result;
 raising the allowance never erases already spent work.
+
+`recursive_evidence_operands` (default true) connects the existing native
+recursive-call generator to the application catalogue. Agda infers a proposed
+recursive value and its type inside rollback; only closed native syntax is
+retained, excluding inference that introduces extended-lambda helper
+declarations. Native domain shapes exclude only rigid mismatches, never compare
+printed types. A recursive value may fill one consumer slot, optionally paired
+with one independently authorized goal-mentioned function in another slot.
+It is not an unbounded saturation or enumeration of all operand combinations.
+
+Before a composed draft is offered, a charged preflight requires no new
+constraints, fully determined types for its interaction operands, and no new
+open metas other than those explicit operands. This positive applicability
+filter affects only the extra compositions: ordinary application and recursive
+alternatives stay available. Rejected probes restore assignments; only fresh
+name/interaction allocation watermarks survive. The source-owner provenance
+remains sealed, exclusions apply before generation, and the ordinary checked
+move still owns termination/productivity and proof reconstruction.
+
+The option is independent of `target_function_operands`, strict-boolean parsed,
+recorded in the agenda cost and retained across slices. False skips recursive
+operand observations and compositions; it does not disable recursive calls.
+Like the function-operand option, it applies to the primitive catalogue, not
+the direct coarse evidence operation. Existing inference/check counters and
+`application_generation_steps` account for all additional work. Both parent
+policy-choice lists accompany a composition; this grants no fresh proof credit.
 
 `joint_constructor_propagation` offers target-directed constructor closures for
 other selected pending goals with positively observed dependencies on selected

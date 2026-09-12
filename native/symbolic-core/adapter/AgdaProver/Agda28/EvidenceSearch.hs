@@ -17,6 +17,7 @@ import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes)
+import Data.Monoid (Any (..))
 import Data.Set qualified as Set
 import Data.Text qualified as T
 
@@ -84,7 +85,7 @@ data GlobalInventory = GlobalInventory [A.Expr] (Set.Set QName) (Maybe Recursion
 data ExpectedShape = FunctionShape | SortShape | FamilyShape QName | LocalShape Int deriving Eq
 
 data ArgumentShape = ArgumentShape
-  { argumentInfo :: ArgInfo, argumentResult :: Maybe ExpectedShape, functionArgument :: Bool }
+  { argumentInfo :: ArgInfo, argumentResult :: Maybe ExpectedShape, argumentDomain :: Maybe ExpectedShape }
 
 run :: IterationDepth -> IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode -> Maybe (NativeScorer s)
     -> Bool -> (Value -> IO ()) -> String -> [String] -> InteractionId -> Maybe Recursion.Owner
@@ -160,14 +161,15 @@ runHelper stats limits models mode native emit namespace point view application 
 -- native holes retain dependencies for the shared agenda instead of recursing
 -- through every operand before other actions get a turn. No arity cap and no
 -- printed type matching. Rechecking each proposal owns all meta assignments.
-primitiveProposals :: Bool -> IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
+primitiveProposals :: PrimitiveOptions -> IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
                    -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> [String]
                    -> Maybe Recursion.Owner -> InteractionId -> I.Type
                    -> TCM [(A.Expr, [(T.Text, T.Text)])]
-primitiveProposals targetFunctions stats limits models mode native emit namespace excluded owner point target = do
+primitiveProposals options stats limits models mode native emit namespace excluded owner point target = do
   pruned <- liftIO $ newIORef False
   originalSize <- getContextSize
   let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
+      targetFunctions = goalFunctionOperands options
       freshHole scope = do
         freshPoint <- registerInteractionPoint False noRange Nothing
         pure $ A.QuestionMark (Info.emptyMetaInfo { Info.metaScope = scope }) freshPoint
@@ -178,16 +180,16 @@ primitiveProposals targetFunctions stats limits models mode native emit namespac
         allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
         if not allowed then pure (Nothing, []) else reduce ty >>= \case
           I.El _ (I.Pi domain body) -> do
-            inspectDomain <- if targetFunctions then charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+            inspectDomain <- if targetFunctions || recursiveEvidenceOperands options then charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
               else pure False
-            functionDomain <- if inspectDomain then reduce (I.unDom domain) >>= \case
-              I.El _ I.Pi{} -> pure True
-              _ -> pure False
-              else pure False
+            domainShape <- if inspectDomain then reduce (I.unDom domain) >>= outerShape else pure Nothing
             (result, rest) <- underAbstraction domain body signature
             pure (if visible domain then Just FunctionShape else result,
-              ArgumentShape (getArgInfo domain) result functionDomain:rest)
-          I.El _ (I.Sort _) -> pure (Just SortShape, [])
+              ArgumentShape (getArgInfo domain) result domainShape:rest)
+          exposed -> (\shape -> (shape, [])) <$> outerShape exposed
+      outerShape = \case
+          I.El _ I.Pi{} -> pure $ Just FunctionShape
+          I.El _ (I.Sort _) -> pure $ Just SortShape
           I.El _ (I.Var index _) -> do
             -- Parameters from the original goal are rigid, but variables
             -- introduced while inspecting a function's telescope can be
@@ -195,19 +197,19 @@ primitiveProposals targetFunctions stats limits models mode native emit namespac
             -- extension: Agda's NoAbs does not introduce a new binder.
             introduced <- subtract originalSize <$> getContextSize
             pure (if index >= introduced
-              then Just $ LocalShape (index - introduced) else Nothing, [])
+              then Just $ LocalShape (index - introduced) else Nothing)
           I.El _ (I.Def name _) -> getConstInfo name >>= \definition -> pure
             (case theDef definition of
               Datatype{} -> Just $ FamilyShape name
               RecordDefn{} -> Just $ FamilyShape name
-              _ -> Nothing, [])
-          _ -> pure (Nothing, [])
+              _ -> Nothing)
+          _ -> pure Nothing
       compatible Nothing _ = True
       compatible _ Nothing = True
       compatible (Just wanted) (Just offered) = wanted == offered
-      applications :: Maybe ExpectedShape -> ScopeInfo -> A.Expr -> Maybe (Int, A.Expr)
+      applications :: Maybe ExpectedShape -> ScopeInfo -> A.Expr -> [(Int, A.Expr)]
                    -> [ArgumentShape] -> TCM [A.Expr]
-      applications expected scope expression anchor infos = do
+      applications expected scope expression anchors infos = do
         inferred <- go False False 0 expression infos
         -- Hiding is an inference preference, not a restriction on supplying
         -- an operand. Keep the original inference-first spine, then expose
@@ -219,18 +221,18 @@ primitiveProposals targetFunctions stats limits models mode native emit namespac
        where
         go _ _ _ _ [] = pure []
         go supplyHidden hiddenSeen index function (ArgumentShape info result _:rest) = do
-          available <- case anchor of
-            Nothing -> pure True
-            Just _ -> charge runtime $ \s -> s { applicationGenerationSteps = applicationGenerationSteps s + 1 }
+          available <- if null anchors then pure True
+            else charge runtime $ \s -> s { applicationGenerationSteps = applicationGenerationSteps s + 1 }
           if not available then pure [] else do
-            operand <- case anchor of
-              Just (position, supplied) | position == index -> pure supplied
+            operand <- case lookup index anchors of
+              Just supplied -> pure supplied
               _ -> if visible info || supplyHidden then freshHole scope
                 else Construction.omittedField (getHiding info)
             let applied = A.app function [Arg info $ unnamed operand]
                 withHidden = hiddenSeen || notVisible info
-                anchored = maybe True ((<= index) . fst) anchor
-                include = anchored && (if supplyHidden then withHidden else visible info)
+                anchored = all ((<= index) . fst) anchors
+                include = anchored && (if supplyHidden then withHidden
+                  else visible info || index `elem` map fst anchors)
             suffix <- go supplyHidden withHidden (index+1) applied rest
             pure $ if include && compatible expected result
               then applied:suffix else suffix
@@ -313,7 +315,7 @@ primitiveProposals targetFunctions stats limits models mode native emit namespac
       operands <- fmap concat $ forM subjects $ \subject -> do
         observedSubject <- localTCState $ attempt runtime $
           queryInferWith DontExpandLast runtime subject $ \(_, ty) -> Just <$> signature ty
-        variants <- applications Nothing scope subject Nothing $ maybe [] snd observedSubject
+        variants <- applications Nothing scope subject [] $ maybe [] snd observedSubject
         pure $ subject:variants
       let fill supplyHidden anchor index info = case anchor of
             Just (position, subject) | position == index -> pure subject
@@ -351,7 +353,7 @@ primitiveProposals targetFunctions stats limits models mode native emit namespac
       expressions <- case observed of
         Just ((result, infos), _)
           | let terminal = case reverse infos of shape:_ -> argumentResult shape; [] -> result
-          , compatible expected terminal -> fmap concat $ forM
+          , recursiveEvidenceOperands options || compatible expected terminal -> fmap concat $ forM
               ([Nothing | Recursion.copatternCall context] ++
                map Just ([(index, subject) | index <- [0 .. length infos - 1], subject <- operands] ++ wrapped)) $ \anchor ->
                 build (Recursion.callHead context) anchor infos
@@ -367,6 +369,23 @@ primitiveProposals targetFunctions stats limits models mode native emit namespac
       described <- mapM (describe runtime "recursive") proposals
       ordered <- rankDescribed runtime classification target described
       pure [(expression, picked) | (Seed expression _ _, picked) <- ordered]
+  -- A recursive result can constrain an operand of another application, not
+  -- only close the current goal. Retain native closed syntax, never temporary
+  -- metas or inferred helper declarations. These are proposals, not recursive
+  -- assumptions: applyTerm still checks the complete source-owner group.
+  reusable <- if not (recursiveEvidenceOperands options) then pure [] else
+    fmap catMaybes $ forM recursive $ \(expression, picked) ->
+      if getAny $ foldExpr (\case A.ExtendedLam{} -> Any True; _ -> Any False) expression
+        then pure Nothing else Construction.preservingAllocations $ attempt runtime $
+          queryInfer runtime expression $ \(value, ty) -> do
+            closed <- instantiateFull value
+            closedType <- instantiateFull ty
+            if not (noMetas closed && noMetas closedType) then pure Nothing else do
+              allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+              if not allowed then pure Nothing else do
+                shape <- reduce closedType >>= outerShape
+                syntax <- reify closed
+                pure $ Just (syntax, shape, picked)
   headSignatures <- forM ranked $ \(Seed expression _ _, picked) -> do
     observed <- localTCState $ attempt runtime $
       queryInferWith DontExpandLast runtime expression $ \(_, ty) -> do
@@ -384,15 +403,25 @@ primitiveProposals targetFunctions stats limits models mode native emit namespac
           shape:_ -> argumentResult shape
           [] -> result
     let specialize [] = pure []
-        specialize (anchor:rest) = stopped runtime >>= \done ->
+        specialize ((anchors, provenance, constrain):rest) = stopped runtime >>= \done ->
           if done then pure [] else do
-            prefix <- applications expected scope expression (Just anchor) infos
+            drafts <- applications expected scope expression anchors infos
+            prefix <- if not constrain then pure drafts else fmap catMaybes $ forM drafts $ \draft ->
+              attempt runtime $ Construction.determinedOperands
+                (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
+                (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }) draft target
             suffix <- specialize rest
-            pure $ prefix ++ suffix
+            pure $ [(variant, provenance) | variant <- prefix] ++ suffix
+        functions = [(index, operand) | (index, shape) <- zip [0..] infos,
+          argumentDomain shape == Just FunctionShape, operand <- targetOperands]
+        evidence = [((index, operand), provenance) | (index, shape) <- zip [0..] infos,
+          (operand, offered, provenance) <- reusable, compatible (argumentDomain shape) offered]
     specialized <- specialize
-      [(index, operand) | (index, shape) <- zip [0..] infos, functionArgument shape,
-        operand <- targetOperands]
-    variants <- applications expected scope expression Nothing infos
+      ([([anchor, known], nub $ picked ++ provenance, True) | (anchor, provenance) <- evidence,
+          known <- functions, fst anchor /= fst known] ++
+       [([anchor], picked, False) | anchor <- functions] ++
+       [([anchor], nub $ picked ++ provenance, True) | (anchor, provenance) <- evidence])
+    variants <- applications expected scope expression [] infos
     emptyApplication <- case (terminal, closedType) of
       (Just FamilyShape{}, Just ty) -> attempt runtime $ Construction.emptyResultApplication
         (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
@@ -400,7 +429,8 @@ primitiveProposals targetFunctions stats limits models mode native emit namespac
       _ -> pure Nothing
     modify runtime $ \s -> s { applicationProposals = applicationProposals s + fromIntegral (length specialized + length variants) }
     modify runtime $ \s -> s { absurdProposals = absurdProposals s + maybe 0 (const 1) emptyApplication }
-    pure [(variant, picked) | variant <- [expression | compatible expected result] ++ specialized ++ variants ++ maybe [] pure emptyApplication]
+    pure $ [(expression, picked) | compatible expected result] ++ specialized ++
+      [(variant, picked) | variant <- variants ++ maybe [] pure emptyApplication]
   construction <- localTCState $ do
     allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
     if allowed then Construction.recordPlan forbidden target else pure Nothing

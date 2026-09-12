@@ -164,14 +164,31 @@ callable mentioned in the goal's native syntax. Agda's telescope identifies
 the function slot; local binding identities and resolved declaration names
 identify hints without parsing their display. Constructors, dependent
 functions and function-valued record projections share this path, including
-hidden/instance binders. One operand is specialized per proposal; all other
-operands retain ordinary holes or inference, and unspecialized applications
+hidden/instance binders. One function operand is specialized per proposal;
+other operands retain ordinary holes or inference, and unspecialized applications
 remain available. Occurrence in the goal never grants premise visibility.
 `target_function_operands=false` disables these additional proposals and their
 observations for ablation. The run receipt records the setting across slices.
 `application_generation_steps` counts specialized-spine construction against
 the existing work allowance and physical symbolic ledger; Agda queries keep
 their own counters. Every proposed application still needs normal checking.
+
+`recursive_evidence_operands` additionally offers closed native recursive
+results as application operands, optionally together with one goal-mentioned
+function. Both proposal sources retain their existing NNUE provenance. Before
+offering these compositions, Agda must determine all remaining operand types
+without extra unification metas or blocked constraints. Ordinary applications
+are retained when that condition is not met. This controls speculative fan-out;
+it is not a proof rule or a restriction on Agda's accepted proofs.
+
+The option defaults to true in the opt-in native engine; false restores the
+earlier catalogue for ablation, and the run receipt retains it across slices.
+Only scoped expressions with closed inferred values/types are reused. New
+helper declarations and temporary meta identities cannot escape observation;
+owner exclusion and Agda's termination/productivity checks still apply to the
+whole composed move. All inference, preflight checks and spine construction
+are charged. This improves some induction searches, not every workload; whole
+native qualification remains open.
 
 When compound construction supplies the same single-lambda/open-body action,
 the controller keeps its preferred copy instead of also scheduling the ordinary
