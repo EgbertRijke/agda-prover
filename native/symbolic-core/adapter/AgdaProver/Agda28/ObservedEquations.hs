@@ -24,7 +24,7 @@ import Agda.Syntax.Translation.InternalToAbstract (reify, reifyPatterns)
 import Agda.TypeChecking.Free (allFreeVars)
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Patterns.Internal (termToPattern)
-import Agda.TypeChecking.Reduce (reduce)
+import Agda.TypeChecking.Reduce (instantiateFull, reduce)
 import Agda.Utils.Null (empty)
 
 -- These observations are clause proposals, not equations asserted by search.
@@ -101,24 +101,41 @@ propose charge forbidden owner point later = do
   application _ = Nothing
   equation :: Set.Set Name -> (QName -> Bool) -> Int -> [Arg I.Term] -> I.Term -> TCM Observation
   equation ambient visibleName parameters lhs rhs = do
-    found <- runMaybeT $ do
-      let operands = drop parameters lhs
-      guard $ not (null operands) && noMetas operands && noMetas rhs
+    allowed <- charge
+    if not allowed then pure Boundary else do
+      operands <- instantiateFull $ drop parameters lhs
+      value <- instantiateFull rhs
+      full <- patternsFor operands value
+      case full of
+        Just found -> pure found
+        Nothing | any notVisible operands -> do
+          -- Inferred indices can repeat even though the explicit clause is
+          -- linear. Let Agda infer omitted hidden/instance patterns from the
+          -- original signature, instead of rejecting their repeated indices.
+          -- This is a generalized candidate, not an asserted equation: native
+          -- checking still owns coverage, dependent indices and termination.
+          next <- charge
+          if not next then pure Boundary else
+            maybe Boundary id <$> patternsFor (filter visible operands) value
+        Nothing -> pure Boundary
+   where
+    patternsFor :: [Arg I.Term] -> I.Term -> TCM (Maybe Observation)
+    patternsFor operands value = runMaybeT $ do
+      guard $ not (null operands) && noMetas operands && noMetas value
       patterns <- lift $ termToPattern operands
       variables <- MaybeT $ pure $ traverse linearPattern (patterns :: [Arg I.DeBruijnPattern])
       let bindings = concat variables
       guard $ length bindings == IntSet.size (IntSet.fromList bindings)
       guard $ any (rigid . unArg) patterns
       guard $ all visibleName $ foldMap (patternNames . unArg) patterns
-      let captured = IntSet.toList $ allFreeVars rhs `IntSet.difference` IntSet.fromList bindings
+      let captured = IntSet.toList $ allFreeVars value `IntSet.difference` IntSet.fromList bindings
       capturedNames <- lift $ mapM nameOfBV captured
       guard $ all (`Set.member` ambient) capturedNames
       abstractPatterns <- lift $ withShowAllArguments $ reifyPatterns $ map (fmap unnamed) patterns
-      expression <- lift $ withShowAllArguments $ reify rhs
+      expression <- lift $ withShowAllArguments $ reify value
       let names = foldExpr referenced expression
       guard $ all visibleName names
       pure $ Equation abstractPatterns expression
-    pure $ maybe Boundary id found
   linearPattern argument = case unArg argument of
     I.VarP _ variable -> Just [I.dbPatVarIndex variable]
     I.ConP _ _ patterns -> concat <$> mapM (linearPattern . fmap namedThing) patterns

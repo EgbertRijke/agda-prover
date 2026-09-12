@@ -446,6 +446,13 @@ definition site. This does not recognize a particular relation or assume its
 laws; every proposed definition and every selected statement still needs proof.
 Agda decides coverage, dependent indices and source-owner termination.
 
+Solved metas are instantiated before inspecting clause patterns. The original
+full-pattern candidate remains preferred. When it is unavailable, the observer
+can omit hidden/instance patterns and let Agda infer their indices from the
+original signature and explicit patterns. Captured RHS variables and visibility
+checks remain unchanged. This is a checked generalization attempt, not permission
+to assume that a specialized carrier is the arbitrary carrier in the signature.
+
 These proposals precede later constructor probes, which could otherwise turn
 the useful computation statements into suspended constraints before the
 definition is constructed. Other alternatives remain available. Source order
