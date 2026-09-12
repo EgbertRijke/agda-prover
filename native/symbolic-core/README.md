@@ -84,6 +84,12 @@ inputs are scoped once and retained as native drafts for replay. Partial drafts
 remain partial, and the returned evidence is not fresh verification. General
 source patches and hidden-binder exposure remain separate export work.
 
+`reconstruct-goals` rechecks an ordered batch in one new branch. Later entries
+can depend on earlier reconstructed definitions; unselected goals stay open.
+The batch returns each entry's checked evidence and the final pending state.
+A failed batch publishes no intermediate states, while preserving its spent
+work. Whole-source fresh validation is still required.
+
 `infer-helper` uses Agda's helper-function inference directly, including
 abstraction over compound arguments and the five observation modes. It retains
 the native signature in a parent-branded snapshot and returns Agda's rendering

@@ -54,6 +54,7 @@ Each operation permits only its listed additional fields:
 | `make-clause` | `state`, `goal_id`, `action` | Parent-bound native clause proposal, not a child state |
 | `apply-clause` | `state`, `goal_id`, `action` | Checked native helper/clause child, evidence view and dependent obligations |
 | `reconstruct-goal` | `state`, `goal_id`, `descendant` | Assemble native drafts from a descendant, recheck from the original goal's parent, return a provisional checked transition |
+| `reconstruct-goals` | `state`, `goal_ids`, `descendant` | Reconstruct a nonempty ordered selection into one new coupled branch; return all entries and final pending obligations |
 | `infer-helper` | `state`, `goal_id`, `mode`, `application` | Parent-bound native helper signature, not a proof transition |
 | `solve-helper` | `state`, `goal_id`, `mode`, `application`, `limits`, `ranker`, `model_path`, `native_path` | Finite native helper search with the ordinary provisional candidate/cost result |
 | `solve-evidence` | `state`, `goal_id`, `limits`, `ranker`, `model_path`, `native_path`, `exclude_names`; optional `focused_model_path`, `focused_search` | Search status, provisional child/evidence, cumulative search cost, selected policy choices |
@@ -199,8 +200,24 @@ Agda checks the assembled draft again from the original parent under the usual
 owner/termination/warning rules. The operation returns a new provisional
 transition and charges its checking work; it does not mutate either input
 branch. Remaining child goals or hidden obligations prevent apparent closure.
-Source drift invalidates the epoch. General source patches, binder exposure,
-joint reconstruction and independent fresh validation remain separate duties.
+Source drift invalidates the epoch. General source patches, binder exposure
+and independent fresh validation remain separate duties.
+
+`reconstruct-goals` uses the same native ancestry with a nonempty, duplicate-free
+array `goal_ids`. Each ID must be an open goal in the original `state`. The
+assembled drafts are checked successively in one new branch, so later proofs
+retain the substitutions made by earlier definitions. Unknown goals, missing
+assignments, foreign/stale references and unrelated descendants are rejected.
+On failure none of the intermediate states is published; spent checking work
+is retained. Existing parent and descendant branches are unchanged.
+
+Success returns `state`, `status`, `pending`, `proof_authority: false` and
+`entries: [{goal_id, evidence}, ...]` in requested order. Each evidence value
+belongs to its checked prefix; the top-level state/pending describe the final
+coupled branch. Unselected source goals and hidden obligations remain pending.
+An apparently closed batch is not independently verified and is not a source
+patch. Validate the reconstructed source together, not individual proof terms
+against unrelated copies of the original file.
 
 ## Helper inference
 

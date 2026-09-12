@@ -15,11 +15,13 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, Pair, parseEither)
 import Data.ByteString qualified as BS
 import Data.IORef
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.List.NonEmpty qualified as NE
 import Data.Set qualified as Set
 import System.Environment (lookupEnv)
 import System.IO (stdin)
 import Text.Read (readMaybe)
-import Agda.Syntax.Common (InteractionId)
+import Agda.Syntax.Common (InteractionId, interactionId)
 import AgdaProver.Agda28.Session qualified as S
 import AgdaProver.Symbolic.Protocol qualified as P
 import AgdaProver.Symbolic.SessionTypes hiding (Pending)
@@ -35,6 +37,7 @@ data Operation = Pending StateKey | Observe StateKey InteractionId P.Observation
   | MakeClause StateKey InteractionId ClauseAction
   | ApplyClause StateKey InteractionId ClauseAction
   | ReconstructGoal StateKey InteractionId StateKey
+  | ReconstructGoals StateKey (NonEmpty InteractionId) StateKey
   | InferHelper StateKey InteractionId P.ObservationMode DraftExpression
   | SolveHelper StateKey InteractionId Search.SearchLimits Policy.RankingMode (Maybe FilePath) (Maybe FilePath)
       P.ObservationMode DraftExpression
@@ -87,6 +90,15 @@ parseRequest = withObject "session request" $ \o -> do
     "reconstruct-goal" -> do
       fields ["state", "goal_id", "descendant"]
       ReconstructGoal <$> o .: "state" <*> goal <*> o .: "descendant"
+    "reconstruct-goals" -> do
+      fields ["state", "goal_ids", "descendant"]
+      ids <- o .: "goal_ids" :: Parser [Integer]
+      unless (all (\n -> n >= 0 && n <= toInteger (maxBound :: Int)) ids
+              && Set.size (Set.fromList ids) == length ids) $ fail "invalid goal ids"
+      case ids of
+        [] -> fail "empty goal selection"
+        first:rest -> ReconstructGoals <$> o .: "state"
+          <*> pure (fmap fromInteger $ first :| rest) <*> o .: "descendant"
     "solve-helper" -> do
       fields ["state", "goal_id", "limits", "ranker", "model_path", "native_path", "mode", "application"]
       mode <- o .: "ranker" >>= \case
@@ -223,6 +235,20 @@ perform session emit operation = case operation of
     checkedResult answer
   ReconstructGoal key goal child -> resolvedGoal key goal $ \ref -> resolved child $ \descendant ->
     S.reconstructGoal session ref descendant >>= checkedResult
+  ReconstructGoals key goals child -> resolved key $ \ref -> resolved child $ \descendant -> do
+    batch <- S.reconstructGoals session ref goals descendant
+    pure $ case batch of
+      Left failure -> failureView failure
+      Right transitions ->
+        let final = snd $ NE.last transitions
+            entries = traverse (\(point, checked) -> do
+              evidence <- S.evidenceView $ S.transitionEvidence checked
+              pure $ object ["goal_id" .= interactionId point, "evidence" .= evidence]) transitions
+        in case entries of
+          Left reason -> failureView $ KernelFailure reason
+          Right values -> object ["state" .= S.stateKey (S.transitionState final),
+            "status" .= kindName (S.transitionKind final), "pending" .= S.transitionPending final,
+            "entries" .= values, "proof_authority" .= False]
   Give key goal expression -> resolvedGoal key goal $ \ref -> do
     answer <- S.tryExpression session ref expression
     checkedResult answer

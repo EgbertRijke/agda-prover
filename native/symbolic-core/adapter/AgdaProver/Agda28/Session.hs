@@ -12,7 +12,7 @@ module AgdaProver.Agda28.Session
   , inspect, pending, tryExpression
   , solveEvidence, solveHelper
   , ClauseProposal, makeClauses, clauseView, applyClause
-  , reconstructGoal
+  , reconstructGoal, reconstructGoals
   , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, proposeTerms, applyTerm
   , ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
@@ -29,6 +29,8 @@ import Control.Monad.State.Strict (runStateT)
 import Data.Aeson (Value, object, (.=))
 import Data.ByteString qualified as BS
 import Data.IORef
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -545,39 +547,76 @@ expectedWarning warning = case tcWarning warning of
 -- complete source proof. Parent/descendant states and external costs survive.
 reconstructGoal :: Session s -> GoalRef s -> StateRef s
                 -> IO (Either Failure (Transition s))
-reconstructGoal session goal descendant = request session (goalState goal) $ \owner initial ->
-  case drafts owner descendant of
+reconstructGoal session goal descendant = fmap (fmap $ snd . NE.head) $
+  reconstructGoals session (goalState goal) (goalId goal :| []) descendant
+
+-- Requested original goals are reconstructed into one new coupled branch.
+-- Rechecking them independently loses the substitutions that later definitions
+-- depend on. A failure publishes none of the intermediate branches, but their
+-- checking work remains charged. Unrequested source goals are never discarded.
+reconstructGoals :: Session s -> StateRef s -> NonEmpty InteractionId -> StateRef s
+                 -> IO (Either Failure (NonEmpty (InteractionId, Transition s)))
+reconstructGoals session parent points descendant = request session parent $ \owner initial ->
+  case reconstructionDrafts session owner parent descendant of
     Left failure -> pure (owner, Left failure)
-    Right actions -> case nativeActions actions of
-      Left failure -> pure (owner, Left failure)
-      Right (expressions, allocations) -> case Assembly.assemble (goalId goal) expressions of
-        Left reason -> pure (owner, Left $ KernelRejected reason)
-        Right assembled -> do
-          let Allocation name point = foldr maximumAllocation
-                (Allocation (initial ^. stFreshNameId) (initial ^. stFreshInteractionId)) allocations
-          check session owner (goalState goal) initial
-            (DraftAction (goalId goal) $ NativeDraft assembled $ Allocation name point) False
+    Right (expressions, allocations) -> case mapM (\point ->
+        (point,) <$> Assembly.assemble point expressions) points of
+      Left reason -> pure (owner, Left $ KernelRejected reason)
+      Right assembled -> do
+        (valid, _) <- kernel session initial $ do
+          open <- openInteractionPoints
+          pure $ if Set.size (Set.fromList $ NE.toList points) /= length points
+            then Left $ KernelRejected "native-reconstruction-duplicate-goals"
+            else if all (`elem` open) points then Right () else Left UnknownGoal
+        case valid >>= id of
+          Left failure -> pure (owner, Left failure)
+          Right () -> do
+            let allocation = foldr maximumAllocation
+                  (Allocation (initial ^. stFreshNameId) (initial ^. stFreshInteractionId)) allocations
+            (next, result) <- go allocation owner parent initial $ NE.toList assembled
+            case result of
+              Left failure -> pure (owner, Left failure)
+              Right [] -> pure (owner, Left $ KernelFailure "native-reconstruction-empty-batch")
+              Right (first:rest) -> pure (next, Right $ first :| rest)
  where
-  drafts owner ref
+  go _ owner _ _ [] = pure (owner, Right [])
+  go allocation owner current state ((point, expression):rest) = do
+    (next, result) <- check session owner current state
+      (DraftAction point $ NativeDraft expression allocation) False
+    case result of
+      Left failure -> pure (owner, Left failure)
+      Right transition -> case lookupState session (transitionState transition) next of
+        Left failure -> pure (owner, Left failure)
+        Right child -> do
+          (done, results) <- go allocation next (transitionState transition) child rest
+          pure (done, ((point, transition):) <$> results)
+
+reconstructionDrafts :: Session s -> Owner -> StateRef s -> StateRef s
+                     -> Either Failure ([(InteractionId, A.Expr)], [Allocation])
+reconstructionDrafts session owner parent descendant = drafts descendant >>= nativeActions
+ where
+  drafts ref
     | keySession key /= sessionNonce session = Left ForeignSession
     | keyEpoch key /= ownerEpoch owner = Left StaleEpoch
     | otherwise = walk (keyBranch key) []
    where
     key = stateKey ref
-    root = keyBranch $ stateKey $ goalState goal
+    root = keyBranch $ stateKey parent
     walk number actions
       | number == root = Right actions
       | otherwise = case Map.lookup number (ownerBranches owner) of
           Nothing -> Left UnknownState
           Just branch -> case branchTrail branch of
-            Just (parent, action) | parent < number -> walk parent (action:actions)
+            Just (previous, action) | previous < number -> walk previous (action:actions)
             _ -> Left $ KernelRejected "native-reconstruction-not-a-descendant"
   nativeActions [] = Right ([], [])
   nativeActions (DraftAction point (NativeDraft expression allocation):rest) = do
     (expressions, allocations) <- nativeActions rest
     pure ((point, expression):expressions, allocation:allocations)
   nativeActions _ = Left $ KernelFailure "native-reconstruction-missing-scoped-draft"
-  maximumAllocation (Allocation a b) (Allocation c d) = Allocation (max a c) (max b d)
+
+maximumAllocation :: Allocation -> Allocation -> Allocation
+maximumAllocation (Allocation a b) (Allocation c d) = Allocation (max a c) (max b d)
 
 -- Rendering is only a presentation. The native tree, telescope, and its branch
 -- brand remain in the opaque evidence for the future in-process search.
