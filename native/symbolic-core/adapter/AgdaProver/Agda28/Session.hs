@@ -17,7 +17,7 @@ module AgdaProver.Agda28.Session
   , Refutation.Kind (..)
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
-  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, proposeTerms, proposeStructures, proposeConstructors, applyTerm
+  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, proposeTerms, proposeStructures, proposeEquations, proposeConstructors, applyTerm
   , ClauseMove, clauseMoveGoal, clauseMoveIsBatch, applyClauseMove, ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
@@ -554,6 +554,19 @@ proposeStructures :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Mod
                   -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
                   -> IO (Search.SearchStats, Either Failure (TermProposals s))
 proposeStructures = proposeTermsUsing Search.structuralProposals
+
+proposeEquations :: [GoalRef s] -> Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
+                 -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
+                 -> IO (Search.SearchStats, Either Failure (TermProposals s))
+proposeEquations later session goal = proposeTermsUsing generate session goal
+ where
+  generate stats limits models mode native emit namespace excluded owner point target = do
+    available <- openInteractionPoints
+    if any (\ref -> stateKey (goalState ref) /= stateKey (goalState goal)
+          || goalId ref `notElem` available) later
+      then genericError "native-observation-goal-state-mismatch"
+      else Search.equationProposals (map goalId later) stats limits models mode native emit
+        namespace excluded owner point target
 
 proposeConstructors :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
                     -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())

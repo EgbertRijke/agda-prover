@@ -349,6 +349,26 @@ runs as part of `start-step`; one-step editing still exposes its children.
 Constructor-headed applications and record literals also share the existing
 construction-priority tier, with model order retained within that tier.
 
+Joint search can propose defining clauses from a contiguous block of later
+selected computation statements. It inspects native type applications for an
+owner application at one endpoint, converts its operands with Agda's own
+term-to-pattern operation, and retains the other endpoint as a structured RHS.
+Constructor/literal patterns must be linear, captured variables must belong to
+the current context, and referenced declarations must be available at the
+definition site. This does not recognize a particular relation or assume its
+laws; every proposed definition and every selected statement still needs proof.
+Agda decides coverage, dependent indices and source-owner termination.
+
+These proposals precede later constructor probes, which could otherwise turn
+the useful computation statements into suspended constraints before the
+definition is constructed. Other alternatives remain available. Source order
+is preserved independently of agenda order; unselected goals are not consulted.
+Unsupported pattern forms fall back to ordinary search. Observation work is
+charged, drafts retain their state and allocation identities, and the existing
+`evidence_macro=false` switch disables this whole-search path. One-step editing
+does not run it. This restores an existing joint-search capability in native
+form; it does not establish whole-workload qualification or change the default.
+
 Recursive calls use the enclosing source definition and Agda's checked clause
 patterns. The current mutual group is never ordinary evidence. Dedicated calls
 can use direct descendants, function-valued children and reconstructed wrappers;

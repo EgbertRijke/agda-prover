@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.EvidenceSearch (run, runHelper, primitiveProposals, structuralProposals, constructorProposals, clauseProposals, Result (..)) where
+module AgdaProver.Agda28.EvidenceSearch (run, runHelper, primitiveProposals, structuralProposals, equationProposals, constructorProposals, clauseProposals, Result (..)) where
 
 import Control.Monad (forM)
 import Control.Monad.Except (catchError, runExceptT, throwError)
@@ -49,6 +49,7 @@ import Agda.Utils.Impossible (impossible)
 import AgdaProver.Symbolic.Evidence
 import AgdaProver.Symbolic.Agenda qualified as Agenda
 import AgdaProver.Agda28.Construction qualified as Construction
+import AgdaProver.Agda28.ObservedEquations qualified as ObservedEquations
 import AgdaProver.Agda28.Recursion qualified as Recursion
 import AgdaProver.Agda28.Scheduling qualified as Scheduling
 import AgdaProver.Agda28.PolicyViews qualified as PolicyViews
@@ -433,6 +434,32 @@ structuralProposals stats limits models mode native emit namespace excluded owne
                 _ -> 0 }
             if available then pure () else genericError "native-construction-allowance-spent")
           (Set.union forbiddenHere inherited) target
+  pure [(expression, []) | expression <- maybe [] pure proposal]
+
+-- Typed clause candidates from selected later statements. They remain drafts;
+-- source-owner termination and all subsequent goals still require checking.
+equationProposals :: [InteractionId] -> IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
+                  -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> [String]
+                  -> Maybe Recursion.Owner -> InteractionId -> I.Type
+                  -> TCM [(A.Expr, [(T.Text, T.Text)])]
+equationProposals later stats limits models mode native emit namespace excluded owner point _ = do
+  pruned <- liftIO $ newIORef False
+  let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
+  proposal <- attempt runtime $ case owner of
+    Nothing -> pure Nothing
+    Just root -> do
+      direct <- Recursion.owner point
+      (forbiddenHere, userExcluded) <- excludedGlobals excluded
+      inherited <- Recursion.ownerGroup root
+      variable <- lookupLocalMeta =<< lookupInteractionId point
+      case mvInstantiation variable of
+        InstV{} -> pure Nothing
+        _ | fmap Recursion.ownerName direct == Just (Recursion.ownerName root)
+          , not $ Set.member (Recursion.ownerName root) userExcluded ->
+            ObservedEquations.propose
+              (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
+              (Set.union forbiddenHere inherited) (Recursion.ownerName root) point later
+        _ -> pure Nothing
   pure [(expression, []) | expression <- maybe [] pure proposal]
 
 -- A cheap target-directed slice for other selected joint obligations. It does

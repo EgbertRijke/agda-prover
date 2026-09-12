@@ -193,7 +193,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
         (termCost, atomicTerms) <- S.proposeTerms session goal budget (models settings)
           (ranking settings) native (excluded settings) trace
         recordSearch termCost
-        terms <- case atomicTerms of
+        constructedTerms <- case atomicTerms of
           Right (S.CompleteTerms originals) | evidenceMacro settings -> do
             compoundBudget <- moveAllowance
             (compoundCost, structures) <- S.proposeStructures session goal compoundBudget (models settings)
@@ -203,10 +203,25 @@ advance native count run@(Run session settings initial baseline metrics owner tr
               Right (S.CompleteTerms additions) -> Right $ S.CompleteTerms $ additions ++ originals
               other -> other
           other -> pure other
-        case terms of
-          Left failure -> pure $ Left failure
-          Right S.CensoredTerms{} -> pure $ Right N.PlanningCensored
-          Right (S.CompleteTerms termMoves) -> do
+        equations <- case constructedTerms of
+          Right S.CompleteTerms{} | evidenceMacro settings ->
+            case traverse (S.restoreGoalReference session (S.stateKey state) . fromIntegral)
+                (drop 1 $ pendingGoals obligations) of
+              Left failure -> pure $ Left failure
+              Right [] -> pure $ Right $ S.CompleteTerms []
+              Right later -> do
+                equationBudget <- moveAllowance
+                (equationCost, proposals) <- S.proposeEquations later session goal equationBudget
+                  (models settings) (ranking settings) native (excluded settings) trace
+                recordSearch equationCost
+                pure proposals
+          _ -> pure $ Right $ S.CompleteTerms []
+        case (constructedTerms, equations) of
+          (Left failure, _) -> pure $ Left failure
+          (_, Left failure) -> pure $ Left failure
+          (Right S.CensoredTerms{}, _) -> pure $ Right N.PlanningCensored
+          (_, Right S.CensoredTerms{}) -> pure $ Right N.PlanningCensored
+          (Right (S.CompleteTerms termMoves), Right (S.CompleteTerms equationMoves)) -> do
             remaining <- allowance
             if remaining == Just 0 then pure $ Right N.PlanningCensored else do
               nextBudget <- moveAllowance
@@ -227,7 +242,10 @@ advance native count run@(Run session settings initial baseline metrics owner tr
                     Left failure -> Left failure
                     Right S.CensoredTerms{} -> Right N.PlanningCensored
                     Right (S.CompleteTerms closures) -> Right $ N.Moves $
-                      A.rankedProposals 0 (map N.Term $ closures ++ termMoves)
+                      -- An explicit clause block preserves the selected
+                      -- specification's information before constructor probes
+                      -- can consume its goals into suspended constraints.
+                      A.rankedProposals 0 (map N.Term $ equationMoves ++ closures ++ termMoves)
                       ++ A.rankedProposals (structuralDelay settings)
                             [N.PlannedClause action | (action, _) <- clauseMoves,
                               multiSubjectClauses settings || not (S.clauseMoveIsBatch action)]
