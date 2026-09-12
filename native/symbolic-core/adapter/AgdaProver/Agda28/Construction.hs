@@ -9,6 +9,7 @@ module AgdaProver.Agda28.Construction
 import Control.Monad (filterM, forM)
 import Control.Monad.Except (catchError, throwError)
 import Data.Maybe (catMaybes)
+import Data.Monoid (Any (..))
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -37,6 +38,7 @@ import Agda.TypeChecking.Reduce (instantiateFull, reduce)
 import Agda.TypeChecking.Rules.Term (checkExpr, inferExpr')
 import Agda.TypeChecking.Substitute (apply, absApp, raise)
 import Agda.Utils.Null (empty)
+import AgdaProver.Agda28.ClauseExecution qualified as ClauseExecution
 
 -- A shallow constructor context for an actual argument domain. Only native
 -- names and field metadata escape telescope inspection, never types containing
@@ -52,30 +54,31 @@ argumentWrappers charge forbidden = domains 0
   domains index ty = charge >>= \allowed ->
     if not allowed then pure [] else reduce ty >>= \case
       I.El _ (I.Pi domain body) -> do
-        wrapper <- inspect $ I.unDom domain
+        wrapper <- argumentWrapper charge forbidden $ I.unDom domain
         rest <- underAbstraction domain body $ domains (index + 1)
         pure $ maybe rest (\value -> (index, value):rest) wrapper
       _ -> pure []
-  inspect :: I.Type -> TCM (Maybe ArgumentWrapper)
-  inspect ty = charge >>= \allowed ->
-    if not allowed then pure Nothing else reduce ty >>= \case
-      I.El _ (I.Def family _) -> do
-        definition <- getConstInfo family
-        scope <- getScope
-        let available name = isNameInScope name scope && not (Set.member name forbidden)
-        case theDef definition of
-          Datatype { dataCons = [name] } | available name ->
-            getConstInfo name >>= \entry -> pure $ case theDef entry of
-              Constructor { conArity = arity } | arity > 0 -> Just $ ConstructorWrapper name arity
-              _ -> Nothing
-          RecordDefn record
-            | _recInduction record /= Just CoInductive
-            , not $ Set.member (I.conName $ _recConHead record) forbidden
-            , all (available . I.unDom) (_recFields record) ->
-                pure $ Just $ RecordWrapper
-                  [(I.unDom field, getArgInfo field) | field <- recordFieldNames record]
-          _ -> pure Nothing
-      _ -> pure Nothing
+
+argumentWrapper :: TCM Bool -> Set.Set QName -> I.Type -> TCM (Maybe ArgumentWrapper)
+argumentWrapper charge forbidden ty = charge >>= \allowed ->
+  if not allowed then pure Nothing else reduce ty >>= \case
+    I.El _ (I.Def family _) -> do
+      definition <- getConstInfo family
+      scope <- getScope
+      let available name = isNameInScope name scope && not (Set.member name forbidden)
+      case theDef definition of
+        Datatype { dataCons = [name] } | available name ->
+          getConstInfo name >>= \entry -> pure $ case theDef entry of
+            Constructor { conArity = arity } | arity > 0 -> Just $ ConstructorWrapper name arity
+            _ -> Nothing
+        RecordDefn record
+          | _recInduction record /= Just CoInductive
+          , not $ Set.member (I.conName $ _recConHead record) forbidden
+          , all (available . I.unDom) (_recFields record) ->
+              pure $ Just $ RecordWrapper
+                [(I.unDom field, getArgInfo field) | field <- recordFieldNames record]
+        _ -> pure Nothing
+    _ -> pure Nothing
 
 -- Focused introductions ending in a visible nullary constructor. These are
 -- proposals, not assertions that a dependent result index matches. Checking
@@ -113,9 +116,10 @@ constructorClosures charge forbidden target = charge >>= \allowed ->
 -- explicit goals; the ordinary agenda retains all alternatives. Each hole is
 -- created in its native context, and the finished draft is kernel-checked.
 -- This is not used by the cheap later-goal constructor-closure probe.
-constructionScaffold :: TCM Bool -> TCM Bool -> Set.Set QName -> I.Type -> TCM (Maybe A.Expr)
-constructionScaffold inspect charge forbidden target = do
-  (expression, introduced) <- build Map.empty target
+constructionScaffold :: TCM Bool -> TCM Bool -> (ClauseExecution.PreparationStep -> TCM ())
+                     -> Set.Set QName -> I.Type -> TCM (Maybe A.Expr)
+constructionScaffold inspect charge clauseStep forbidden target = do
+  (expression, introduced) <- build Map.empty Set.empty target
   pure $ if introduced then Just expression else Nothing
  where
   hole ty = do
@@ -124,7 +128,7 @@ constructionScaffold inspect charge forbidden target = do
     let expression = A.QuestionMark (Info.emptyMetaInfo { Info.metaScope = scope }) point
     value <- check expression ty
     pure (expression, value)
-  build seen ty = do
+  build seen inputs ty = do
     allowed <- inspect
     if not allowed then genericError "native-construction-allowance-spent"
     -- This eager optimization needs an established dependent type. Expanding
@@ -134,7 +138,7 @@ constructionScaffold inspect charge forbidden target = do
     -- those indices, and a later invocation can build their resolved shape.
     -- Inspect the native tree before reducing/instantiating it; this is not a
     -- size limit or a rejection of the branch's mathematical goal.
-    else if not (noMetas ty) then unresolved ty else reduce ty >>= \case
+    else if not (noMetas ty) then unresolved inputs ty else reduce ty >>= \case
       I.El _ (I.Pi domain body) -> do
         let hint = if I.absName body `elem` ["", "_"] then "x" else I.absName body
         withFreshName noRange hint $ \name -> do
@@ -143,7 +147,7 @@ constructionScaffold inspect charge forbidden target = do
           -- lambda, including hidden/instance binders and captured prefixes.
           (expression, _) <- addContext (name, domain) $
             locallyScope scopeLocals ((A.nameConcrete name, LocalVar name LambdaBound []) :) $
-              build seen (absApp (raise 1 body) $ I.Var 0 [])
+              build seen (Set.insert name inputs) (absApp (raise 1 body) $ I.Var 0 [])
           pure (A.Lam exprNoRange
             (A.mkDomainFree $ Arg (getArgInfo domain) $ unnamed $ A.mkBinder_ name) expression, True)
       normalHead@(I.El _ (I.Def family _))
@@ -155,9 +159,9 @@ constructionScaffold inspect charge forbidden target = do
           RecordDefn record | _recInduction record /= Just CoInductive ->
             recordPlan forbidden ty >>= \case
               Just (names, telescope) -> do
-                assignments <- fields next names telescope
+                assignments <- fields next inputs names telescope
                 pure (recordExpression assignments, True)
-              Nothing -> unresolved ty
+              Nothing -> unresolved inputs ty
           Datatype { dataCons = names } -> do
             scope <- getScope
             compatible <- filterM (\name -> localTCState $
@@ -166,19 +170,56 @@ constructionScaffold inspect charge forbidden target = do
             case compatible of
               [name] -> do
                 (expression, holes) <- prepare name ty
-                completed <- fill next expression holes Map.empty
+                completed <- fill next inputs expression holes Map.empty
                 pure (completed, True)
-              _ -> unresolved ty
-          _ -> unresolved ty
-      _ -> unresolved ty
-  unresolved ty = do
+              _ -> unresolved inputs ty
+          _ -> unresolved inputs ty
+      _ -> unresolved inputs ty
+  unresolved inputs ty = do
     uniqueLocal charge ty >>= \case
       Just expression -> pure (expression, True)
       Nothing -> do
-        (expression, _) <- hole ty
-        pure (expression, False)
-  checked seen ty = do
-    (expression, _) <- build seen ty
+        projected <- uniqueProjection inputs ty
+        case projected of
+          Just expression -> pure (expression, True)
+          Nothing -> do
+            (expression, _) <- hole ty
+            pure (expression, False)
+  -- A single-constructor input may contain the desired leaf even when it has
+  -- no projection function. Reuse Agda's case operation and the shared local
+  -- completion check; do not synthesize patterns or infer field types here.
+  -- Only one shallow elimination is tried per introduced argument; ambient
+  -- inputs belong to ordinary shared elimination. Projecting an ambient
+  -- field separately can hide its connection to dependent sibling operands.
+  -- The introduction's native binding identities distinguish these cases.
+  -- Ambiguous results
+  -- remain for the ordinary agenda. Completion does not recurse into this rule.
+  uniqueProjection inputs ty | Set.null inputs || not (noMetas ty) = pure Nothing
+  uniqueProjection inputs ty = do
+    context <- getContext
+    matches <- fmap catMaybes $ forM
+      [(index, entry) | (index, entry) <- zip [0..] context,
+        Set.member (ctxEntryName entry) inputs] $ \(index, entry) -> do
+      candidate <- preservingAllocations $ (do
+        subjectType <- typeOfBV index
+        wrapper <- argumentWrapper inspect forbidden subjectType
+        case wrapper of
+          Nothing -> pure Nothing
+          Just _ -> do
+            (expression, _) <- hole ty
+            case expression of
+              A.QuestionMark _ point -> do
+                draft <- ClauseExecution.prepare clauseStep point $
+                  ClauseExecution.BoundSubjects (ctxEntryName entry :| [])
+                completeLocalOperands inspect charge draft ty
+              _ -> pure Nothing) `catchError` (\case
+                TypeError{} -> pure Nothing
+                PatternErr{} -> pure Nothing
+                problem -> throwError problem)
+      pure candidate
+    pure $ case matches of [expression] -> Just expression; _ -> Nothing
+  checked seen inputs ty = do
+    (expression, _) <- build seen inputs ty
     value <- check expression ty
     pure (expression, value)
   prepare name ty = do
@@ -208,29 +249,29 @@ constructionScaffold inspect charge forbidden target = do
           (holes ++ [(point, value, getHiding domain)])
         _ -> genericError "native-constructor-hole-unavailable"
     _ -> pure (expression, holes, ty)
-  fill _ expression [] completed = traverseExpr (\case
+  fill _ _ expression [] completed = traverseExpr (\case
     old@(A.QuestionMark _ point) -> pure $ Map.findWithDefault old point completed
     old -> pure old) expression
-  fill seen expression ((point, value, visibility):rest) completed = do
+  fill seen inputs expression ((point, value, visibility):rest) completed = do
     resolved <- instantiateFull value
     if noMetas resolved then do
       supplied <- reify resolved
-      fill seen expression rest (Map.insert point supplied completed)
-    else if visibility /= NotHidden then fill seen expression rest completed
+      fill seen inputs expression rest (Map.insert point supplied completed)
+    else if visibility /= NotHidden then fill seen inputs expression rest completed
     else do
       ty <- getMetaTypeInContext =<< lookupInteractionId point
-      (supplied, _) <- build seen =<< instantiateFull ty
+      (supplied, _) <- build seen inputs =<< instantiateFull ty
       allowed <- charge
       if not allowed then genericError "native-construction-allowance-spent" else do
         _ <- give_ False WithoutForce point Nothing supplied
-        fill seen expression rest (Map.insert point supplied completed)
-  fields _ [] I.EmptyTel = pure []
-  fields seen (name:names) (I.ExtendTel domain body) = do
-    (expression, value) <- if visible domain then checked seen (I.unDom domain)
+        fill seen inputs expression rest (Map.insert point supplied completed)
+  fields _ _ [] I.EmptyTel = pure []
+  fields seen inputs (name:names) (I.ExtendTel domain body) = do
+    (expression, value) <- if visible domain then checked seen inputs (I.unDom domain)
       else hole (I.unDom domain)
-    rest <- fields seen names (absApp body value)
+    rest <- fields seen inputs names (absApp body value)
     pure $ (name, expression):rest
-  fields _ _ _ = genericError "native-record-telescope-mismatch"
+  fields _ _ _ _ = genericError "native-record-telescope-mismatch"
 
 -- A local is unambiguous only under Agda conversion without new constraints
 -- or meta assignments. Distinct inhabitants of one type remain alternatives.
@@ -259,28 +300,37 @@ uniqueLocal charge ty
 -- Only a closed native expression escapes this transaction. The caller keeps
 -- the original open proposal and still checks/validates any completed one.
 completeLocalOperands :: TCM Bool -> TCM Bool -> A.Expr -> I.Type -> TCM (Maybe A.Expr)
-completeLocalOperands inspect charge expression target = do
-  (result, names, points) <- localTCState $ do
-    allowed <- charge
-    result <- if not allowed then pure Nothing else do
-      value <- checkExpr expression target
-      complete value $ Set.toList $ foldExpr (\case
-        A.QuestionMark _ point -> Set.singleton point
-        _ -> Set.empty) expression
-    names <- useTC stFreshNameId
-    points <- useTC stFreshInteractionId
-    pure (result, names, points)
-  -- Reification may introduce bound names. Keep their allocation watermark,
-  -- never the speculative checking state, alive in the surrounding catalogue.
-  stFreshNameId `modifyTCLens` max names
-  stFreshInteractionId `modifyTCLens` max points
-  pure result
+completeLocalOperands inspect charge expression target = preservingAllocations $ do
+  allowed <- charge
+  if not allowed then pure Nothing else do
+    value <- checkExpr expression target
+    complete value $ Set.toList $ foldExpr (\case
+      A.QuestionMark _ point -> Set.singleton point
+      _ -> Set.empty) expression
  where
   complete value points = do
     allowed <- inspect
     if not allowed then pure Nothing else do
       resolved <- instantiateFull value
-      if noMetas resolved then Just <$> reify resolved else do
+      if noMetas resolved && not retainsHelpers then Just <$> reify resolved
+      else if null points then if not (noMetas resolved) then pure Nothing else do
+        -- Reifying only the result can leave references to temporary helper
+        -- definitions after rollback. Keep the original scoped syntax and
+        -- reify each solved hole in its own checked context. Editor-oriented
+        -- blanking of names outside the old scope would erase newly exposed
+        -- pattern variables. Native names, not their spellings, bind the draft.
+        Just <$> traverseExpr (\case
+          A.QuestionMark _ point -> withInteractionId point $ do
+            meta <- lookupInteractionId point
+            arguments <- getContextArgs
+            supplied <- instantiateFull $ I.MetaV meta $ map I.Apply arguments
+            if noMetas supplied then reify supplied
+              else genericError "native-local-completion-incomplete-solution"
+          part -> pure part) expression
+      else do
+        -- A checked head can be a fresh helper definition whose body still
+        -- contains interaction holes. noMetas on its application does not
+        -- inspect that body. Retire the draft's holes before reifying it.
         retired <- forM points $ \point -> lookupInteractionMeta point >>= \case
           Nothing -> pure False -- Postponed elaboration has not connected it.
           Just meta -> do
@@ -299,6 +349,25 @@ completeLocalOperands inspect charge expression target = do
         let remaining = [point | (point, False) <- zip points retired]
         if length remaining == length points then pure Nothing
           else complete value remaining
+  -- Ordinary application values can be reified directly, including Agda's
+  -- omission of inferred operands. Extended lambdas introduce declarations:
+  -- their checked Def head alone is not a self-contained replayable term.
+  retainsHelpers = getAny $ foldExpr (\case
+    A.ExtendedLam{} -> Any True
+    _ -> Any False) expression
+
+-- Reified drafts can bind freshly allocated names. Retain only their small
+-- allocation watermarks, never the speculative checking state or assignments.
+preservingAllocations :: TCM a -> TCM a
+preservingAllocations action = do
+  (result, names, points) <- localTCState $ do
+    result <- action
+    names <- useTC stFreshNameId
+    points <- useTC stFreshInteractionId
+    pure (result, names, points)
+  stFreshNameId `modifyTCLens` max names
+  stFreshInteractionId `modifyTCLens` max points
+  pure result
 
 -- The telescope comes from Agda, already instantiated with this record's
 -- parameters. Search substitutes checked field values into it, never names or

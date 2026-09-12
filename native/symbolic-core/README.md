@@ -311,6 +311,24 @@ or growing families do not cause unbounded scaffold generation. This is a
 proposal termination guard, not an assertion about Agda termination or logical
 impossibility. Original alternatives remain available.
 
+An unresolved leaf can also use a shallow projection from an argument introduced
+by this same compound construction, with a single-constructor datatype or
+inductive record. Agda generates the case
+clauses and checks the exposed fields' instantiated types; no projection
+function has to be declared beforehand. Only an unambiguous local completion
+is retained by this compound action. Multiple possible fields or containers
+remain ordinary search choices. This does not recursively enumerate case
+trees or treat coinductive records as inductive data.
+Ambient inputs stay with ordinary shared elimination, so this shortcut does
+not independently project one field ahead of dependent sibling operands.
+
+Completed clause helpers retain their native declarations and scoped hole
+solutions. A meta-free helper application alone is insufficient: its body
+may still contain obligations, and its generated name cannot survive checking
+rollback without the declaration. Ordinary application values keep Agda's
+usual reification. All speculative checking and case generation are charged;
+source export, replay and independent validation remain required.
+
 Each generated function binder extends both Agda's typed context and its local
 syntactic scope with the same native identity. Nested holes therefore retain
 usable explicit, hidden and instance names, including function-valued record

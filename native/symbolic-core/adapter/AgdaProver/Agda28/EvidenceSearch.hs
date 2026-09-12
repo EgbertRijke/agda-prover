@@ -426,6 +426,12 @@ structuralProposals stats limits models mode native emit namespace excluded owne
         _ -> Construction.constructionScaffold
           (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
           (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 })
+          (\step -> do
+            available <- charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1,
+              helperClauseQueries = helperClauseQueries s + case step of
+                ClauseExecution.GenerateClauses -> 1
+                _ -> 0 }
+            if available then pure () else genericError "native-construction-allowance-spent")
           (Set.union forbiddenHere inherited) target
   pure [(expression, []) | expression <- maybe [] pure proposal]
 
