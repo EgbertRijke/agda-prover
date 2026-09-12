@@ -19,7 +19,7 @@ import Agda.Syntax.Abstract.Views (deepUnscope, foldExpr, mapExpr)
 import Agda.Syntax.Common (InteractionId)
 import Agda.Syntax.Common.Pretty (prettyShow)
 import Agda.Syntax.Internal qualified as I
-import Agda.Syntax.Position (Range, getRange)
+import Agda.Syntax.Position (Range, getRange, fuseRange)
 import Agda.Syntax.Scope.Base
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Pretty (prettyTCM)
@@ -44,14 +44,12 @@ render charge point expression = withInteractionId point $ do
   else case ipClause interaction of
     IPNoClause -> genericError "native-source-hidden-binder-without-clause"
     IPClause _ _ ty sub original closure -> do
-      -- Do not replace surrounding record fields, local lambdas, where blocks
-      -- or sibling goals with a generated clause. Direct term edits still work
+      -- Do not replace surrounding record fields, local lambdas or sibling
+      -- goals with a generated clause. Direct term edits still work
       -- in those contexts; wider authorized edits belong to format integration.
       case A.clauseRHS original of
         A.RHS rhs _ | A.QuestionMark _ p <- deepUnscope rhs, p == point -> pure ()
         _ -> genericError "native-source-exposure-requires-whole-clause-hole"
-      unless (A.clauseWhereDecls original == A.noWhereDecls) $
-        genericError "native-source-exposure-has-where-declarations"
       names <- forM missing $ \(index, _) -> prettyShow <$> prettyTCM (I.var index)
       charge
       (name, variant, generated) <- makeCase point (ipRange interaction) (unwords names)
@@ -73,10 +71,14 @@ render charge point expression = withInteractionId point $ do
             A.Var old -> A.Var $ Map.findWithDefault old old renaming
             A.ScopedExpr _ inner -> inner
             e -> e) expression
-          completed = clause { A.clauseRHS = A.RHS rhs Nothing }
+          -- The source keeps its original where block, including comments and
+          -- scopes. Only the LHS and selected RHS are rendered/replaced.
+          completed = clause { A.clauseRHS = A.RHS rhs Nothing,
+            A.clauseWhereDecls = A.noWhereDecls }
       telescope <- lookupSection $ qnameModule name
       printed <- inTopContext $ addContext telescope $ prettyAUnqualify completed
-      pure $ Clause (getRange original) (ipRange interaction) $ prettyShow printed
+      pure $ Clause (fuseRange (getRange $ A.clauseLHS original) $ ipRange interaction)
+        (ipRange interaction) $ prettyShow printed
 
 view :: Snapshot -> Value
 view snapshot = object $

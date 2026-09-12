@@ -68,11 +68,7 @@ def _source_edit(
         # Check whole-declaration edit boundaries, not every cheap ownership
         # lookup. An expression's internal record field is not a clause even
         # if its line happens to have the shape "name = hole".
-        visible = mask_comments_and_strings(source)
-        if "```" in visible:
-            literate = mask_literate_markdown(visible)
-            if literate[start_offset:end_offset].strip():
-                visible = literate
+        visible = _visible_source(source, start_offset, end_offset)
         if visible[:start_offset].strip():
             split_top_level_application(visible[:start_offset])
     edit: dict[str, Any] = {
@@ -89,6 +85,29 @@ def _source_edit(
     if layout is not None:
         edit["layout"] = layout
     return edit
+
+
+def _visible_source(source: str, start: int, end: int) -> str:
+    """Lexical edit guard in full-file context, not Agda parsing authority.
+
+    Whole-file context matters when a joint range starts inside a Markdown
+    fence and crosses prose before another fence. Masking the fragment alone
+    reverses those fence boundaries. Source selection and fresh Agda checking
+    remain authoritative, as with the existing whole-declaration guard.
+    """
+    visible = mask_comments_and_strings(source)
+    if "```" in visible:
+        literate = mask_comments_and_strings(mask_literate_markdown(source))
+        if literate[start:end].strip():
+            return literate
+    return visible
+
+
+def _replacement_has_holes(source: str, start: int, end: int, replacement: str) -> bool:
+    candidate = source[:start] + replacement + source[end:]
+    new_end = start + len(replacement)
+    visible = _visible_source(candidate, start, new_end)[start:new_end]
+    return re.search(r"\{![\s\S]*?!\}|(?<![\w?])\?(?![\w?])", visible) is not None
 
 
 def _line_indentation(source: str, offset: int) -> tuple[int, int]:
@@ -289,16 +308,44 @@ def reconstruct_native_completion(
         or not 0 <= span[0] <= hole_start < hole_end <= span[1] <= len(source)
     ):
         raise ValueError("invalid native clause range")
-    # Keep the established lexical whole-clause authorization in this first
-    # handoff. Multiline/extended-lambda clause ranges are a separate format
-    # integration; never widen a refused edit heuristically.
-    patch = reconstruct_case_split(source, goal, [body])
-    edit_start, edit_end = patch["source_range"]
-    if not edit_start - 1 <= span[0] <= span[1] <= edit_end - 1:
-        raise ValueError("native clause requires wider source authorization")
+    # Agda owns the original clause boundary and has checked that its whole RHS
+    # is this hole. Preserve that boundary across multiline heads instead of
+    # guessing the declaration from the hole's physical line. Lexical guards
+    # below reject widened, embedded or multi-declaration edits even before the
+    # reconstructed source is independently checked.
+    if span[1] != hole_end or not _is_hole(source[hole_start:hole_end]):
+        raise ValueError("native clause does not end at the selected whole RHS")
+    line_start = source.rfind("\n", 0, span[0]) + 1
+    indentation = source[line_start : span[0]]
+    if indentation.strip():
+        raise ValueError("native clause begins inside an expression")
+    head = mask_comments_and_strings(source[span[0] : hole_start])
+    tokens = split_top_level_application(head)
+    if (
+        len(tokens) < 2
+        or tokens[-1] != "="
+        or tokens.count("=") != 1
+        or set(tokens).intersection({"λ", "let", "in", "record", ":", "where"})
+    ):
+        raise ValueError("native clause requires exactly one whole-clause hole")
     if re.search(r"\{![\s\S]*?!\}|(?<![\w?])\?(?![\w?])", body):
         raise ValueError("native clause retains a proof hole")
-    return patch
+    lines = body.rstrip().splitlines()
+    anchored = bool(indentation) and all(
+        not line or line.startswith(indentation) for line in lines
+    )
+    replacement = "\n".join(
+        indentation + line if line and not anchored else line for line in lines
+    )
+    return _source_edit(
+        source,
+        start_offset=line_start,
+        end_offset=hole_end,
+        replacement=replacement,
+        style="case-split",
+        binders=(),
+        body=replacement,
+    )
 
 
 def reconstruct_intro(source: str, goal: GoalInfo, preview: str) -> dict[str, Any]:
@@ -476,7 +523,7 @@ def reconstruct_joint_completion(
         raise ValueError("joint reconstruction must cover at least one goal")
     if not start_offset < cutoff_position <= end_offset:
         raise ValueError("joint reconstruction cutoff is outside its source range")
-    if re.search(r"\{![\s\S]*?!\}|\?", replacement):
+    if _replacement_has_holes(source, start_offset, end_offset, replacement):
         raise ValueError("joint reconstruction contains unresolved target holes")
     step_list = [dict(step) for step in steps]
     if not step_list:
@@ -562,7 +609,9 @@ def apply_source_edit(source: str, edit: dict[str, Any]) -> str:
     replacement = edit.get("replacement")
     if not isinstance(original, str) or not isinstance(replacement, str):
         raise ValueError("reconstruction text must be strings")
-    _validate_edit_shape(edit, original, replacement)
+    _validate_edit_shape(
+        edit, original, replacement, source=source, start=start - 1, end=end - 1
+    )
     if edit.get("style") == "joint-clauses":
         cutoff_position = edit.get("cutoff_position")
         if not (isinstance(cutoff_position, int) and start <= cutoff_position < end):
@@ -578,7 +627,15 @@ def apply_source_edit(source: str, edit: dict[str, Any]) -> str:
     return source[: start - 1] + replacement + source[end - 1 :]
 
 
-def _validate_edit_shape(edit: dict[str, Any], original: str, replacement: str) -> None:
+def _validate_edit_shape(
+    edit: dict[str, Any],
+    original: str,
+    replacement: str,
+    *,
+    source: str,
+    start: int,
+    end: int,
+) -> None:
     style = edit.get("style")
     binders = edit.get("binders")
     body = edit.get("body")
@@ -631,7 +688,7 @@ def _validate_edit_shape(edit: dict[str, Any], original: str, replacement: str) 
             raise ValueError("joint reconstruction has an invalid edit trace")
         if not re.search(r"\{![\s\S]*?!\}|\?", original):
             raise ValueError("joint reconstruction selects no proof holes")
-        if re.search(r"\{![\s\S]*?!\}|\?", replacement):
+        if _replacement_has_holes(source, start, end, replacement):
             raise ValueError("joint reconstruction contains unresolved target holes")
         return
     if style not in {"clause", "clause-intro"} or not binders:

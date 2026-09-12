@@ -340,15 +340,20 @@ substitution, constructor recognition or library-specific rules are involved.
 Exposure and its context check are charged in the session ledger. Rendering
 does not mutate input branches or count as independent validation.
 
-The current source consumer permits direct expression edits and exposed
-whole-clause holes with one-line original heads. It preserves module indentation
-and trailing comments and checks that native ranges match the selected source
-goal. Exposure in extended lambdas, nested RHS expressions, where declarations
-or wider multiline clause regions is explicitly refused; these require H8's
-remaining format/coordinate integration. The native evidence application uses
-this handoff before fresh validation; it no longer blindly inserts display text
-that can refer to inaccessible hidden binders. Model bytes and defaults are
-unchanged.
+The source consumer permits direct expression edits and exposed whole-clause
+holes with single- or multiline original heads. Agda supplies the LHS-through-RHS
+range; lexical guards reject embedded or multi-declaration replacement ranges.
+The renderer leaves original `where` declarations outside the edit, preserving
+their scopes and comments. Module indentation, trailing comments and neighboring
+mutual definitions stay intact. Joint edits across Markdown fences distinguish
+prose from actual unfinished Agda goals using full-file lexical context.
+
+Exposure inside extended-lambda branches or nested RHS expressions remains
+explicitly refused; direct expression edits still work there. These restrictions
+do not grant permission to hoist embedded declarations. Both existing supported
+file kinds (`.agda` and `.lagda.md`) use original character coordinates, not UTF-8
+byte offsets. Every handoff still needs independent fresh validation; model
+bytes and default selection are unchanged.
 
 ## Resident search runs
 
