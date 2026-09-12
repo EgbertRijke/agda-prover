@@ -46,11 +46,11 @@ class ProverApplication:
         progress_observer: PrincipalVariationObserver | None = None,
     ) -> ProverResult:
         if self.engine is not None:
-            if progress_observer is not None:
-                raise ValueError(
-                    "selected engine has not qualified principal-variation publication"
-                )
-            return self.engine.prove_prefix(task, session_factory=self.session_factory)
+            return self.engine.prove_prefix(
+                task,
+                session_factory=self.session_factory,
+                progress_observer=progress_observer,
+            )
         return prove_joint_prefix(
             task,
             session_factory=self.session_factory,

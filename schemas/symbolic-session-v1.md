@@ -399,6 +399,23 @@ nonnegative integers. It is distinct from a branch key. Every completed
 Old revisions are rejected as `stale-run`; retired handles as `unknown-run`.
 Foreign sessions and changed source epochs cannot resume the frontier.
 
+`search-cost` retains its read-only run/revision contract and additionally returns
+`frontier_size` and `principal`. The latter is null for no live frontier, otherwise
+`{state, priority, depth, pending, proof_authority:false}` for the next scheduled
+branch. Queued moves/continuations expose their parent without executing them.
+The lookup validates current source pins; it neither consumes a run revision nor
+changes agenda ordering. It does charge ordinary owner/source reads.
+
+The application can request these views between slices and use `export-goals`
+to reconstruct individually complete original goals. Consumed source holes with
+unfinished children do not become completion options. Preview export work is
+charged to the same session; there is no unmetered alternative proof search.
+The existing `agdaprover.principal-variation.v1` presentation stays provisional.
+Its `active_goal` remains null when the native view cannot identify the next
+action's source goal; interaction-number order is not used to guess it.
+Pause/resume/stop retain the existing application supervisor. Accepting one goal
+requires a separate fresh source check, not merely a checked native preview.
+
 `steps` is a nonnegative scheduling quantum; zero advances no search steps.
 Each `advance-search` supplies the total work allowance for the run, not an
 additional grant. Raising it retains all already spent work.

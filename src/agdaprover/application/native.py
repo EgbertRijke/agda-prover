@@ -32,6 +32,7 @@ from ..kernel.protocol import KernelSessionFactory
 from ..nnue import NNUEModel
 from ..observability.policy_trace import validated_proof_evidence
 from ..offline import assert_offline_configuration
+from ..principal_variation import PrincipalVariationObserver
 from ..project import choose_goal, choose_goal_prefix, require_agda_source_file
 from ..ranking.bundled import FOCUSED_MODEL, OR_MODEL
 from ..reconstruction import reconstruct_native_batch
@@ -48,6 +49,7 @@ from .native_refutation import (
     FILENAME,
     replay_source,
 )
+from .native_variation import native_principal_variation
 
 
 @dataclass(frozen=True)
@@ -80,12 +82,14 @@ class NativeProofEngine:
         *,
         session_factory: KernelSessionFactory,
         cancellation: CancellationToken | None = None,
+        progress_observer: PrincipalVariationObserver | None = None,
     ) -> ProverResult:
         return self._prove(
             task,
             session_factory=session_factory,
             cancellation=cancellation,
             prefix=True,
+            progress_observer=progress_observer,
         )
 
     def _prove(
@@ -95,6 +99,7 @@ class NativeProofEngine:
         session_factory: KernelSessionFactory,
         cancellation: CancellationToken | None,
         prefix: bool,
+        progress_observer: PrincipalVariationObserver | None = None,
     ) -> ProverResult:
         started = time.monotonic()
         source = task.source_file.resolve()
@@ -248,6 +253,7 @@ class NativeProofEngine:
                         project,
                         tuple(g.goal_id for g in targets),
                         action_limit=task.max_candidates,
+                        principal_variations=progress_observer is not None,
                         **arguments,
                     )
                 else:
@@ -282,6 +288,22 @@ class NativeProofEngine:
                             "native evidence uses unpinned models"
                         )
                     status = outcome.get("status")
+                    if status == "principal-variation":
+                        if progress_observer is None:
+                            raise SymbolicProtocolError(
+                                "unexpected native principal variation"
+                            )
+                        progress_observer(
+                            native_principal_variation(
+                                outcome,
+                                task_id=result.task_id,
+                                source_file=source,
+                                source_sha256=result.source_hash,
+                                targets=targets,
+                                original_source=source.read_bytes().decode("utf-8"),
+                            )
+                        )
+                        continue
                     if status == "paused" and outcome.get("reason") in {
                         "allowance-spent",
                         "action-allowance-spent",

@@ -5,7 +5,7 @@
 -- adapter alone observes, checks and reconstructs them.
 module AgdaProver.Symbolic.Agenda
   ( Agenda, Proposal (..), Inspection (..), Transition (..), Outcome (..)
-  , Event (..), Hooks (..), rankedProposals, start, pending, step ) where
+  , Event (..), Hooks (..), rankedProposals, start, pending, principal, step ) where
 
 import Data.Map.Strict qualified as Map
 import Data.List (foldl')
@@ -61,6 +61,18 @@ start state = insert 0 (Inspect state []) $ Agenda 0 Map.empty
 
 pending :: Agenda state action continuation -> Int
 pending (Agenda _ queue) = Map.size queue
+
+-- Read-only presentation of the next scheduled branch, not a solved path.
+-- Queued applications and continuations expose their parent without forcing
+-- the operation or invoking a checker. Proof authority remains elsewhere.
+principal :: Agenda state action continuation -> Maybe (state, Natural, Natural)
+principal (Agenda _ queue) = do
+  ((priority, _), work) <- Map.lookupMin queue
+  let position state ancestors = (state, priority, fromIntegral $ length ancestors)
+  pure $ case work of
+    Inspect state ancestors -> position state ancestors
+    Apply state _ ancestors -> position state ancestors
+    Resume state _ ancestors -> position state ancestors
 
 insert :: Natural -> Work state action continuation -> Agenda state action continuation
        -> Agenda state action continuation

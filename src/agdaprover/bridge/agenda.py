@@ -28,6 +28,7 @@ def search_agenda(
     cancellation: CancellationToken,
     publish: Callable[[dict[str, Any]], None],
     quantum: int = 64,
+    principal_variations: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """Yield provisional exports, resuming after caller rejection.
 
@@ -37,6 +38,8 @@ def search_agenda(
     """
     if type(quantum) is not int or quantum <= 0:
         raise ValueError("native scheduling quantum must be positive")
+    if type(principal_variations) is not bool:
+        raise ValueError("native principal-variation switch must be boolean")
     if (
         not goal_ids
         or any(type(g) is not int or g < 0 for g in goal_ids)
@@ -67,6 +70,74 @@ def search_agenda(
         if current.get("status") != "ready":
             raise SymbolicProtocolError(f"native agenda could not start: {current}")
         models = current["cost"].get("models")
+
+        def variation() -> dict[str, Any]:
+            viewed = connection.request("search-cost", {"run": current["run"]}, publish)
+            snapshot = viewed["outcome"]
+            if (
+                snapshot.get("status") != "retained"
+                or snapshot.get("run") != current["run"]
+                or snapshot.get("goal_ids") != list(goal_ids)
+                or snapshot.get("cost", {}).get("models") != models
+            ):
+                raise SymbolicProtocolError("native principal snapshot changed its run")
+            principal = snapshot.get("principal")
+            exports = []
+            if principal is not None:
+                if (
+                    not isinstance(principal, dict)
+                    or not isinstance(principal.get("pending"), dict)
+                    or not isinstance(principal["pending"].get("goals"), list)
+                ):
+                    raise SymbolicProtocolError("malformed native principal snapshot")
+                for point in goal_ids:
+                    if point in principal["pending"]["goals"]:
+                        continue
+                    exported = connection.request(
+                        "export-goals",
+                        {
+                            "state": connection.root_state,
+                            "goal_ids": [point],
+                            "descendant": principal["state"],
+                        },
+                        publish,
+                    )["outcome"]
+                    if exported.get("status") == "accepted-blocked":
+                        continue
+                    if exported.get("status") == "rejected":
+                        if exported.get("reason") not in {
+                            "kernel-rejected",
+                            "kernel-blocked",
+                        }:
+                            raise SymbolicProtocolError(
+                                f"native preview export failed: {exported}"
+                            )
+                        # A consumed source hole can still have unfinished AND
+                        # children. That is not an individually complete proof.
+                        continue
+                    entries = exported.get("entries")
+                    if (
+                        exported.get("status")
+                        not in {"apparently-closed", "accepted-partial"}
+                        or not isinstance(entries, list)
+                        or len(entries) != 1
+                        or not isinstance(entries[0], dict)
+                        or entries[0].get("goal_id") != point
+                    ):
+                        raise SymbolicProtocolError(
+                            "native preview changed its source goal"
+                        )
+                    exports.extend(entries)
+            return {
+                "outcome": {
+                    "status": "principal-variation",
+                    "snapshot": snapshot,
+                    "entries": exports,
+                }
+            }
+
+        if principal_variations:
+            yield variation()
         while True:
             reply = connection.request(
                 "advance-search",
@@ -82,6 +153,12 @@ def search_agenda(
                     "native agenda changed its selection or models"
                 )
             status = current.get("status")
+            if (
+                principal_variations
+                and "run" in current
+                and status in {"paused", "candidate"}
+            ):
+                yield variation()
             refutation = current.get("refutation")
             if refutation is not None and (
                 not isinstance(refutation, dict)

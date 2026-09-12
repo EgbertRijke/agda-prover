@@ -94,13 +94,24 @@ advance (Store session identity store) key@(Key nonce epoch number revision) qua
              "goal_ids" .= chosen, "proof_authority" .= False])
 
 snapshot :: Store s -> Key -> IO Value
-snapshot (Store _ identity store) key = withMVar store $ \(_, entries) ->
+snapshot (Store session identity store) key = withMVar store $ \(_, entries) ->
   case resolve identity entries key of
     Left reason -> pure $ rejected reason
-    Right (Entry _ _ _ chosen run) -> do
-      measured <- G.cost run
-      pure $ object ["status" .= ("retained" :: String), "run" .= key,
-        "goal_ids" .= chosen, "cost" .= measured]
+    Right (Entry _ root _ chosen run) -> S.pending session root >>= \case
+      Left failure -> pure $ failureView failure
+      Right _ -> do
+        let (size, focus) = G.frontier run
+        viewed <- case focus of
+          Nothing -> pure $ Right Null
+          Just (state, priority, depth) -> fmap (fmap $ \pending -> object
+            ["state" .= S.stateKey state, "priority" .= priority,
+             "depth" .= depth, "pending" .= pending, "proof_authority" .= False]) $
+            S.pending session state
+        measured <- G.cost run
+        pure $ either failureView (\principal -> object
+          ["status" .= ("retained" :: String), "run" .= key,
+           "goal_ids" .= chosen, "cost" .= measured, "principal" .= principal,
+           "frontier_size" .= size, "proof_authority" .= False]) viewed
 
 discard :: Store s -> Key -> IO Value
 discard (Store _ identity store) key@(Key _ _ number _) = modifyMVar store $ \(serial, entries) ->

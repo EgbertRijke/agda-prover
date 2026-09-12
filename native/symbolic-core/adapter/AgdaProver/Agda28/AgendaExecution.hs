@@ -4,7 +4,7 @@
 -- Coupled native moves beneath single/joint scheduling. The planner supplies
 -- alternatives; it never supplies a replacement typechecker or proof authority.
 module AgdaProver.Agda28.AgendaExecution
-  ( Move (..), Planning (..), Config (..), Queue, Outcome (..), Interruption (..), start, startSelected, step ) where
+  ( Move (..), Planning (..), Config (..), Queue, Outcome (..), Interruption (..), start, startSelected, frontier, step ) where
 
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
@@ -65,6 +65,11 @@ start state = A.start $ SearchState state Nothing []
 startSelected :: S.StateRef s -> [Int] -> [Int] -> Queue s
 startSelected state selected allGoals = A.start $
   SearchState state (Just $ Set.fromList selected) allGoals
+
+frontier :: Queue s -> (Int, Maybe (S.StateRef s, Natural, Natural))
+frontier queue = (A.pending queue, fmap unwrap $ A.principal queue)
+ where
+  unwrap (SearchState state _ _, priority, depth) = (state, priority, depth)
 
 step :: S.Session s -> Config s n -> Queue s -> IO (Outcome s)
 step session config queue = runExceptT (A.step hooks queue) >>= \case

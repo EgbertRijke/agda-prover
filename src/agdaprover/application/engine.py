@@ -6,15 +6,23 @@ from typing import Protocol
 
 from ..contracts import ProverResult, TaskSpec
 from ..kernel.protocol import KernelSessionFactory
+from ..principal_variation import PrincipalVariationObserver
 
 
 class SymbolicEngine(Protocol):
-    """Initial proof surface; step/PV qualification is still separate."""
+    """Coarse proof and provisional observation surface; never a checker callback."""
 
     def prove(
-        self, task: TaskSpec, *, session_factory: KernelSessionFactory
+        self,
+        task: TaskSpec,
+        *,
+        session_factory: KernelSessionFactory,
     ) -> ProverResult: ...
 
     def prove_prefix(
-        self, task: TaskSpec, *, session_factory: KernelSessionFactory
+        self,
+        task: TaskSpec,
+        *,
+        session_factory: KernelSessionFactory,
+        progress_observer: PrincipalVariationObserver | None = None,
     ) -> ProverResult: ...

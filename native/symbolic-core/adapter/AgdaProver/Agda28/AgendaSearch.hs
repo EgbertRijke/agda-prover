@@ -5,7 +5,7 @@
 -- Native controller. All source obligations remain coupled; source selection
 -- and final independent validation belong to the application boundary.
 module AgdaProver.Agda28.AgendaSearch
-  ( Run, Settings (..), Result (..), PauseReason (..), begin, beginSelection, advance, withLimits, withActionLimit, withObservers, cost ) where
+  ( Run, Settings (..), Result (..), PauseReason (..), begin, beginSelection, advance, withLimits, withActionLimit, withObservers, cost, frontier ) where
 
 import Control.Concurrent (MVar, newMVar, withMVar)
 import Data.Aeson (Value, object, (.=))
@@ -94,6 +94,9 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "action_limit" .= actionLimit settings,
     "model_items_scored" .= modelItems measured, "model_elapsed_ns" .= modelNanoseconds measured,
     "models" .= P.modelIdentities (models settings), "session_cost" .= physical]
+
+frontier :: Run s -> (Int, Maybe (S.StateRef s, Natural, Natural))
+frontier (Run _ _ queue _ _ _ _ _ _) = N.frontier queue
 
 -- A slice ends between native operations, retaining the exact queue. A coarse
 -- evidence attempt remains atomic: its censored retry is explicitly charged
