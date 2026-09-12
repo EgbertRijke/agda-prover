@@ -727,6 +727,16 @@ retain charged work. Discard is an idle work request; cancel an active advance
 first. Session snapshots/replay ancestry have their own explicit eviction/release lifecycle and
 are not all freed merely by discarding the frontier.
 
+The application bridge owns the fresh reconstruction branches returned by its
+`export-goals` requests. After copying the complete source/evidence views, it
+explicitly releases those temporary branches, in reverse construction order,
+before offering a candidate or preview to the application. The serialized
+evidence keys then describe provenance, not retained live handles; acceptance
+uses independent source validation. The search descendant and its alternatives
+are not released. Every cleanup request keeps its normal cost receipt. Raw
+session-protocol callers still control their own handles explicitly; neither
+`export-goals` nor `discard-search` implicitly releases their results.
+
 `search-progress` events are tagged with the **current advance request ID** and
 contain a `payload`: existing versioned NNUE traces, generic
 `agdaprover.symbolic-agenda-event.v1` events, or

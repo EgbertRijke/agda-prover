@@ -10,6 +10,7 @@ from ..resource_budget import ResourceLimitError
 from .contracts import BridgeBudget
 from .project import ResolvedProject
 from .resources import CancellationToken
+from .source_export import export_source_batch
 from .symbolic import SymbolicProtocolError, resident_session
 
 
@@ -120,14 +121,8 @@ def search_agenda(
                 for point in goal_ids:
                     if point in principal["pending"]["goals"]:
                         continue
-                    exported = connection.request(
-                        "export-goals",
-                        {
-                            "state": connection.root_state,
-                            "goal_ids": [point],
-                            "descendant": principal["state"],
-                        },
-                        publish,
+                    exported = export_source_batch(
+                        connection, (point,), principal["state"], publish
                     )["outcome"]
                     if exported.get("status") == "accepted-blocked":
                         continue
@@ -207,14 +202,8 @@ def search_agenda(
                 yield reply
                 continue
             if status == "candidate":
-                exported = connection.request(
-                    "export-goals",
-                    {
-                        "state": connection.root_state,
-                        "goal_ids": list(goal_ids),
-                        "descendant": current["state"],
-                    },
-                    publish,
+                exported = export_source_batch(
+                    connection, goal_ids, current["state"], publish
                 )
                 yield {
                     **reply,

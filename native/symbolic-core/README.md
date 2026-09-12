@@ -86,6 +86,12 @@ ancestors' recipes; siblings are unaffected. Internal replay ancestors are
 collected with their last descendant. No search alternatives are discarded
 automatically. `retention` reports owned state/cache counts, not heap sizes or
 proof acceptance.
+The application bridge releases its own temporary source-export branches after
+copying their serialized views, so repeated previews do not accumulate checking
+snapshots. The original search branch remains live. Serialized source remains
+available for independent acceptance; its native keys are provenance after
+release, not live handles. Direct protocol clients retain explicit control of
+their exported states.
 Replay recipes and queued primitive proposals eagerly seal their small
 name/interaction allocation watermarks; unused alternatives must not retain a
 whole speculative checking state through a suspended watermark projection.
