@@ -260,11 +260,22 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
   (expected, _) <- localTCState $ signature target
   heads <- fmap concat $ forM ranked $ \(Seed expression _ _, picked) -> do
     observed <- localTCState $ attempt runtime $
-      queryInferWith DontExpandLast runtime expression $ \(_, ty) -> Just <$> signature ty
-    let (result, infos) = maybe (Nothing, []) id observed
+      queryInferWith DontExpandLast runtime expression $ \(_, ty) -> do
+        (result, infos) <- signature ty
+        pure $ Just (result, infos, if noMetas ty then Just ty else Nothing)
+    let (result, infos, closedType) = maybe (Nothing, [], Nothing) id observed
+        terminal = case reverse infos of
+          (_, shape):_ -> shape
+          [] -> result
     variants <- applications expected scope expression infos
+    emptyApplication <- case (terminal, closedType) of
+      (Just FamilyShape{}, Just ty) -> attempt runtime $ Construction.emptyResultApplication
+        (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
+        (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }) expression ty target
+      _ -> pure Nothing
     modify runtime $ \s -> s { applicationProposals = applicationProposals s + fromIntegral (length variants) }
-    pure [(variant, picked) | variant <- [expression | compatible expected result] ++ variants]
+    modify runtime $ \s -> s { absurdProposals = absurdProposals s + maybe 0 (const 1) emptyApplication }
+    pure [(variant, picked) | variant <- [expression | compatible expected result] ++ variants ++ maybe [] pure emptyApplication]
   construction <- localTCState $ do
     allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
     if allowed then Construction.recordPlan forbidden target else pure Nothing

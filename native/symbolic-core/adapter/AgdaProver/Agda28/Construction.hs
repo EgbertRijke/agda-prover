@@ -3,7 +3,7 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.Construction
   ( recordPlan, recordExpression, projectedEvidence, omittedField, absurdLambda, eliminateEmpty
-  , constructorClosures, constructionScaffold ) where
+  , constructorClosures, constructionScaffold, emptyResultApplication ) where
 
 import Control.Monad (filterM)
 import Control.Monad.Except (catchError)
@@ -30,6 +30,7 @@ import Agda.Interaction.Base (UseForce (WithoutForce))
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Constraints (noConstraints)
 import Agda.TypeChecking.Conversion (compareType)
+import Agda.TypeChecking.Empty (isEmptyType)
 import Agda.TypeChecking.Records (isRecordType, recordFieldNames)
 import Agda.TypeChecking.Reduce (instantiateFull, reduce)
 import Agda.TypeChecking.Rules.Term (checkExpr, inferExpr')
@@ -240,6 +241,45 @@ omittedField visibility = do
 
 absurdLambda :: Hiding -> A.Expr
 absurdLambda = A.AbsurdLam exprNoRange
+
+-- Expose elimination of computed empty evidence as an ordinary application
+-- with operand goals. Inspect the dependent codomain under its own telescope;
+-- Agda, including its indexed/record emptiness check, decides applicability.
+-- Typed lambdas retain the argument domains when the eliminator is applied.
+-- No provisional native metas or generated helper names escape reification.
+emptyResultApplication :: TCM Bool -> TCM Bool -> A.Expr -> I.Type -> I.Type
+                       -> TCM (Maybe A.Expr)
+emptyResultApplication inspect charge expression ty target
+  | not (noMetas ty && noMetas target) = pure Nothing
+  | otherwise = build expression ty target >>= \case
+      Nothing -> pure Nothing
+      Just (eliminator, infos) -> do
+        scope <- getScope
+        arguments <- mapM (\info -> do
+          point <- registerInteractionPoint False noRange Nothing
+          pure $ Arg info $ unnamed $ A.QuestionMark
+            (Info.emptyMetaInfo { Info.metaScope = scope }) point) infos
+        pure $ Just $ A.app eliminator arguments
+ where
+  build subject domain result = inspect >>= \allowed ->
+    if not allowed then pure Nothing else reduce domain >>= \case
+      I.El _ (I.Pi argument body) -> do
+        argumentType <- reify $ I.unDom argument
+        withFreshName noRange (if I.absName body `elem` ["", "_"] then "x" else I.absName body) $ \name -> do
+          next <- addContext (name, argument) $
+            build (A.app subject [Arg (getArgInfo argument) $ unnamed $ A.Var name])
+              (absApp (raise 1 body) $ I.Var 0 []) (raise 1 result)
+          let binding = A.TBind noRange (empty { A.tbFinite = I.domIsFinite argument })
+                (Arg (getArgInfo argument) (unnamed $ A.mkBinder_ name) :| []) argumentType
+          pure $ fmap (\(term, infos) ->
+            (A.Lam exprNoRange (A.DomainFull binding) term, getArgInfo argument : infos)) next
+      leaf@(I.El _ I.Def{}) -> do
+        checkAllowed <- charge
+        emptyResult <- if checkAllowed then localTCState $ dontAssignMetas $ isEmptyType leaf else pure False
+        if not emptyResult then pure Nothing else do
+          eliminated <- eliminateEmpty subject leaf result
+          pure $ Just (eliminated, [])
+      _ -> pure Nothing
 
 -- An absurd lambda needs a known domain. Keep the annotation and application as
 -- native syntax in the replayable draft, rather than retaining Agda's temporary

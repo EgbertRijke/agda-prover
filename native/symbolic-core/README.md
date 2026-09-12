@@ -386,6 +386,14 @@ expose. It does not repeatedly wrap them in empty local helpers. Dependent
 variable elimination, function/record result splitting and explicit user
 commands remain available.
 
+Primitive moves can also eliminate a computed empty value. The adapter asks
+Agda whether a supplied function's dependent codomain is empty, including
+impossible indices and empty record fields. A typed eliminator leaves its
+arguments as ordinary, coupled goals. Blocked or inhabited codomains do not
+justify this move; broader evidence search remains available. Native binder
+identities, hiding and modalities are retained, and the reconstructed proof
+still requires independent validation.
+
 Native constructor closures introduce the expected telescope and finish with a
 visible constructor that has no fields. They retain binder hiding and native
 identities; Agda, not the generator, decides whether result indices match.
