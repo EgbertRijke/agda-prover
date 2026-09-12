@@ -61,7 +61,7 @@ never a verified proof and never edits goal bodies.
 observations, speculative `give`, native `make-clause` proposals and checked
 `apply-clause` transitions, retained branches,
 read-only `infer-helper` signatures,
-eviction/replay, cost snapshots, cancellation, and close. `solve-evidence` additionally chooses typed
+eviction/replay, explicit state release, ownership/cost snapshots, cancellation, and close. `solve-evidence` additionally chooses typed
 applications and lambdas inside that resident checker. See [the session protocol](../../schemas/symbolic-session-v1.md)
 for fields, events, resource supervision, and failure semantics.
 
@@ -78,7 +78,14 @@ An evicted branch can be replayed, but replay issues new keys rather than
 silently changing the meaning of old checked evidence.
 Only the final replay handle is published. Internal intermediate checkpoints
 release their resident checking state while preserving the replay recipe;
-existing caller-owned snapshots still require explicit eviction.
+existing caller-owned snapshots still require explicit eviction or release.
+Use `release` only after relinquishing every use of that state handle, including
+retained runs or exported variations. Unlike eviction, release also drops replay
+history once no live descendant needs it. Live descendants preserve their
+ancestors' recipes; siblings are unaffected. Internal replay ancestors are
+collected with their last descendant. No search alternatives are discarded
+automatically. `retention` reports owned state/cache counts, not heap sizes or
+proof acceptance.
 Replay recipes and queued primitive proposals eagerly seal their small
 name/interaction allocation watermarks; unused alternatives must not retain a
 whole speculative checking state through a suspended watermark projection.

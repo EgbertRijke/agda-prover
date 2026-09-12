@@ -21,10 +21,10 @@ module AgdaProver.Agda28.Session
   , ClauseMove, clauseMoveGoal, clauseMoveIsBatch, applyClauseMove, ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
-  , evict, replay, close, cancel, work, evidenceView
+  , evict, release, retention, replay, close, cancel, work, evidenceView
   ) where
 
-import Control.Concurrent (MVar, ThreadId, myThreadId, newMVar, modifyMVar, readMVar)
+import Control.Concurrent (MVar, ThreadId, myThreadId, newMVar, modifyMVar, readMVar, withMVar)
 import Control.Exception qualified as E
 import Control.Monad (unless, when, forM)
 import Control.Monad.Except (catchError)
@@ -212,17 +212,19 @@ data ActionIdentity = SourceAction String | IssuedAction Integer Integer
   deriving (Eq, Ord)
 data ApplicationKey = ApplicationKey StateKey InteractionId ActionIdentity
   deriving (Eq, Ord)
+data BranchRetention = CallerRetained | ReplayOnly | Released deriving Eq
 data Branch = Branch
   { branchState :: Maybe TCState, branchTrail :: Maybe (Integer, DraftAction)
   -- Building this map consults the previous Owner. Leaving it suspended keeps
   -- that owner's pre-eviction snapshot map alive through an unrelated recipe.
   , branchOrigins :: !(Map.Map InteractionId (Maybe Recursion.Owner))
-  , branchApplication :: Maybe ApplicationKey }
+  , branchApplication :: Maybe ApplicationKey
+  , branchChildren :: !Int, branchRetention :: !BranchRetention }
 type role Owner nominal
 data Owner s = Owner
-  { ownerEpoch :: Integer, ownerClosed :: Bool, ownerNext :: Integer
-  , ownerBranches :: Map.Map Integer Branch
-  , ownerApplications :: Map.Map ApplicationKey (Transition s) }
+  { ownerEpoch :: !Integer, ownerClosed :: !Bool, ownerNext :: !Integer
+  , ownerBranches :: !(Map.Map Integer Branch)
+  , ownerApplications :: !(Map.Map ApplicationKey (Transition s)) }
 data SourceWitness = SourceWitness FilePath FilePath BS.ByteString
 -- Captured before Agda setup/load, not after an option file may have changed.
 newtype Configuration = Configuration [SourceWitness]
@@ -301,7 +303,7 @@ withSessionConfigurationReuse reuse (Configuration configuration) root use = do
     a <- randomIO :: IO Word64
     b <- randomIO :: IO Word64
     owner <- newMVar $ Owner 0 False 1
-      (Map.singleton 0 $ Branch (Just initial) Nothing origins Nothing) Map.empty
+      (Map.singleton 0 $ Branch (Just initial) Nothing origins Nothing 0 CallerRetained) Map.empty
     active <- newIORef Nothing
     let nonce = showHex a "-" ++ showHex b ""
         session = Session nonce owner env (configuration ++ witnesses) ledger active reuse
@@ -344,6 +346,18 @@ inputsMatch session = go (sessionInputs session) `E.catch` \(_ :: E.IOException)
 
 work :: Session s -> IO Work
 work = readIORef . sessionWork
+
+retention :: Session s -> IO Retention
+retention session = withMVar (sessionOwner session) $ \owner -> do
+  let count = Map.foldl' (\r branch -> r
+        { residentStates = residentStates r + maybe 0 (const 1) (branchState branch)
+        , replayOnlyStates = replayOnlyStates r + if branchRetention branch == ReplayOnly then 1 else 0
+        , releasedAncestors = releasedAncestors r + if branchRetention branch == Released then 1 else 0 })
+        (Retention (ownerEpoch owner) (ownerClosed owner)
+          (Map.size $ ownerBranches owner) 0 0 0 (Map.size $ ownerApplications owner))
+        (ownerBranches owner)
+  -- Force scalar fields under the lock; no lazy projection of Owner escapes.
+  count `seq` pure count
 
 -- All restorable Agda state lives in the MVar value. The ledger and active
 -- thread do not: modifyMVar restores the original owner if checking is cancelled
@@ -394,7 +408,8 @@ lookupState session (StateRef key) owner
   | keyEpoch key /= ownerEpoch owner = Left StaleEpoch
   | otherwise = case Map.lookup (keyBranch key) (ownerBranches owner) of
       Nothing -> Left UnknownState
-      Just branch -> maybe (Left EvictedState) Right (branchState branch)
+      Just branch | branchRetention branch == Released -> Left UnknownState
+                  | otherwise -> maybe (Left EvictedState) Right (branchState branch)
 
 invalidate :: Owner s -> Owner s
 invalidate owner = owner { ownerEpoch = ownerEpoch owner + 1,
@@ -846,9 +861,11 @@ check session owner parent initial (DraftAction point expression) isReplay = do
             [(p, Map.findWithDefault origin p previous)
             | number' <- pendingGoals obligations, let p = fromIntegral number']
           draft = DraftAction point $ nativeDraft scoped child
-          branch = Branch (Just child) (Just (keyBranch $ stateKey parent, draft)) origins Nothing
+          branch = Branch (Just child) (Just (keyBranch $ stateKey parent, draft)) origins Nothing 0 CallerRetained
           next = owner { ownerNext = number + 1,
-                         ownerBranches = Map.insert number branch (ownerBranches owner) }
+                         ownerBranches = Map.insert number branch $
+                           Map.adjust (\b -> b { branchChildren = branchChildren b + 1 })
+                             (keyBranch $ stateKey parent) (ownerBranches owner) }
           kind | not (null $ pendingGoals obligations) = AcceptedPartial
                | pendingMetas obligations > 0 || pendingConstraints obligations > 0 = AcceptedBlocked
                | otherwise = ApparentlyClosed
@@ -935,7 +952,9 @@ reconstructionDrafts session owner parent descendant = drafts descendant >>= nat
   drafts ref
     | keySession key /= sessionNonce session = Left ForeignSession
     | keyEpoch key /= ownerEpoch owner = Left StaleEpoch
-    | otherwise = walk (keyBranch key) []
+    | otherwise = case Map.lookup (keyBranch key) (ownerBranches owner) of
+        Just branch | branchRetention branch /= Released -> walk (keyBranch key) []
+        _ -> Left UnknownState
    where
     key = stateKey ref
     root = keyBranch $ stateKey parent
@@ -977,6 +996,50 @@ evict session ref = request session ref $ \owner _ ->
                  number (ownerBranches owner)
               , ownerApplications = maybe id Map.delete key (ownerApplications owner) }, Right ())
 
+-- Explicitly relinquish a caller's handle, including its replay retention.
+-- Descendants keep the immutable ancestry they require. This does not infer
+-- ownership from goal shape, retire any sibling, or touch an active frontier.
+-- The caller must no longer use this handle (including in retained runs).
+release :: Session s -> StateRef s -> IO (Either Failure ())
+release session ref = request session rootRef $ \owner _ ->
+  case Map.lookup number (ownerBranches owner) of
+    Nothing -> pure (owner, Left UnknownState)
+    Just branch
+      | number == 0 -> pure (owner, Left CannotReleaseRoot)
+      | branchRetention branch == Released -> pure (owner, Left UnknownState)
+      | otherwise -> case collectReleased number $ retire Released number owner of
+          Left failure -> pure (owner, Left failure)
+          Right next -> pure (next, Right ())
+ where
+  number = keyBranch $ stateKey ref
+  rootRef = StateRef (stateKey ref) { keyBranch = 0 }
+
+retire :: BranchRetention -> Integer -> Owner s -> Owner s
+retire mode number owner = owner
+  { ownerBranches = Map.adjust (\b -> b { branchState = Nothing,
+      branchApplication = Nothing, branchRetention = mode }) number (ownerBranches owner)
+  , ownerApplications = case Map.lookup number (ownerBranches owner) >>= branchApplication of
+      Nothing -> ownerApplications owner
+      Just key -> Map.delete key (ownerApplications owner) }
+
+-- Each immutable branch has exactly one replay parent. Reference accounting
+-- therefore needs only child counts, not a general graph collector. A released
+-- ancestor is collected only after the final retained descendant goes away.
+collectReleased :: Integer -> Owner s -> Either Failure (Owner s)
+collectReleased number owner = case Map.lookup number (ownerBranches owner) of
+  Nothing -> Left $ KernelFailure "native-release-missing-branch"
+  Just branch
+    | number == 0 || branchRetention branch == CallerRetained || branchChildren branch > 0 -> Right owner
+    | branchChildren branch < 0 -> Left $ KernelFailure "native-release-invalid-child-count"
+    | otherwise -> case branchTrail branch of
+        Nothing -> Left $ KernelFailure "native-release-missing-parent"
+        Just (parent, _) -> case Map.lookup parent (ownerBranches owner) of
+          Nothing -> Left $ KernelFailure "native-release-missing-parent"
+          Just ancestor | branchChildren ancestor <= 0 -> Left $ KernelFailure "native-release-invalid-parent-count"
+                        | otherwise -> collectReleased parent owner
+                            { ownerBranches = Map.adjust (\b -> b { branchChildren = branchChildren b - 1 }) parent $
+                                Map.delete number $ ownerBranches owner }
+
 -- Replay deliberately creates new branch identities. Even equal-looking
 -- observations cannot witness equality of arbitrary TCStates or old evidence.
 -- The root is retained; replay walks to the nearest resident ancestor.
@@ -988,7 +1051,7 @@ replay session ref = do
   -- Use the ordinary serialized operation/epoch/input checks, but permit the
   -- requested child to be evicted. Resolve its trail only *inside* the lock.
   if ownerClosed owner then pure (Left ClosedSession) else
-    request session rootRef $ \current _ -> case trail current (keyBranch key) [] of
+    request session rootRef $ \current _ -> case publicTrail current (keyBranch key) of
       Left failure -> pure (current, Left failure)
       Right (ancestor, state, actions) -> do
         (rebuilt, result) <- go current (StateRef key { keyBranch = ancestor }) state actions
@@ -998,11 +1061,16 @@ replay session ref = do
         let published = either (const Nothing) (Just . keyBranch . stateKey) result
             unpublished = [number | number <- [ownerNext current .. ownerNext rebuilt - 1],
               Just number /= published]
-            retired = foldr (\number branches -> Map.adjust
-              (\branch -> branch { branchState = Nothing }) number branches)
-              (ownerBranches rebuilt) unpublished
-        pure (rebuilt { ownerBranches = retired }, result)
+            retireOne accumulated number = do
+              previous <- accumulated
+              collectReleased number $ retire ReplayOnly number previous
+        case foldl retireOne (Right rebuilt) (reverse unpublished) of
+          Left failure -> pure (current, Left failure)
+          Right retired -> pure (retired, result)
  where
+  publicTrail owner number = case Map.lookup number (ownerBranches owner) of
+    Just branch | branchRetention branch /= Released -> trail owner number []
+    _ -> Left UnknownState
   trail owner number actions = case Map.lookup number (ownerBranches owner) of
     Nothing -> Left UnknownState
     Just branch -> case branchState branch of

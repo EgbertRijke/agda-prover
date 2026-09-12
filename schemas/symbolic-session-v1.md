@@ -89,6 +89,8 @@ Each operation permits only its listed additional fields:
 | `solve-evidence` | `state`, `goal_id`, `limits`, `ranker`, `model_path`, `native_path`, `exclude_names`; optional `primary_model_path`, `focused_model_path`, `focused_search` | Search status, provisional child/evidence, cumulative search cost, selected policy choices |
 | `propose-refutation` | `state`, `goal_id`, `work_units` | Source-bound negative recipe for the existing abstract implication fragment; no proof authority |
 | `evict` | `state` | Drop child snapshot; preserve replay ancestry |
+| `release` | `state` | Relinquish a handle permanently; collect ancestry no live descendant needs |
+| `retention` | none | Owned state/cache counts; no checking or proof authority |
 | `replay` | `state` | Rechecked state key (resident states are returned unchanged) |
 | `cost` | none | Current cumulative native-operation counters |
 | `cancel` | none | Cancel the active request, or report idle |
@@ -201,7 +203,7 @@ Source validation and parent ownership checks still happen on every request.
 Partial/blocked children retain all obligations; the cache never promotes their
 status to closed. Rejected, cancelled, or censored attempts are not negatively
 memoized. Reconstruction and replay bypass reuse and check again; final fresh
-Agda validation remains mandatory. Evicting a child releases its cache entry,
+Agda validation remains mandatory. Evicting or releasing a child removes its cache entry,
 and invalidating/closing the epoch drops the entire table. Cache retention is
 bounded by the retained accepted children, within the caller's physical budget.
 
@@ -224,13 +226,43 @@ counts: retain the last snapshot and receipt and mark final work unknown.
 Input frames default to 16 MiB. `AGDAPROVER_SYMBOLIC_FRAME_BYTES` changes this
 transport envelope. Oversized/unterminated frames close the connection; no
 unbounded work queue is created. Native snapshot/trail residency is caller-
-managed through eviction and process budgets for now. Replay publishes only
+managed through explicit eviction/release and process budgets. Replay publishes only
 its final handle and retires the resident snapshots of internal intermediate
-steps, including on ordinary replay failure. Their native recipes remain for
-later replay. Pre-existing caller-owned handles are never retired implicitly.
+steps, including on ordinary replay failure. Their native recipes remain while
+needed by the returned descendant. Pre-existing caller-owned handles are never
+retired implicitly.
 Replay recipes strictly capture their small allocation watermarks rather than
 lazy projections that would retain evicted checking states. This envelope does not
 impose a mathematical proof-size or search-depth limit.
+
+### Explicit state ownership
+
+`release` returns `{"status":"released"}`. The caller relinquishes **all** uses
+of that handle, including references in retained runs and variations. Subsequent
+requests using it fail with `unknown-state`; release is not a reference decrement
+for one of several callers. Root release fails with `cannot-release-root`.
+Foreign, stale and unknown keys fail without changing other ownership. Source
+drift still invalidates the complete epoch, including evicted states.
+
+Release removes the resident snapshot and exact-application entry. If live
+descendants still depend on its immutable replay recipe, that recipe remains
+private until the last descendant is relinquished. Each retained branch has
+exactly one replay parent; child counts permit transitive collection without
+scanning or pruning the search frontier. Siblings and parent transactions are
+unaffected. Internal unpublished replay ancestors are collected by the same
+rule. Branch identities never get reused. Cancellation rolls back ownership
+changes while preserving the physical-work ledger.
+
+`retention` returns `agdaprover.symbolic-retention.v1`, with integer fields
+`epoch`, `retained_states` (all branch records, including root and required
+ancestry), `resident_states` (records with checking snapshots),
+`replay_only_states` (unpublished replay ancestry), `released_ancestors`
+(relinquished handles still needed for replay), and `cached_applications`.
+It also includes `closed` and `proof_authority: false`. This serialized
+observation counts records under the owner lock; it cannot race checking or
+serve as an asynchronous cancellation command. Counts are not byte estimates,
+live-heap measurements, proof certificates or permission to release a state
+still owned by another consumer. Its normal dispatch receipt remains charged.
 
 Runtime sessions fix the loaded options/toolchain and pin the exact bytes and
 canonical paths corresponding to Agda's root and imported interface sources.
@@ -650,7 +682,7 @@ Every outcome preserves a cost receipt and has no proof authority. Ordinary
 If cancellation happens outside a native operation, the existing key remains
 valid; otherwise use the updated key returned in the operation result. Both
 retain charged work. Discard is an idle work request; cancel an active advance
-first. Session snapshots/replay ancestry have their own eviction lifecycle and
+first. Session snapshots/replay ancestry have their own explicit eviction/release lifecycle and
 are not all freed merely by discarding the frontier.
 
 `search-progress` events are tagged with the **current advance request ID** and

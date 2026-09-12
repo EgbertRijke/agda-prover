@@ -3,7 +3,7 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Symbolic.SessionTypes
   ( StateKey (..), DraftExpression (..), Pending (..), TransitionKind (..)
-  , Failure (..), ReusePolicy (..), Work (..), emptyWork, kindName, failureName ) where
+  , Failure (..), ReusePolicy (..), Retention (..), Work (..), emptyWork, kindName, failureName ) where
 
 import Control.Monad (unless)
 import Data.Aeson
@@ -52,7 +52,7 @@ kindName ApparentlyClosed = "apparently-closed"
 
 data Failure = ForeignSession | StaleEpoch | UnknownState | EvictedState
   | ClosedSession | StaleInputs | UnknownGoal | KernelRejected String
-  | KernelBlocked String | KernelFailure String | Cancelled | CannotEvictRoot
+  | KernelBlocked String | KernelFailure String | Cancelled | CannotEvictRoot | CannotReleaseRoot
   | ReplayRejected String
   deriving (Eq, Show)
 
@@ -69,9 +69,28 @@ failureName KernelBlocked{} = "kernel-blocked"
 failureName KernelFailure{} = "kernel-failure"
 failureName Cancelled = "cancelled"
 failureName CannotEvictRoot = "cannot-evict-root"
+failureName CannotReleaseRoot = "cannot-release-root"
 failureName ReplayRejected{} = "replay-rejected"
 
 data ReusePolicy = NoReuse | ExactReuse deriving (Eq, Show)
+
+-- Ownership counts are not heap-size estimates or evidence of proof closure.
+-- They distinguish caller-retained checkpoints from ancestry needed only by
+-- descendants. The adapter obtains one consistent snapshot under its owner.
+data Retention = Retention
+  { retentionEpoch :: !Integer, retentionClosed :: !Bool
+  , retainedStates :: !Int, residentStates :: !Int
+  , replayOnlyStates :: !Int, releasedAncestors :: !Int
+  , cachedApplications :: !Int }
+  deriving (Eq, Show)
+
+instance ToJSON Retention where
+  toJSON r = object
+    ["schema_version" .= ("agdaprover.symbolic-retention.v1" :: String)
+    ,"epoch" .= retentionEpoch r, "closed" .= retentionClosed r
+    ,"retained_states" .= retainedStates r, "resident_states" .= residentStates r
+    ,"replay_only_states" .= replayOnlyStates r, "released_ancestors" .= releasedAncestors r
+    ,"cached_applications" .= cachedApplications r, "proof_authority" .= False]
 
 -- Physical time is integer nanoseconds/picoseconds, never rounded per action.
 -- This ledger belongs to the owner, outside every restorable Agda snapshot.

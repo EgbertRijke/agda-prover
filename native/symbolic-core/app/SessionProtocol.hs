@@ -35,7 +35,8 @@ import AgdaProver.Symbolic.NNUE.Native (withNativeScorer)
 import RunControl qualified as Run
 
 data Operation = Pending StateKey | Observe StateKey InteractionId P.ObservationMode
-  | Give StateKey InteractionId DraftExpression | Evict StateKey | Replay StateKey
+  | Give StateKey InteractionId DraftExpression | Evict StateKey | Release StateKey | Replay StateKey
+  | InspectRetention
   | SolveEvidence StateKey InteractionId Search.SearchLimits Policy.RankingMode (Maybe FilePath) (Maybe FilePath) (Maybe FilePath) Bool [String]
   | MakeClause StateKey InteractionId ClauseAction
   | ApplyClause StateKey InteractionId ClauseAction
@@ -224,6 +225,8 @@ parseRequest = withObject "session request" $ \o -> do
         <*> (if KM.member "focused_search" o then o .: "focused_search" else pure True)
         <*> o .: "exclude_names"
     "evict" -> fields ["state"] >> Evict <$> o .: "state"
+    "release" -> fields ["state"] >> Release <$> o .: "state"
+    "retention" -> fields [] >> pure InspectRetention
     "replay" -> fields ["state"] >> Replay <$> o .: "state"
     "cost" -> fields [] >> pure Cost
     "cancel" -> fields [] >> pure Cancel
@@ -396,6 +399,8 @@ perform session runs modelCache emit emitRun operation = case operation of
   SolveHelper key goal limits mode modelPath nativePath view expression ->
     solve key goal limits mode modelPath Nothing nativePath False [] (Just (view, expression))
   Evict key -> resolved key $ \ref -> result (const $ object ["status" .= ("evicted" :: String)]) <$> S.evict session ref
+  Release key -> resolved key $ \ref -> result (const $ object ["status" .= ("released" :: String)]) <$> S.release session ref
+  InspectRetention -> toJSON <$> S.retention session
   Replay key -> resolved key $ \ref -> result (\state -> object ["state" .= S.stateKey state]) <$> S.replay session ref
   _ -> pure $ failureView (KernelFailure "control-dispatched-as-work")
  where
