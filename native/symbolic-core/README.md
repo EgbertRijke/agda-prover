@@ -90,6 +90,13 @@ search remains agenda work; no general helper-invention capability is claimed.
 
 ## Boundaries
 
+The pure agenda schedules opaque coupled states and typed actions. Stable
+cost-ordered alternatives survive failed descendants and provisional candidate
+rejection. A censored step retains its queue; resumable work advances scheduling
+cost so it cannot permanently starve finite-cost siblings. Ancestry pruning
+requires an exact adapter witness, not a display or hash match. This layer does
+not yet drive autonomous native search or confer proof acceptance.
+
 - `core/`: compiler-independent protocol, feature views and NNUE inference; no Agda internals.
 - `adapter/`: Agda 2.8 types, scoped snapshots, and structural codecs.
 - `app/`: process entrypoint and response/error framing.
