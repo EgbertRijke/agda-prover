@@ -167,6 +167,13 @@ coinductive value. `copattern_proposals` is a subset of `recursive_proposals`.
 This composes the existing `apply-clause` and `solve-evidence` operations;
 autonomous clause selection and full interactive source export remain pending.
 
+Structural scheduling and NNUE share model-independent tri-state facts. The
+adapter obtains constructor availability, result-head matches and descent
+information from native Agda data. Unknown is not false; pending dependency and
+relational classifications remain unknown. These facts reorder construction
+and application continuations without dropping either. Evidence-policy traces
+include the same classification supplied to the unchanged feature encoder.
+
 Use `ProverApplication.prove_evidence(task, engine=NativeEvidenceEngine(path))`
 from `agdaprover.application.service` and `agdaprover.application.evidence` to
 exercise the explicit application path. `path` is the built executable, not a

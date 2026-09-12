@@ -2,8 +2,8 @@
 {-# LANGUAGE LambdaCase #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.Recursion
-  ( Owner, owner, ownerName, ownerGroup, checkOwner, CallContext, inspect, callHead
-  , eligibleCall, copatternCall, usesOwner ) where
+  ( Owner, owner, ownerName, ownerGroup, checkOwner, CallContext, inspect, callHead, callType
+  , eligibleCall, copatternCall, descentFacts, usesOwner ) where
 
 import Control.Monad (unless, forM)
 import Data.List (find)
@@ -20,6 +20,7 @@ import Agda.Syntax.Internal qualified as I
 import Agda.Termination.TermCheck (termMutual)
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Records (getRecordOfField, getRecordDef)
+import Agda.TypeChecking.Reduce (reduceB)
 
 -- An owner comes only from a checked source clause, never a supplied string.
 -- Child goals inherit it across generated helpers. It does not make the owner
@@ -102,12 +103,31 @@ inspect point root = do
 callHead :: CallContext -> A.Expr
 callHead (CallContext (Owner function) _) = A.Def function
 
+callType :: CallContext -> TCM I.Type
+callType (CallContext (Owner function) _) = typeOfConst function
+
 -- A real coinductive projection admits a fully applied owner proposal without
 -- asserting descent. It does not prove guarding: give and the complete mutual
 -- group's termination/productivity check must still accept the candidate.
 copatternCall :: CallContext -> Bool
 copatternCall (CallContext _ CoinductiveCopattern) = True
 copatternCall _ = False
+
+descentFacts :: CallContext -> TCM (Maybe Bool, Maybe Bool)
+descentFacts (CallContext _ (ConstructorDescendants names)) = do
+  context <- getContext
+  shapes <- forM [index | (index, entry) <- zip [0..] context, Set.member (ctxEntryName entry) names] $ \index ->
+    (reduceB =<< typeOfBV index) >>= \case
+      I.Blocked{} -> pure Nothing
+      I.NotBlocked _ (I.El _ I.Pi{}) -> pure $ Just True
+      I.NotBlocked _ (I.El _ I.MetaV{}) -> pure Nothing
+      I.NotBlocked _ (I.El _ I.Var{}) -> pure Nothing
+      _ -> pure $ Just False
+  let higher | Just True `elem` shapes = Just True
+             | all (== Just False) shapes = Just False
+             | otherwise = Nothing
+  pure (Just True, higher)
+descentFacts _ = pure (Nothing, Nothing)
 
 eligibleCall :: CallContext -> A.Expr -> Bool
 eligibleCall (CallContext _ CoinductiveCopattern) _ = True

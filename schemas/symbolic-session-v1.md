@@ -275,6 +275,28 @@ splitting with `solve-evidence` on its resulting obligations. Autonomous clause
 scheduling and full source export are not implied. This is neither general
 coinductive completeness nor permission to case-split a coinductive record.
 
+Evidence-policy traces additionally contain `structural_classification`, using
+the existing `agdaprover.structural-classification.v2` object. The pure core owns
+its eleven boolean-or-null fields independently of NNUE. The adapter derives
+native constructor availability, local-function/result-head matches and direct
+or higher-order descent facts in a read-only transaction. Head comparison uses
+Agda reduction and binder identities; blocked heads remain unknown. A matching
+head is an ordering observation, never a type equality or acceptance claim.
+
+Availability describes this evidence-search inventory: lambda/record/datatype
+construction, not future clause scheduling. Absence of such construction is not
+uninhabitability. A local function with the matching result head is a promising
+elimination candidate, not a certified solvable application. Competition is
+derived only when both input facts are known. Dependency, permutation and
+relational observations that this slice cannot establish stay null.
+
+The same classification feeds symbolic continuation order and the existing
+NNUE feature encoder. Both application and construction continuations remain
+available after failure; scores and unknown facts never remove them. The
+additive `classification_queries` counter is a subset of `inference_queries`
+and charges each composite native metadata query once. It is not an extra
+charge in the work-unit sum. Work survives rejected/cancelled classification.
+
 Expression displays have column-zero relative Agda layout. The native
 application path preserves and anchors this layout in a parenthesized
 expression; it does not flatten typed let blocks through the legacy formatter.

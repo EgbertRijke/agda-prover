@@ -7,7 +7,8 @@ module AgdaProver.Agda28.EvidenceSearch (run, Result (..)) where
 import Control.Monad (forM)
 import Control.Monad.Except (catchError, runExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (Value)
+import Data.Aeson (Value (..), toJSON)
+import Data.Aeson.KeyMap qualified as KM
 import Data.Foldable (toList)
 import Data.IORef
 import Data.List (nub)
@@ -44,6 +45,8 @@ import Agda.Utils.Impossible (impossible)
 import AgdaProver.Symbolic.Evidence
 import AgdaProver.Agda28.Construction qualified as Construction
 import AgdaProver.Agda28.Recursion qualified as Recursion
+import AgdaProver.Agda28.Scheduling qualified as Scheduling
+import AgdaProver.Symbolic.Classification qualified as Classification
 import AgdaProver.Symbolic.NNUE.Features qualified as F
 import AgdaProver.Symbolic.NNUE.Native (NativeScorer)
 import AgdaProver.Symbolic.NNUE.Policy qualified as P
@@ -204,8 +207,8 @@ describe runtime origin expression = do
       Just . prettyShow <$> prettyTCM ty
   pure $ Seed expression origin (maybe "unknown" id info)
 
-rankSeeds :: Runtime s -> I.Type -> [A.Expr] -> TCM [(Seed, [(T.Text, T.Text)])]
-rankSeeds runtime@(Runtime _ ref _ models mode native emit namespace) target globals = do
+rankSeeds :: Runtime s -> Classification.Classification -> I.Type -> [A.Expr] -> TCM [(Seed, [(T.Text, T.Text)])]
+rankSeeds runtime@(Runtime _ ref _ models mode native emit namespace) classification target globals = do
   locals <- map (A.Var . ctxEntryName) <$> getContext
   seeds <- mapM (uncurry $ describe runtime) $
     [("local", expression) | expression <- locals] ++ [("visible", expression) | expression <- globals, expression `notElem` locals]
@@ -220,7 +223,7 @@ rankSeeds runtime@(Runtime _ ref _ models mode native emit namespace) target glo
     let view = F.CandidateView "evidence-application-v1" "native-evidence" (T.pack typeText) display 1 [("origin", T.pack origin)]
     pure $ P.Candidate (T.pack $ show index) display 0 (Right $ F.candidateTokens goal view) seed
   ranked <- liftIO $ P.rankBatch native models mode (P.ORFamily "evidence-application-v1") decision
-    (F.policyStateTokens goal F.unknownClassification) candidates
+    (F.policyStateTokens goal classification) candidates
   -- The router counts inference; this ledger also retains preparation work on
   -- interrupted/rejected attempts through the surrounding session dispatch.
   case ranked of
@@ -229,7 +232,10 @@ rankSeeds runtime@(Runtime _ ref _ models mode native emit namespace) target glo
       modify runtime $ \s -> s { policyDecisions = ordinal + 1
         , modelItems = modelItems s + fromIntegral (P.traceItemsScored $ P.decisionTrace batch)
         , modelNanoseconds = modelNanoseconds s + P.traceModelNanoseconds (P.decisionTrace batch) }
-      liftIO $ emit $ P.traceView $ P.decisionTrace batch
+      let view = case P.traceView $ P.decisionTrace batch of
+            Object fields -> Object $ KM.insert "structural_classification" (toJSON classification) fields
+            other -> other
+      liftIO $ emit view
       pure [(P.candidateValue candidate, if length candidates > 1 then [(decision, P.candidateId candidate)] else [])
             | candidate <- P.rankedCandidates batch]
 
@@ -241,15 +247,23 @@ search runtime inventory@(GlobalInventory globals forbidden recursion) depth tar
   done <- stopped runtime
   if done then pure Nothing else do
     modify runtime $ \s -> s { searchNodes = searchNodes s + 1 }
-    seeds <- rankSeeds runtime target globals
+    classified <- attempt runtime $ do
+      allowed <- charge runtime $ \s -> s
+        { inferenceQueries = inferenceQueries s + 1, classificationQueries = classificationQueries s + 1 }
+      let constructors = Set.fromList [name | A.Con (I.AmbQ names) <- globals, name <- toList names]
+      if allowed then Just <$> Scheduling.classify forbidden constructors recursion target else pure Nothing
+    let classification = maybe Classification.unknownClassification id classified
+    seeds <- rankSeeds runtime classification target globals
+    let construction = [constructRecord, introduce]
+        application = [queryInferWith DontExpandLast runtime expression $ \(_, ty) ->
+            guidedApplication expression ty depth [] (selected ++ picked)
+          | (Seed expression _ _, picked) <- seeds]
     choices runtime $
       [queryCheck runtime expression target $ \term -> use expression term (selected ++ picked)
        | (Seed expression _ _, picked) <- seeds]
       ++ [recursiveCall inferredArguments context | Just context <- [recursion]]
-      ++ [constructRecord, introduce]
-      ++ [queryInferWith DontExpandLast runtime expression $ \(_, ty) ->
-            guidedApplication expression ty depth [] (selected ++ picked)
-         | (Seed expression _ _, picked) <- seeds]
+      ++ (if Classification.constructionFirst classification
+            then construction ++ application else application ++ construction)
       ++ [recursiveCall arguments context | Just context <- [recursion]]
       ++ [produce expression picked | (Seed expression _ _, picked) <- seeds]
  where

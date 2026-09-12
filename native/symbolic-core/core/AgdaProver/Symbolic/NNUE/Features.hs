@@ -15,21 +15,12 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Data.Vector qualified as V
+import AgdaProver.Symbolic.Classification
 
 -- These are compatibility *feature views*. No type equality, candidate
 -- generation, cache identity or proof validity may depend on their text.
 data GoalView = GoalView { targetView :: Text, contextViews :: [Text], moduleView :: Maybe ModuleView }
 data ModuleView = ModuleView { frameCount :: Int, parameterCount :: Int, directiveCount :: Int }
-data Classification = Classification
-  { recursiveResultMatch :: Maybe Bool, constructionResultMatch :: Maybe Bool
-  , constructionAvailable :: Maybe Bool, productiveElimination :: Maybe Bool
-  , structuralDescent :: Maybe Bool, higherOrderDescent :: Maybe Bool
-  , dependenciesReady :: Maybe Bool, coordinatePermutation :: Maybe Bool
-  , reflexiveRelation :: Maybe Bool, relationalElimination :: Maybe Bool
-  , constructionEliminationCompete :: Maybe Bool }
-unknownClassification :: Classification
-unknownClassification = Classification Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
-
 data TermView = TermView
   { termRoot :: Text, termSize :: Int, termDepth :: Int, termLambdas :: Int, termApplications :: Int }
 data CandidateView = CandidateView

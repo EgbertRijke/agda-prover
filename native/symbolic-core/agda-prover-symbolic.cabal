@@ -18,6 +18,7 @@ library
     AgdaProver.Symbolic.SessionTypes,
     AgdaProver.Symbolic.Evidence,
     AgdaProver.Symbolic.Clause,
+    AgdaProver.Symbolic.Classification,
     AgdaProver.Symbolic.NNUE.Hash,
     AgdaProver.Symbolic.NNUE.Model,
     AgdaProver.Symbolic.NNUE.Sparse,
@@ -43,7 +44,7 @@ library agda28
   other-modules: Structure, Decode, Atoms, StructureAnnotations,
     AgdaProver.Agda28.EvidenceSearch, AgdaProver.Agda28.Construction,
     AgdaProver.Agda28.Clauses, AgdaProver.Agda28.ClauseExecution,
-    AgdaProver.Agda28.Recursion
+    AgdaProver.Agda28.Recursion, AgdaProver.Agda28.Scheduling
   build-depends:
     agda-prover-symbolic,
     Agda ==2.8.0,
