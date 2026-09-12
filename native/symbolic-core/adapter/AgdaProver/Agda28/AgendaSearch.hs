@@ -112,7 +112,7 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "action_limit" .= actionLimit settings,
     "depth_limit" .= depthLimit settings, "depth_deferred" .= depthDeferred measured,
     "depth_unit" .= ("accepted-native-branch-transition" :: String),
-    "ordering" .= (if progressOrdering settings then "cost-plus-obligations-v1" else "cost-only-v1" :: String),
+    "ordering" .= (if progressOrdering settings then "cost-plus-obligations-v2" else "cost-only-v1" :: String),
     "model_items_scored" .= modelItems measured, "model_elapsed_ns" .= modelNanoseconds measured,
     "models" .= P.modelIdentities (models settings), "session_cost" .= physical]
 

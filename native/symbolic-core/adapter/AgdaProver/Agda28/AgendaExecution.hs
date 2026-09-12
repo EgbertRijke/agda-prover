@@ -73,12 +73,16 @@ startOneMove :: S.StateRef s -> Int -> [Int] -> Queue s
 startOneMove state selected allGoals = A.start $
   SearchState state (Just $ Set.singleton selected) allGoals (Just $ S.stateKey state)
 
--- An inspect/apply pair costs two agenda steps. Estimate remaining work from
--- native live obligations only; no type names, independence claim, pruning or
--- fresh checking is involved. One-step search deliberately retains its order.
+-- A goal generally needs more than one inspect/apply pair (introductions,
+-- elimination and closure). A soft eight-pair estimate gives a completed
+-- prefix a chance to reach its later obligations before enumerating equivalent
+-- early constructions. This is weighted search, not an admissible lower bound.
+-- All alternatives keep finite priorities and strictly increasing spent cost;
+-- no type names, independence claim or extra checking is involved. One-step
+-- search deliberately retains its order.
 prioritizeProgress :: Queue s -> Queue s
 prioritizeProgress = A.prioritize $ \(SearchState _ selected order stepParent) ->
-  if stepParent /= Nothing then 0 else 2 * fromIntegral
+  if stepParent /= Nothing then 0 else 16 * fromIntegral
     (length $ maybe order (\chosen -> filter (`Set.member` chosen) order) selected)
 
 frontier :: Queue s -> (Int, Maybe (S.StateRef s, Natural, Natural))

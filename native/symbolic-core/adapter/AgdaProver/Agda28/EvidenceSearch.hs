@@ -70,6 +70,11 @@ data Runtime s = Runtime SearchLimits (IORef SearchStats) (IORef Bool)
 data Seed = Seed A.Expr String String
 data GlobalInventory = GlobalInventory [A.Expr] (Set.Set QName) (Maybe Recursion.CallContext)
 
+-- Only rigid type heads can witness a mismatch. A stuck definition, variable
+-- or meta is unknown, not an incompatible family. Argument/index conversion
+-- and universe comparison remain Agda's responsibility.
+data ExpectedShape = FunctionShape | SortShape | FamilyShape QName deriving Eq
+
 run :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode -> Maybe (NativeScorer s)
     -> Bool -> (Value -> IO ()) -> String -> [String] -> InteractionId -> Maybe Recursion.Owner
     -> (A.Expr -> TCM ()) -> I.Type -> TCM Result
@@ -156,19 +161,31 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
         pure $ A.QuestionMark (Info.emptyMetaInfo { Info.metaScope = scope }) point
       signature ty = do
         allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
-        if not allowed then pure [] else reduce ty >>= \case
-          I.El _ (I.Pi domain body) -> (getArgInfo domain :) <$>
-            underAbstraction domain body signature
-          _ -> pure []
-      applications scope expression infos = go expression infos
+        if not allowed then pure (Nothing, []) else reduce ty >>= \case
+          I.El _ (I.Pi domain body) -> do
+            (result, rest) <- underAbstraction domain body signature
+            pure (if visible domain then Just FunctionShape else result,
+              (getArgInfo domain, result):rest)
+          I.El _ (I.Sort _) -> pure (Just SortShape, [])
+          I.El _ (I.Def name _) -> getConstInfo name >>= \definition -> pure
+            (case theDef definition of
+              Datatype{} -> Just $ FamilyShape name
+              RecordDefn{} -> Just $ FamilyShape name
+              _ -> Nothing, [])
+          _ -> pure (Nothing, [])
+      compatible Nothing _ = True
+      compatible _ Nothing = True
+      compatible (Just wanted) (Just offered) = wanted == offered
+      applications expected scope expression infos = go expression infos
        where
         go _ [] = pure []
-        go function (info:rest) = do
+        go function ((info, result):rest) = do
           operand <- if getHiding info == NotHidden then freshHole scope
             else Construction.omittedField (getHiding info)
           let applied = A.app function [Arg info $ unnamed operand]
           suffix <- go applied rest
-          pure $ if getHiding info == NotHidden then applied:suffix else suffix
+          pure $ if getHiding info == NotHidden && compatible expected result
+            then applied:suffix else suffix
   (forbiddenHere, _) <- excludedGlobals excluded
   inherited <- maybe (pure Set.empty) Recursion.ownerGroup owner
   let forbidden = Set.union forbiddenHere inherited
@@ -181,12 +198,14 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
   let classification = maybe Classification.unknownClassification id classified
   ranked <- rankSeeds runtime classification target globals
   scope <- getScope
+  (expected, _) <- localTCState $ signature target
   heads <- fmap concat $ forM ranked $ \(Seed expression _ _, picked) -> do
     observed <- localTCState $ attempt runtime $
       queryInferWith DontExpandLast runtime expression $ \(_, ty) -> Just <$> signature ty
-    variants <- applications scope expression $ maybe [] id observed
+    let (result, infos) = maybe (Nothing, []) id observed
+    variants <- applications expected scope expression infos
     modify runtime $ \s -> s { applicationProposals = applicationProposals s + fromIntegral (length variants) }
-    pure [(variant, picked) | variant <- expression:variants]
+    pure [(variant, picked) | variant <- [expression | compatible expected result] ++ variants]
   construction <- localTCState $ do
     allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
     if allowed then Construction.recordPlan forbidden target else pure Nothing

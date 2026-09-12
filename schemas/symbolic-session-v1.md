@@ -414,13 +414,14 @@ feature flag for the coarse fallback; disabling it restricts the configured
 fragment and must not be confused with a general impossibility result.
 `dependency_ordering` enables the conservative read described below. It changes
 goal order, never the authorized selection or coupled-state semantics.
-`progress_ordering` orders branches by spent scheduling cost plus two units per
-remaining selected native interaction (one inspect/apply pair). It does not
+`progress_ordering` orders branches by spent scheduling cost plus sixteen units per
+remaining selected native interaction (a soft estimate of eight inspect/apply pairs,
+allowing introductions, elimination and closure). It does not
 infer independence, remove obligations, rebate work or prune alternatives.
 The estimate is not an admissible proof-cost bound. Stable serial ties, finite
 alternative costs and increasing spent cost preserve fallback fairness. One-step
 search uses zero remaining-work estimate and keeps its previous ordering.
-The cost receipt records `ordering: cost-plus-obligations-v1`; disabling the
+The cost receipt records `ordering: cost-plus-obligations-v2`; disabling the
 switch records `cost-only-v1`. This is an internal native scheduling option,
 not a change to Python defaults or the public task's resource envelope.
 

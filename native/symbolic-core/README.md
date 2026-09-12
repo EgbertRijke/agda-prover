@@ -309,6 +309,20 @@ relational classifications remain unknown. These facts reorder construction
 and application continuations without dropping either. Evidence-policy traces
 include the same classification supplied to the unchanged feature encoder.
 
+Primitive application proposals retain Agda's inferred telescope and compare
+only rigid result shapes: functions, universes, and actual datatype/record
+identities. A stuck family, variable or meta remains unknown and never warrants
+discarding an application. Hidden arguments and dependent indices are still
+inferred by Agda when the proposal is checked. This avoids queuing provably
+unrelated heads without replacing conversion with textual type comparisons.
+
+The agenda's optional `progress_ordering` uses spent cost plus sixteen units
+per remaining selected interaction. This soft estimate lets a completed prefix
+advance while retaining every alternative; it is neither a proof-cost lower
+bound nor a discount against resource accounting. Receipts identify
+`cost-plus-obligations-v2`; disabling it retains `cost-only-v1`. One-step ordering
+is unchanged. See the [session contract](../../schemas/symbolic-session-v1.md).
+
 Use `ProverApplication.prove_evidence(task, engine=NativeEvidenceEngine(path))`
 from `agdaprover.application.service` and `agdaprover.application.evidence` to
 exercise the explicit application path. `path` is the built executable, not a
