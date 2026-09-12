@@ -64,11 +64,13 @@ rankBatch :: Maybe (NativeScorer s) -> Models -> RankingMode -> RankingDomain ->
 rankBatch native (Models table) mode requested decision state candidates = do
   let keys = map candidateId candidates
       tiers = map priorityTier candidates
-      expressions = map expressionView candidates
       valid = do
         unless (not $ T.null decision) $ Left "empty-decision-id"
-        unless (all (not . T.null) keys && S.size (S.fromList keys) == length keys
-                && S.size (S.fromList expressions) == length expressions) $ Left "duplicate-or-empty-candidate"
+        -- Distinct native names may share a presentation (e.g. overloaded
+        -- constructors). The caller's structural candidate ID is authoritative,
+        -- not the text used solely for NNUE features/presentation.
+        unless (all (not . T.null) keys && S.size (S.fromList keys) == length keys) $
+          Left "duplicate-or-empty-candidate"
         unless (all (>= 0) tiers && sort tiers == tiers) $ Left "invalid-structural-tiers"
       model = M.lookup (roleFor requested) table
       usable = case requested of

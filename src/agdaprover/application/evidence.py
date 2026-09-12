@@ -222,7 +222,9 @@ class NativeEvidenceEngine:
                 )
                 return result
             display = candidate["evidence"]["display"]
-            patch = reconstruct_hole_completion(source.read_text(), goal, display)
+            patch = reconstruct_hole_completion(
+                source.read_text(), goal, display, native_layout=True
+            )
             validation, trust = validate_reconstruction(
                 source,
                 patch,

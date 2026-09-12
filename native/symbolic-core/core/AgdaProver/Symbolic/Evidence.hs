@@ -29,12 +29,20 @@ data SearchStats = SearchStats
   { workUnits :: !Integer, checkerQueries :: !Integer, inferenceQueries :: !Integer
   , rejectedQueries :: !Integer, blockedQueries :: !Integer
   , lambdaProposals :: !Integer, applicationProposals :: !Integer
+  , recordProposals :: !Integer, absurdProposals :: !Integer
   , searchNodes :: !Integer, depthIterations :: !Integer, currentDepth :: !Int
   , modelItems :: !Integer, modelNanoseconds :: !Integer, policyDecisions :: !Integer
   , workExhausted :: !Bool }
   deriving (Eq, Show)
 emptyStats :: SearchStats
-emptyStats = SearchStats 0 0 0 0 0 0 0 0 0 0 0 0 0 False
+emptyStats = SearchStats
+  { workUnits = 0, checkerQueries = 0, inferenceQueries = 0
+  , rejectedQueries = 0, blockedQueries = 0
+  , lambdaProposals = 0, applicationProposals = 0
+  , recordProposals = 0, absurdProposals = 0
+  , searchNodes = 0, depthIterations = 0, currentDepth = 0
+  , modelItems = 0, modelNanoseconds = 0, policyDecisions = 0
+  , workExhausted = False }
 instance ToJSON SearchStats where
   toJSON s = object
     ["schema_version" .= ("agdaprover.symbolic-evidence-cost.v1" :: String)
@@ -42,6 +50,7 @@ instance ToJSON SearchStats where
     ,"inference_queries" .= inferenceQueries s, "rejected_queries" .= rejectedQueries s
     ,"blocked_queries" .= blockedQueries s, "lambda_proposals" .= lambdaProposals s
     ,"application_proposals" .= applicationProposals s, "nodes" .= searchNodes s
+    ,"record_proposals" .= recordProposals s, "absurd_proposals" .= absurdProposals s
     ,"depth_iterations" .= depthIterations s, "current_depth" .= currentDepth s
     ,"model_items_scored" .= modelItems s, "model_elapsed_ns" .= modelNanoseconds s
     ,"policy_decisions" .= policyDecisions s, "work_exhausted" .= workExhausted s]

@@ -1,9 +1,10 @@
 # Haskell symbolic core
 
 This is the experimental typed Haskell core. It supports resident checking and
-an autonomous evidence/application search fragment, including the bundled NNUE.
+autonomous evidence/application and structural-construction fragments, including
+the bundled NNUE.
 It does **not** replace AgdaProver's current search engine. A default-engine
-switch requires the remaining construction, joint-search and qualification work.
+switch requires the remaining clause, recursion, joint-search and qualification work.
 
 ## Build and inspect
 
@@ -114,6 +115,15 @@ Agda abstract/internal structure. NNUE presentation features do not decide
 typing or scope. A failed later argument can revisit earlier argument choices
 with the full checker state restored.
 
+The structural extension adds scoped datatype constructors, dependent record
+literals (including records without a named constructor), and absurd elimination.
+Field types come from Agda's instantiated telescope; later fields can infer
+omitted hidden/instance fields or cause earlier choices to be retried. Agda
+checks constructor indices and emptiness, including impossible indexed domains.
+The native draft retains generated helpers; replay never depends on a temporary
+checker-generated helper name. At source handoff, Agda's relative expression
+layout is anchored at the hole, including multiline typed lets.
+
 Use `ProverApplication.prove_evidence(task, engine=NativeEvidenceEngine(path))`
 from `agdaprover.application.service` and `agdaprover.application.evidence` to
 exercise the explicit application path. `path` is the built executable, not a
@@ -126,7 +136,7 @@ reconstructs the candidate and freshly validates it with ordinary Agda before
 reporting `verified`. This slice accepts standalone projects and explicit
 source imports; `.agda-lib` manifest routing awaits H8 and is explicitly
 rejected here, never silently ignored. Existing production library support is
-unchanged. Construction, induction, joint solving and editor migration remain
+unchanged. Clause splitting, induction, joint solving and editor migration remain
 later milestones, not implied by `search_available`.
 
 `work_units` optionally limits native inference/checking queries. Its default

@@ -116,8 +116,10 @@ The application normally supplies the pinned bundled OR artifact. The response
 includes its loaded hash, checked against the application's pinned model.
 
 `exclude_names` lists visible global aliases to exclude after Agda resolution.
-The current mutual group is excluded automatically: recursion is outside H4.
-Locals, scoped globals and projected functions are ranked as complete candidate
+The current mutual group is excluded automatically: recursion remains a later
+structural action. Excluding a record constructor also excludes construction by
+a record literal; changing syntax must not bypass exclusions.
+Locals, scoped globals, constructors and projected functions are ranked as complete candidate
 sets. `search-policy` events bind each ranking trace to the active request;
 NNUE decisions never prune candidates or authorize proofs.
 
@@ -134,6 +136,19 @@ checked evidence. A winner is checked again from the untouched parent before
 publishing its child. Prefix projections remain prefix heads; display reification
 is not used as a substitute for source expression structure. Native drafts also
 retain structured replay ancestry. No per-candidate callback to Python occurs.
+
+The capability list includes `structural-construction-v1` for datatype
+constructors, dependent record literals and Agda-checked absurd elimination.
+Hidden/instance record fields are inferred in the live branch with subsequent
+fields; record-field backtracking retains dependent constraints. Coinductive
+clause construction is not implied by this capability. Additive
+`record_proposals` and `absurd_proposals` counters in search cost count proposals,
+not accepted proofs. Inference and checking still charge `work_units`.
+
+Expression displays have column-zero relative Agda layout. The native
+application path preserves and anchors this layout in a parenthesized
+expression; it does not flatten typed let blocks through the legacy formatter.
+Fresh ordinary Agda validation remains mandatory after reconstruction.
 
 The process accepts checking pragmas after `--`, parsed by Agda's own option
 parser. The application passes its resolved command options explicitly. Library

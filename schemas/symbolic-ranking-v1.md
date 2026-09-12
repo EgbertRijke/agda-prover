@@ -53,12 +53,14 @@ models and proof inputs cannot specify executable paths.
 
 ## Decisions and proof credit
 
-`rankBatch` takes a typed ranking domain, unique candidate IDs/expressions,
+`rankBatch` takes a typed ranking domain, unique structural candidate IDs,
 nonnegative structural tiers in symbolic order, and feature views. It only
 reorders complete batches. Empty/singleton batches do not invoke a model.
 Explicit symbolic mode, absent role weights, unsupported domains and failed
 feature/scoring preparation preserve exact symbolic order. Invalid IDs or tiers
 are precise caller errors, not candidate pruning.
+Presentation strings need not be unique; overloaded names do not identify the
+underlying typed candidates. Their distinct IDs remain present in both orders.
 
 `agdaprover.symbolic-policy-decision.v1` records:
 

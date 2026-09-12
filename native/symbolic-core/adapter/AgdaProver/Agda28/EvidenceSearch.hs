@@ -35,6 +35,7 @@ import Agda.TypeChecking.Substitute (absApp, apply, raise)
 import Agda.Utils.Impossible (impossible)
 
 import AgdaProver.Symbolic.Evidence
+import AgdaProver.Agda28.Construction qualified as Construction
 import AgdaProver.Symbolic.NNUE.Features qualified as F
 import AgdaProver.Symbolic.NNUE.Native (NativeScorer)
 import AgdaProver.Symbolic.NNUE.Policy qualified as P
@@ -47,6 +48,7 @@ data Result = Result SearchStatus (Maybe A.Expr) [(T.Text, T.Text)]
 data Runtime s = Runtime SearchLimits (IORef SearchStats) (IORef Bool)
   P.Models P.RankingMode (Maybe (NativeScorer s)) (Value -> IO ()) T.Text
 data Seed = Seed A.Expr String String
+data GlobalInventory = GlobalInventory [A.Expr] (Set.Set QName)
 
 run :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode -> Maybe (NativeScorer s)
     -> (Value -> IO ()) -> String -> [String] -> I.Type -> TCM Result
@@ -58,7 +60,7 @@ run stats limits models mode native emit namespace excluded target = do
   let iterateDepth depth = do
         liftIO $ writeIORef pruned False
         modify runtime $ \s -> s { depthIterations = depthIterations s + 1, currentDepth = depth }
-        found <- search runtime globals depth target [] $ \expression term selected -> do
+        found <- search runtime (GlobalInventory globals forbidden) depth target [] $ \expression term selected -> do
           closed <- instantiateFull term
           pure $ if noMetas closed then Just (expression, selected) else Nothing
         observed <- liftIO $ readIORef stats
@@ -149,9 +151,20 @@ visibleGlobals forbidden = do
             -- This is a prefix function head, not a postfix projection
             -- elimination. Preserve that distinction through reconstruction.
             name:names -> Just $ A.Proj ProjPrefix $ I.AmbQ (anameName name :| map anameName names)
+          Right (ConstructorName _ constructors) ->
+            case filter (not . (`Set.member` forbidden) . anameName) (toList constructors) of
+              [] -> Nothing
+              name:names -> Just $ A.Con $ I.AmbQ (anameName name :| map anameName names)
           Right value@VarName{} -> Just $ A.nameToExpr value
           _ -> Nothing
-  pure $ nub $ catMaybes resolved
+  -- An overloaded constructor head cannot always be inferred without its
+  -- operands. Preserve each resolved, visible QName as a distinct proposal;
+  -- Agda still checks its result indices and the final printed expression.
+  pure $ nub $ concatMap expandConstructors $ catMaybes resolved
+ where
+  expandConstructors (A.Con (I.AmbQ names)) =
+    [A.Con $ I.AmbQ (name :| []) | name <- toList names]
+  expandConstructors expression = [expression]
 
 -- No inferred Agda term/type is retained by describe. Its presentation is used
 -- solely by the unchanged NNUE feature vocabulary. Actual use re-elaborates in
@@ -196,9 +209,9 @@ rankSeeds runtime@(Runtime _ ref _ models mode native emit namespace) target glo
 
 -- Continuations implement the AND part: if a later argument or final check
 -- fails, search revisits earlier argument choices with the original TCState.
-search :: Runtime s -> [A.Expr] -> Int -> I.Type -> [(T.Text,T.Text)]
+search :: Runtime s -> GlobalInventory -> Int -> I.Type -> [(T.Text,T.Text)]
        -> (A.Expr -> I.Term -> [(T.Text,T.Text)] -> TCM (Maybe a)) -> TCM (Maybe a)
-search runtime globals depth target selected use = do
+search runtime inventory@(GlobalInventory globals forbidden) depth target selected use = do
   done <- stopped runtime
   if done then pure Nothing else do
     modify runtime $ \s -> s { searchNodes = searchNodes s + 1 }
@@ -206,30 +219,57 @@ search runtime globals depth target selected use = do
     choices runtime $
       [queryCheck runtime expression target $ \term -> use expression term (selected ++ picked)
        | (Seed expression _ _, picked) <- seeds]
-      ++ [introduce]
+      ++ [constructRecord, introduce]
       ++ [produce expression picked | (Seed expression _ _, picked) <- seeds]
  where
+  constructRecord = Construction.recordPlan forbidden target >>= \case
+    Nothing -> pure Nothing
+    Just (names, telescope)
+      | depth <= 0 && not (null names) -> deferDepth runtime
+      | otherwise -> do
+          modify runtime $ \s -> s { recordProposals = recordProposals s + 1 }
+          fields names telescope [] selected
+  fields [] I.EmptyTel assignments picked = do
+    let expression = Construction.recordExpression assignments
+    queryCheck runtime expression target $ \term -> use expression term picked
+  fields (name:names) (I.ExtendTel domain rest) assignments picked = choices runtime $
+    [do expression <- Construction.omittedField $ getHiding domain
+        queryCheck runtime expression (I.unDom domain) $ \value ->
+          fields names (absApp rest value) assignments picked
+    | notVisible domain]
+    ++ [search runtime inventory (depth-1) (I.unDom domain) picked $ \expression value selected' ->
+          fields names (absApp rest value) (assignments ++ [(name, expression)]) selected']
+  fields _ _ _ _ = genericError "native-record-telescope-mismatch"
   introduce = reduce target >>= \case
     I.El _ (I.Pi domain codomain)
-      | depth <= 0 -> deferDepth runtime
-      | otherwise -> do
+      -> choices runtime
+        [do modify runtime $ \s -> s { absurdProposals = absurdProposals s + 1 }
+            let expression = Construction.absurdLambda $ getHiding domain
+            queryCheck runtime expression target $ \term -> use expression term selected
+        ,if depth <= 0 then deferDepth runtime else do
           modify runtime $ \s -> s { lambdaProposals = lambdaProposals s + 1 }
           let hint = if I.absName codomain `elem` ["", "_"] then "x" else I.absName codomain
           withFreshName noRange hint $ \name ->
-            addContext (name, domain) $ search runtime globals (depth-1)
+            addContext (name, domain) $ search runtime inventory (depth-1)
               (absApp (raise 1 codomain) $ I.Var 0 []) selected $ \body term picked ->
                 escapeContext impossible 1 $
                   let info = getArgInfo domain
                       expression = A.Lam exprNoRange (A.mkDomainFree $ Arg info $ unnamed $ A.mkBinder_ name) body
                       value = I.Lam info $ I.Abs hint term
-                  in use expression value picked
+                  in use expression value picked]
     _ -> pure Nothing
   produce expression picked = queryInfer runtime expression $ \(term, ty) ->
-    applyMore expression term ty depth (selected ++ picked)
+    choices runtime
+      [eliminate expression ty (selected ++ picked)
+      ,applyMore expression term ty depth (selected ++ picked)]
+  eliminate expression ty picked = do
+    modify runtime $ \s -> s { absurdProposals = absurdProposals s + 1 }
+    proposal <- Construction.eliminateEmpty expression ty target
+    queryCheck runtime proposal target $ \term -> use proposal term picked
   applyMore expression term ty remaining picked = reduce ty >>= \case
     I.El _ (I.Pi domain codomain)
       | remaining <= 0 -> deferDepth runtime
-      | otherwise -> search runtime globals (remaining-1) (I.unDom domain) picked $ \argument value selected' -> do
+      | otherwise -> search runtime inventory (remaining-1) (I.unDom domain) picked $ \argument value selected' -> do
           modify runtime $ \s -> s { applicationProposals = applicationProposals s + 1 }
           let info = getArgInfo domain
               applied = A.app expression [Arg info $ unnamed argument]
@@ -237,6 +277,7 @@ search runtime globals depth target selected use = do
               resultType = absApp codomain value
           choices runtime
             [queryCheck runtime applied target $ \checked -> use applied checked selected'
+            ,eliminate applied resultType selected'
             ,reduce resultType >>= \case
                -- Hidden/instance arguments may occur between explicit ones.
                -- Agda inserts their metas and infers them from later operands;

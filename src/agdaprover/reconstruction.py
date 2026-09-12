@@ -213,9 +213,14 @@ def reconstruct_intro_as_clause(
 
 
 def reconstruct_hole_completion(
-    source: str, goal: GoalInfo, body: str
+    source: str, goal: GoalInfo, body: str, *, native_layout: bool = False
 ) -> dict[str, Any]:
-    """Replace one selected hole with a complete kernel-checkable expression."""
+    """Replace one selected hole with a complete kernel-checkable expression.
+
+    ``native_layout`` accepts a column-zero Agda-printer expression. Preserve
+    that printer's relative layout instead of parsing/reformatting its syntax.
+    This is a rendering contract, not proof authority; fresh checking is required.
+    """
 
     if not body.strip() or re.search(r"\{![\s\S]*?!\}|(?<![\w?])\?(?![\w?])", body):
         raise ValueError("hole completion is empty or still contains a proof hole")
@@ -223,6 +228,20 @@ def reconstruct_hole_completion(
     original = source[hole_start:hole_end]
     if not _is_hole(original):
         raise ValueError("hole completion does not select a proof hole")
+    if native_layout:
+        column, _ = _line_indentation(source, hole_start)
+        # Parentheses preserve the expression boundary even inside applications.
+        # The first character is one column after the opening parenthesis.
+        anchored = "(" + body.replace("\n", "\n" + " " * (column + 1)) + ")"
+        return _source_edit(
+            source,
+            start_offset=hole_start,
+            end_offset=hole_end,
+            replacement=anchored,
+            style="term",
+            binders=(),
+            body=anchored,
+        )
     formatted = _format_at_hole(source, hole_start, body)
     return _source_edit(
         source,
