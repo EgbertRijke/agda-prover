@@ -648,7 +648,9 @@ its role sidecar. Reuse requires exact byte equality and still enforces the
 requested role; a path, timestamp or hash alone is not a reuse witness. Missing,
 changed or invalid files do not fall back to cached weights. Existing retained
 runs keep their immutable model versions when a later request changes weights.
-The cache ends with the session and never stores proof evidence or training data.
+On exact hits the existing source-byte buffers are retained, not replaced by
+the new identical read. The cache ends with the session and never stores proof
+evidence or training data.
 `primary_model_path` optionally supplies a focused-branch or proof-term APNNUE
 for proof search, or a one-step APNNUE for `start-step`. The old
 `focused_model_path` field is a compatibility alias; two non-null paths are

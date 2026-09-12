@@ -254,7 +254,9 @@ dispatch code belongs here.
 ## Existing NNUE compatibility
 
 Repeated operations in one native session reuse decoded models after comparing
-the current complete file bytes (and legacy role sidecar). There is one cache
+the current complete file bytes (and legacy role sidecar). Exact hits keep the
+existing byte buffers as well as the decoded model; newly read identical buffers
+are not promoted into long-lived cache entries. There is one cache
 slot per model role. Custom-model edits and invalid inputs remain detectable;
 already retained searches keep their original weights. This saves repeated
 decoding, not Agda proof checking, and does not change scores or search order.

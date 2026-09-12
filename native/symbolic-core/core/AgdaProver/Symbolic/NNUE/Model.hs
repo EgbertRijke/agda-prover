@@ -158,14 +158,16 @@ loadModelCached (ModelCache cache) expected path = do
     Left failure -> pure $ Left failure
     Right witness -> modifyMVar cache $ \entries -> do
       let matches = [model | (saved, model) <- Map.elems entries, saved == witness]
-          loaded = case matches of
-            model:_ -> model <$ maybe (Right ()) (`requireRole` model) expected
-            [] -> decodeSource expected witness
-      -- Force validation before publishing the slot. Cancellation/decoding
-      -- failure leaves the previous cache intact, never a suspended decoder.
-      case loaded of
-        Left failure -> pure (entries, Left failure)
-        Right model -> pure (Map.insert (modelRole model) (witness, model) entries, Right model)
+      case matches of
+        -- Identical bytes do not replace the long-lived source witness with
+        -- a newly read buffer. Keep the cache's original allocation as well
+        -- as its model; the temporary read becomes collectible immediately.
+        model:_ -> pure (entries, model <$ maybe (Right ()) (`requireRole` model) expected)
+        [] -> case decodeSource expected witness of
+          -- Force validation before publishing the slot. Cancellation/decoding
+          -- failure leaves the previous cache intact, never a suspended decoder.
+          Left failure -> pure (entries, Left failure)
+          Right model -> pure (Map.insert (modelRole model) (witness, model) entries, Right model)
 
 decodeSource :: Maybe ModelRole -> ModelSource -> Either String Model
 decodeSource expected (ModelSource bytes sidecar) = decodeModel expected
