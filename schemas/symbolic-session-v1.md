@@ -2,7 +2,8 @@
 
 H2 provides single-owner checking, retained branches, explicit eviction/replay,
 source invalidation, and cumulative work. H4 adds the coarse `solve-evidence`
-operation below. Neither grants proof verification authority or edits user files.
+operation; H5.2 adds Agda-native clause proposals. None grants proof verification
+authority or edits user files.
 
 ## Invariants
 
@@ -14,7 +15,7 @@ operation below. Neither grants proof verification authority or edits user files
   `TCState`. The existing JSON bridge remains unchanged.
 - Each candidate starts from the requested full state. Failure, interruption,
   observation, and success all leave the parent available and unchanged.
-  Success publishes a different child key. Checked native evidence belongs to
+  A successful proof transition publishes a different child key. Checked native evidence belongs to
   that child, not to a parent or sibling with coincidentally equal meta numbers.
 - Pending interactions, hidden metas, and constraints remain obligations.
   `apparently-closed` is not `verified`; fresh validation remains independent.
@@ -50,6 +51,7 @@ Each operation permits only its listed additional fields:
 | `pending` | `state` | Open goal IDs, open metas, constraints |
 | `observe` | `state`, `goal_id`, `mode` | Structured observation v1 |
 | `give` | `state`, `goal_id`, `expression` | Child state, native evidence view, obligations |
+| `make-clause` | `state`, `goal_id`, `action` | Parent-bound native clause proposal, not a child state |
 | `solve-evidence` | `state`, `goal_id`, `limits`, `ranker`, `model_path`, `native_path`, `exclude_names` | Search status, provisional child/evidence, cumulative search cost, selected policy choices |
 | `evict` | `state` | Drop child snapshot; preserve replay ancestry |
 | `replay` | `state` | Rechecked state key (resident states are returned unchanged) |
@@ -83,8 +85,8 @@ means no interaction goals remain, but hidden metas or constraints do.
 ## Resource and ownership boundaries
 
 The native ledger counts entered owner requests, checking attempts, accepted and
-rejected checks, replayed actions, cancellations, input bytes read, and elapsed
-monotonic nanoseconds/process CPU picoseconds during owner operations. It is
+rejected checks, clause queries, replayed actions, cancellations, input bytes read,
+and elapsed monotonic nanoseconds/process CPU picoseconds during owner operations. It is
 not an OS-wide resource budget and excludes initial Agda loading and transport
 work; an external supervisor must account for the entire worker process.
 Every work dispatch has its own monotone receipt count, including requests
@@ -103,6 +105,43 @@ Checks compare witnesses before and after an operation. Drift clears the branch
 table and advances the epoch, even if the old bytes are subsequently restored.
 Reloading requires a new session; no unchecked key can resurrect an old branch.
 The source tree's declaration bodies are never rewritten by this interface.
+
+## Clause operation
+
+`action` uses the exact existing
+[`agdaprover.clause-action.v1` contract](interaction-operations-v1.md): an ordered,
+nonempty `variables` batch, `result`, or `ellipsis`. Unknown versions, fields,
+mixed intents, empty variable batches, and whitespace-separated subjects inside
+one name are rejected before entering Agda. Actual names and admissibility are
+resolved by Agda's `makeCase`, not by a local syntax or datatype classifier.
+
+Agda can expose hidden/instance binders instead of splitting them, revise later
+subjects after a dependent split, introduce trailing arguments, split record
+results into copatterns, and expand ellipses. Its options, without-K restrictions,
+scope, and preceding/following clauses remain authoritative. Named splitting
+does not make module-, let-, or lambda-bound variables into clause parameters.
+
+Success returns `parent`, `goal_id`, and `proposal`; it does **not** issue a child
+key. The proposal schema is `agdaprover.symbolic-clauses.v1`, with
+`status: "proposed"`, echoed `action`, `variant` (`Function` or `ExtendedLambda`), a
+structured `function` identity with a presentation `display`, `clause_count`,
+and Agda-rendered `clauses`. `source_range` and `goal_range` are zero-based,
+half-open character offsets from Agda's original abstract clause and interaction
+point. They are observational ranges, not authorization to replace source.
+`applied` and `proof_authority` are both false.
+
+Internally the opaque, parent-branded proposal retains Agda abstract clauses,
+case context, and the generation checking state. Rendering is only a view;
+future clause execution must use the native structure with a validated parent,
+not reconstitute semantics from that display. A wire response does not persist
+an executable proposal handle. Generation leaves the parent unchanged, including
+on failure/cancellation, and charges `checking_attempts` and `clause_queries`.
+It does not charge `accepted_checks` or count the generated holes as accepted
+subgoals. Replay an evicted parent first and regenerate against its new key.
+
+This operation is the clause primitive, not autonomous clause search. Executing
+generated clauses, integrating them into search, reconstructing authorized
+patches, and freshly validating them remain separate responsibilities.
 
 ## Evidence operation
 

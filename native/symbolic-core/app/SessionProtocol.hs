@@ -24,6 +24,7 @@ import AgdaProver.Agda28.Session qualified as S
 import AgdaProver.Symbolic.Protocol qualified as P
 import AgdaProver.Symbolic.SessionTypes hiding (Pending)
 import AgdaProver.Symbolic.Evidence qualified as Search
+import AgdaProver.Symbolic.Clause (ClauseAction)
 import AgdaProver.Symbolic.NNUE.Model qualified as Model
 import AgdaProver.Symbolic.NNUE.Policy qualified as Policy
 import AgdaProver.Symbolic.NNUE.Native (withNativeScorer)
@@ -31,6 +32,7 @@ import AgdaProver.Symbolic.NNUE.Native (withNativeScorer)
 data Operation = Pending StateKey | Observe StateKey InteractionId P.ObservationMode
   | Give StateKey InteractionId DraftExpression | Evict StateKey | Replay StateKey
   | SolveEvidence StateKey InteractionId Search.SearchLimits Policy.RankingMode (Maybe FilePath) (Maybe FilePath) [String]
+  | MakeClause StateKey InteractionId ClauseAction
   | Cost | Cancel | Close
 data Request = Request Integer Operation
 data Active = Active Integer ThreadId (MVar ())
@@ -67,6 +69,9 @@ parseRequest = withObject "session request" $ \o -> do
     "give" -> do
       fields ["state", "goal_id", "expression"]
       Give <$> o .: "state" <*> goal <*> (DraftExpression <$> o .: "expression")
+    "make-clause" -> do
+      fields ["state", "goal_id", "action"]
+      MakeClause <$> o .: "state" <*> goal <*> o .: "action"
     "solve-evidence" -> do
       fields ["state", "goal_id", "limits", "ranker", "model_path", "native_path", "exclude_names"]
       mode <- o .: "ranker" >>= \case
@@ -182,6 +187,8 @@ perform :: S.Session s -> (Value -> IO ()) -> Operation -> IO Value
 perform session emit operation = case operation of
   Pending key -> resolved key $ \ref -> result toJSON <$> S.pending session ref
   Observe key goal mode -> resolvedGoal key goal $ \ref -> result id <$> S.inspect session ref mode
+  MakeClause key goal action -> resolvedGoal key goal $ \ref ->
+    result S.clauseView <$> S.makeClauses session ref action
   Give key goal expression -> resolvedGoal key goal $ \ref -> do
     answer <- S.tryExpression session ref expression
     case answer of

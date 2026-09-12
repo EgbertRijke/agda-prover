@@ -11,6 +11,7 @@ module AgdaProver.Agda28.Session
   , withSession, stateKey, restoreReference, restoreGoalReference, goalState, goalId
   , inspect, pending, tryExpression
   , solveEvidence
+  , ClauseProposal, makeClauses, clauseView
   , transitionState, transitionKind, transitionPending, transitionEvidence
   , evict, replay, close, cancel, work, evidenceView
   ) where
@@ -50,6 +51,8 @@ import Agda.Utils.FileName (filePath)
 import Agda.Utils.IO.UTF8 qualified as UTF8
 import AgdaProver.Agda28.Observation (observeGoal, encodeGoal, openInteractionPoints)
 import AgdaProver.Agda28.EvidenceSearch qualified as Search
+import AgdaProver.Agda28.Clauses qualified as Clauses
+import AgdaProver.Symbolic.Clause (ClauseAction)
 import AgdaProver.Symbolic.Evidence qualified as Search
 import AgdaProver.Symbolic.NNUE.Native (NativeScorer)
 import AgdaProver.Symbolic.NNUE.Policy qualified as Policy
@@ -78,6 +81,11 @@ type role Transition nominal
 data Transition s = Transition
   { transitionState :: StateRef s, transitionKind :: TransitionKind
   , transitionPending :: Pending, transitionEvidence :: CheckedEvidence s }
+
+-- A planning snapshot is not an accepted child state. Native syntax and the
+-- state in which it was generated travel together under the parent's brand.
+type role ClauseProposal nominal
+data ClauseProposal s = ClauseProposal (GoalRef s) Clauses.ClauseSnapshot TCState
 
 -- Preserve checked-source abstract syntax as well as internal evidence. Agda's
 -- display reifier may use postfix projections: display syntax is not a draft
@@ -263,6 +271,25 @@ tryExpression :: Session s -> GoalRef s -> DraftExpression
               -> IO (Either Failure (Transition s))
 tryExpression session goal expression = request session (goalState goal) $ \owner state ->
   check session owner (goalState goal) state (DraftAction (goalId goal) $ TextDraft expression) False
+
+makeClauses :: Session s -> GoalRef s -> ClauseAction -> IO (Either Failure (ClauseProposal s))
+makeClauses session goal action = request session (goalState goal) $ \owner state -> do
+  charge (sessionWork session) $ \w -> w
+    { checkingAttempts = checkingAttempts w + 1, clauseQueries = clauseQueries w + 1 }
+  let point = goalId goal
+  (generated, planningState) <- kernel session state $ do
+    exists <- elem point <$> openInteractionPoints
+    if not exists then pure $ Left UnknownGoal else Right <$> Clauses.generate point action
+  let result = generated >>= id
+  case result of
+    Left _ -> charge (sessionWork session) $ \w -> w { rejectedChecks = rejectedChecks w + 1 }
+    Right _ -> pure ()
+  pure (owner, (\snapshot -> ClauseProposal goal snapshot planningState) <$> result)
+
+clauseView :: ClauseProposal s -> Value
+clauseView (ClauseProposal goal snapshot _) = object
+  ["parent" .= stateKey (goalState goal), "goal_id" .= interactionId (goalId goal)
+  ,"proposal" .= Clauses.view snapshot, "proof_authority" .= False]
 
 -- One coarse request owns all speculative choices. Costs live outside TCM and
 -- survive cancellation. A winning native term is rechecked from the ORIGINAL

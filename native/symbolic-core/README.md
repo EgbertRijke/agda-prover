@@ -43,8 +43,8 @@ never a verified proof and never edits goal bodies.
 ## Resident checking
 
 `session` loads once and reads newline-delimited JSON requests. It supports
-observations, speculative `give`, retained branches, eviction/replay, cost
-snapshots, cancellation, and close. `solve-evidence` additionally chooses typed
+observations, speculative `give`, native `make-clause` proposals, retained branches,
+eviction/replay, cost snapshots, cancellation, and close. `solve-evidence` additionally chooses typed
 applications and lambdas inside that resident checker. See [the session protocol](../../schemas/symbolic-session-v1.md)
 for fields, events, resource supervision, and failure semantics.
 
@@ -59,6 +59,12 @@ exact source bytes around each native operation; it claims no whole-search
 speedup yet. Cancellation restores the parent without resetting work counters.
 An evicted branch can be replayed, but replay issues new keys rather than
 silently changing the meaning of old checked evidence.
+
+`make-clause` delegates ordered variable batches, hidden/instance binder exposure,
+result splitting and ellipsis expansion to Agda. It retains native clauses and
+generation state internally, rendering with Agda's own interaction printer.
+Generation is not acceptance: no source is edited, no child is issued, and no
+proof is claimed. Autonomous use of these proposals is still migration work.
 
 ## Boundaries
 
@@ -136,7 +142,7 @@ reconstructs the candidate and freshly validates it with ordinary Agda before
 reporting `verified`. This slice accepts standalone projects and explicit
 source imports; `.agda-lib` manifest routing awaits H8 and is explicitly
 rejected here, never silently ignored. Existing production library support is
-unchanged. Clause splitting, induction, joint solving and editor migration remain
+unchanged. Autonomous clause search, induction, joint solving and editor migration remain
 later milestones, not implied by `search_available`.
 
 `work_units` optionally limits native inference/checking queries. Its default
