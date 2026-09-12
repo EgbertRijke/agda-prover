@@ -42,7 +42,10 @@ data Config s n = Config
 
 -- Selection is caller authority, not an independence claim. Unselected goals
 -- remain in the same native state; newly created AND children inherit selection.
-data SearchState s = SearchState (S.StateRef s) (Maybe (Set.Set Int)) (Set.Set Int)
+-- Retain the branch's AND order separately from Agda's interaction identifiers.
+-- A refinement replaces one obligation with fresh identifiers, which Agda
+-- appends after unrelated source goals. Those identifiers are not priorities.
+data SearchState s = SearchState (S.StateRef s) (Maybe (Set.Set Int)) [Int]
 data Continuation s = RetryEvidence (SearchState s) (S.GoalRef s) Natural
 type Queue s = A.Agenda (SearchState s) (Move s) (Continuation s)
 
@@ -57,11 +60,11 @@ data Outcome s
   | Paused (Queue s) | Interrupted Interruption (Queue s) | Exhausted
 
 start :: S.StateRef s -> Queue s
-start state = A.start $ SearchState state Nothing Set.empty
+start state = A.start $ SearchState state Nothing []
 
 startSelected :: S.StateRef s -> [Int] -> [Int] -> Queue s
 startSelected state selected allGoals = A.start $
-  SearchState state (Just $ Set.fromList selected) (Set.fromList allGoals)
+  SearchState state (Just $ Set.fromList selected) allGoals
 
 step :: S.Session s -> Config s n -> Queue s -> IO (Outcome s)
 step session config queue = runExceptT (A.step hooks queue) >>= \case
@@ -75,10 +78,12 @@ step session config queue = runExceptT (A.step hooks queue) >>= \case
   hooks = A.Hooks
     { A.charge = liftIO $ chargeStep config
     , A.observe = liftIO . observe config
-    , A.inspect = \(SearchState state selected _) -> do
+    , A.inspect = \(SearchState state selected order) -> do
         obligations <- require $ S.pending session state
-        let selectedPending = maybe (pendingGoals obligations)
-              (\chosen -> filter (`Set.member` chosen) $ pendingGoals obligations) selected
+        let live = Set.fromList $ pendingGoals obligations
+            ordered = filter (`Set.member` live) order ++
+              filter (`notElem` order) (pendingGoals obligations)
+            selectedPending = maybe ordered (\chosen -> filter (`Set.member` chosen) ordered) selected
         if null selectedPending then
           -- Partial selection is only a candidate relative to remaining source
           -- holes, never apparent global closure. Export/fresh validation must
@@ -93,8 +98,8 @@ step session config queue = runExceptT (A.step hooks queue) >>= \case
     , A.resume = \(RetryEvidence state goal allowance) -> execute state $ SlicedEvidence goal allowance
     -- Identical issued keys witness the same immutable branch only. Equal
     -- printed goals and equal endpoint types never authorize state merging.
-    , A.sameState = \(SearchState a sa _) (SearchState b sb _) ->
-        pure $ S.stateKey a == S.stateKey b && sa == sb }
+    , A.sameState = \(SearchState a sa oa) (SearchState b sb ob) ->
+        pure $ S.stateKey a == S.stateKey b && sa == sb && oa == ob }
   execute current@(SearchState state selected _) move = do
     allowed <- liftIO $ chargeMove config
     if not allowed then throwError ActionAllowanceExhausted else pure ()
@@ -136,14 +141,23 @@ step session config queue = runExceptT (A.step hooks queue) >>= \case
       Right (E.FragmentExhausted, Nothing, _) -> pure A.Declined
       Right (E.FoundCandidate, Just next, _) -> transition current $ Right next
       _ -> throwError $ SessionFailure $ KernelFailure "agenda-inconsistent-search-result"
-  transition (SearchState _ selected previousGoals) = \case
+  transition (SearchState parent selected previousOrder) = \case
     Left failure -> declined failure
     Right next -> do
+      -- The all-goal entry point is lazy about its initial pending query. Read
+      -- it once on successful root transitions, never interpret every original
+      -- source goal as a newly generated child.
+      before <- if null previousOrder then pendingGoals <$> require (S.pending session parent)
+        else pure previousOrder
       liftIO $ accepted config next
-      let after = Set.fromList $ pendingGoals $ S.transitionPending next
+      let current = pendingGoals $ S.transitionPending next
+          previousGoals = Set.fromList before
+          after = Set.fromList current
+          children = filter (`Set.notMember` previousGoals) current
+          order = children ++ filter (`Set.member` after) before
           chosen = fmap (\active -> Set.union (Set.intersection active after)
             (Set.difference after previousGoals)) selected
-      pure $ A.Advanced $ SearchState (S.transitionState next) chosen after
+      pure $ A.Advanced $ SearchState (S.transitionState next) chosen order
   declined = \case
     KernelRejected{} -> pure A.Declined
     KernelBlocked{} -> pure A.Declined

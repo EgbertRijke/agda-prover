@@ -5,7 +5,7 @@
 -- adapter alone observes, checks and reconstructs them.
 module AgdaProver.Symbolic.Agenda
   ( Agenda, Proposal (..), Inspection (..), Transition (..), Outcome (..)
-  , Event (..), Hooks (..), start, pending, step ) where
+  , Event (..), Hooks (..), rankedProposals, start, pending, step ) where
 
 import Data.Map.Strict qualified as Map
 import Data.List (foldl')
@@ -13,6 +13,13 @@ import Numeric.Natural (Natural)
 
 data Proposal action = Proposal
   { action :: action, penalty :: Natural } deriving (Eq, Show)
+
+-- Widen an already ranked family across agenda cost tiers. Ranking only the
+-- insertion order would put its entire catalogue ahead of every descendant
+-- at the next depth, defeating learned guidance in a broad scope. No proposal
+-- is removed: even the last has a finite, caller-visible scheduling cost.
+rankedProposals :: Natural -> [action] -> [Proposal action]
+rankedProposals delay = zipWith (flip Proposal) [delay..]
 data Inspection action result = Open [Proposal action] | Candidate result | Stuck
   deriving (Eq, Show)
 data Transition state continuation = Advanced state | Deferred continuation | Declined
