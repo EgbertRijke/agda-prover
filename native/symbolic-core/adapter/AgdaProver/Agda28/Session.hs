@@ -17,7 +17,7 @@ module AgdaProver.Agda28.Session
   , Refutation.Kind (..)
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
-  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, preferStructures, withoutResultIntroductionOverlap, proposeTerms, proposeStructures, proposeEquations, proposeConstructors, applyTerm
+  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, preferStructures, withoutResultIntroductionOverlap, proposeTerms, proposeTermsWithTargetOperands, proposeStructures, proposeEquations, proposeConstructors, applyTerm
   , ClauseMove, clauseMoveGoal, clauseMoveIsBatch, applyClauseMove, ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
@@ -589,7 +589,12 @@ solveHelper session goal limits models mode native view expression emit =
 proposeTerms :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
              -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
              -> IO (Search.SearchStats, Either Failure (TermProposals s))
-proposeTerms = proposeTermsUsing Search.primitiveProposals
+proposeTerms = proposeTermsWithTargetOperands True
+
+proposeTermsWithTargetOperands :: Bool -> Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
+                             -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
+                             -> IO (Search.SearchStats, Either Failure (TermProposals s))
+proposeTermsWithTargetOperands enabled = proposeTermsUsing $ Search.primitiveProposals enabled
 
 proposeStructures :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
                   -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
@@ -742,6 +747,7 @@ recordSearchWork session observed =
     { checkingAttempts = checkingAttempts w + Search.checkerQueries observed
         + Search.inferenceQueries observed + Search.recursiveContextQueries observed
     , symbolicActions = symbolicActions w + Search.focusedActions observed + Search.algebraActions observed
+        + Search.applicationGenerationSteps observed
     , rejectedChecks = rejectedChecks w + Search.rejectedQueries observed
     , helperQueries = helperQueries w + Search.helperInferenceQueries observed
     , clauseQueries = clauseQueries w + Search.helperClauseQueries observed }

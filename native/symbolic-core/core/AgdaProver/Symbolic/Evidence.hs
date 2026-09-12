@@ -45,7 +45,7 @@ retryDepth stats
 data SearchStats = SearchStats
   { workUnits :: !Integer, checkerQueries :: !Integer, inferenceQueries :: !Integer
   , rejectedQueries :: !Integer, blockedQueries :: !Integer
-  , lambdaProposals :: !Integer, applicationProposals :: !Integer
+  , lambdaProposals :: !Integer, applicationProposals :: !Integer, applicationGenerationSteps :: !Integer
   , recordProposals :: !Integer, absurdProposals :: !Integer
   , recursiveContextQueries :: !Integer, recursiveProposals :: !Integer, recursiveValidationQueries :: !Integer
   , copatternProposals :: !Integer
@@ -64,7 +64,7 @@ emptyStats :: SearchStats
 emptyStats = SearchStats
   { workUnits = 0, checkerQueries = 0, inferenceQueries = 0
   , rejectedQueries = 0, blockedQueries = 0
-  , lambdaProposals = 0, applicationProposals = 0
+  , lambdaProposals = 0, applicationProposals = 0, applicationGenerationSteps = 0
   , recordProposals = 0, absurdProposals = 0
   , recursiveContextQueries = 0, recursiveProposals = 0, recursiveValidationQueries = 0
   , copatternProposals = 0
@@ -84,6 +84,7 @@ instance ToJSON SearchStats where
     ,"inference_queries" .= inferenceQueries s, "rejected_queries" .= rejectedQueries s
     ,"blocked_queries" .= blockedQueries s, "lambda_proposals" .= lambdaProposals s
     ,"application_proposals" .= applicationProposals s, "nodes" .= searchNodes s
+    ,"application_generation_steps" .= applicationGenerationSteps s
     ,"record_proposals" .= recordProposals s, "absurd_proposals" .= absurdProposals s
     ,"recursive_context_queries" .= recursiveContextQueries s
     ,"recursive_proposals" .= recursiveProposals s

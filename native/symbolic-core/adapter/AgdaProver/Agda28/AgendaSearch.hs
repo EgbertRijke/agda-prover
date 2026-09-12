@@ -31,7 +31,7 @@ data Settings = Settings
   , initialMacroWork :: Natural, evidenceMacro :: Bool, actionLimit :: Maybe Integer
   , dependencyOrdering :: Bool, depthLimit :: Maybe Natural, progressOrdering :: Bool
   , retryWorkOrdering :: Bool, jointConstructorPropagation :: Bool, multiSubjectClauses :: Bool
-  , evidenceDepthReuse :: Bool, coalesceIntroductions :: Bool }
+  , evidenceDepthReuse :: Bool, coalesceIntroductions :: Bool, targetFunctionOperands :: Bool }
 
 data Metrics = Metrics
   { schedulerSteps :: !Integer, modelItems :: !Integer, modelNanoseconds :: !Integer
@@ -118,6 +118,7 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "retry_ordering" .= (if retryWorkOrdering settings then "spent-work-v1" else "uniform-v1" :: String),
     "evidence_depth_reuse" .= evidenceDepthReuse settings,
     "coalesce_introductions" .= coalesceIntroductions settings,
+    "target_function_operands" .= targetFunctionOperands settings,
     "joint_constructor_propagation" .= jointConstructorPropagation settings,
     "multi_subject_clauses" .= multiSubjectClauses settings,
     "model_items_scored" .= modelItems measured, "model_elapsed_ns" .= modelNanoseconds measured,
@@ -193,7 +194,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
       Left failure -> pure $ Left failure
       Right goal -> do
         budget <- moveAllowance
-        (termCost, atomicTerms) <- S.proposeTerms session goal budget (models settings)
+        (termCost, atomicTerms) <- S.proposeTermsWithTargetOperands (targetFunctionOperands settings) session goal budget (models settings)
           (ranking settings) native (excluded settings) trace
         recordSearch termCost
         constructedTerms <- case atomicTerms of

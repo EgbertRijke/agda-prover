@@ -158,6 +158,21 @@ holes and inferred hidden parameters remain coupled in the checked child;
 partial applications retain their structure. Catalogue censorship is a distinct
 typed result, not an empty completed search. Existing NNUE head ranking and
 shared structural ordering apply.
+
+The catalogue also specializes a function-valued operand with an authorized
+callable mentioned in the goal's native syntax. Agda's telescope identifies
+the function slot; local binding identities and resolved declaration names
+identify hints without parsing their display. Constructors, dependent
+functions and function-valued record projections share this path, including
+hidden/instance binders. One operand is specialized per proposal; all other
+operands retain ordinary holes or inference, and unspecialized applications
+remain available. Occurrence in the goal never grants premise visibility.
+`target_function_operands=false` disables these additional proposals and their
+observations for ablation. The run receipt records the setting across slices.
+`application_generation_steps` counts specialized-spine construction against
+the existing work allowance and physical symbolic ledger; Agda queries keep
+their own counters. Every proposed application still needs normal checking.
+
 When compound construction supplies the same single-lambda/open-body action,
 the controller keeps its preferred copy instead of also scheduling the ordinary
 one. This comparison requires the same parent, goal and binder modality; it

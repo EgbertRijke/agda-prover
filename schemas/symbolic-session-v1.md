@@ -421,11 +421,11 @@ nullable paths. Models are loaded once for this run. `focused_search` is boolean
 and `exclude_names` is the existing list of forbidden premise names. The optional
 `scheduling` object has the first four required fields below and optional
 `dependency_ordering`, `progress_ordering`, `retry_work_ordering`, `evidence_depth_reuse`, `coalesce_introductions`,
-`joint_constructor_propagation` and `multi_subject_clauses` booleans
+`target_function_operands`, `joint_constructor_propagation` and `multi_subject_clauses` booleans
 (defaults shown):
 
 ```json
-{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true,"evidence_depth_reuse":true,"coalesce_introductions":true,"joint_constructor_propagation":true,"multi_subject_clauses":true}
+{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true,"evidence_depth_reuse":true,"coalesce_introductions":true,"target_function_operands":true,"joint_constructor_propagation":true,"multi_subject_clauses":true}
 ```
 
 Delays are nonnegative scheduling priorities, not proof-depth restrictions.
@@ -481,6 +481,28 @@ unchanged. False restores both routes for ablation. The cost receipt includes
 the configured boolean, retained across slices. Like the other switches it
 rejects null, strings, numbers and containers instead of treating them as
 booleans. No resource allowance, model weights or fresh-check policy changes.
+
+`target_function_operands` adds goal-guided higher-order application proposals.
+The adapter observes Pi domains using Agda reduction, and finds native binding
+and declaration occurrences in the instantiated, reified goal. Only positively
+observed callable seeds from the already authorized inventory may fill those
+slots. Target occurrence is a heuristic hint, not visibility, type-conversion
+or proof authority. All hiding and modality annotations remain on the native
+application spine. This includes callables with only hidden/instance arguments,
+function-valued projections and functions supplied as values.
+
+Each additional proposal fixes one function slot; other slots remain ordinary
+obligations or inferred arguments. No Cartesian enumeration of simultaneous
+operand choices is added. Existing application prefixes remain available and
+the existing head NNUE ordering is retained. False skips the extra observations
+and specializations. The strict boolean is recorded in the agenda receipt and
+retained across slices. This option applies to the primitive application
+catalogue, including one-step search, not the direct coarse `solve-evidence`
+operation. In evidence-cost v2, the additive `application_generation_steps`
+counter charges each constructed specialized-spine node to both `work_units`
+and the session's `symbolic_actions`. Domain observations remain separately
+charged as inference queries. Censorship retains the normal typed paused result;
+raising the allowance never erases already spent work.
 
 `joint_constructor_propagation` offers target-directed constructor closures for
 other selected pending goals with positively observed dependencies on selected

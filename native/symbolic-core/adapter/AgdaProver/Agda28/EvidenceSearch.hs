@@ -22,7 +22,7 @@ import Data.Text qualified as T
 
 import Agda.Syntax.Abstract qualified as A
 import Agda.Syntax.Abstract.Name (QName)
-import Agda.Syntax.Abstract.Views (AppView' (..), appView, traverseExpr)
+import Agda.Syntax.Abstract.Views (AppView' (..), appView, foldExpr, traverseExpr)
 import Agda.Syntax.Common
 import Agda.Syntax.Common.Pretty (prettyShow)
 import Agda.Syntax.Concrete.Name qualified as C
@@ -82,6 +82,9 @@ data GlobalInventory = GlobalInventory [A.Expr] (Set.Set QName) (Maybe Recursion
 -- binder in the original goal context, never a printed name. Argument/index
 -- conversion and universe comparison remain Agda's responsibility.
 data ExpectedShape = FunctionShape | SortShape | FamilyShape QName | LocalShape Int deriving Eq
+
+data ArgumentShape = ArgumentShape
+  { argumentInfo :: ArgInfo, argumentResult :: Maybe ExpectedShape, functionArgument :: Bool }
 
 run :: IterationDepth -> IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode -> Maybe (NativeScorer s)
     -> Bool -> (Value -> IO ()) -> String -> [String] -> InteractionId -> Maybe Recursion.Owner
@@ -157,11 +160,11 @@ runHelper stats limits models mode native emit namespace point view application 
 -- native holes retain dependencies for the shared agenda instead of recursing
 -- through every operand before other actions get a turn. No arity cap and no
 -- printed type matching. Rechecking each proposal owns all meta assignments.
-primitiveProposals :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
+primitiveProposals :: Bool -> IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
                    -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> [String]
                    -> Maybe Recursion.Owner -> InteractionId -> I.Type
                    -> TCM [(A.Expr, [(T.Text, T.Text)])]
-primitiveProposals stats limits models mode native emit namespace excluded owner point target = do
+primitiveProposals targetFunctions stats limits models mode native emit namespace excluded owner point target = do
   pruned <- liftIO $ newIORef False
   originalSize <- getContextSize
   let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
@@ -175,9 +178,15 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
         allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
         if not allowed then pure (Nothing, []) else reduce ty >>= \case
           I.El _ (I.Pi domain body) -> do
+            inspectDomain <- if targetFunctions then charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+              else pure False
+            functionDomain <- if inspectDomain then reduce (I.unDom domain) >>= \case
+              I.El _ I.Pi{} -> pure True
+              _ -> pure False
+              else pure False
             (result, rest) <- underAbstraction domain body signature
             pure (if visible domain then Just FunctionShape else result,
-              (getArgInfo domain, result):rest)
+              ArgumentShape (getArgInfo domain) result functionDomain:rest)
           I.El _ (I.Sort _) -> pure (Just SortShape, [])
           I.El _ (I.Var index _) -> do
             -- Parameters from the original goal are rigid, but variables
@@ -196,26 +205,35 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
       compatible Nothing _ = True
       compatible _ Nothing = True
       compatible (Just wanted) (Just offered) = wanted == offered
-      applications expected scope expression infos = do
-        inferred <- go False False expression infos
+      applications :: Maybe ExpectedShape -> ScopeInfo -> A.Expr -> Maybe (Int, A.Expr)
+                   -> [ArgumentShape] -> TCM [A.Expr]
+      applications expected scope expression anchor infos = do
+        inferred <- go False False 0 expression infos
         -- Hiding is an inference preference, not a restriction on supplying
         -- an operand. Keep the original inference-first spine, then expose
         -- hidden/instance operands as native interaction holes as well. This
         -- is linear in the telescope, not a powerset of omission patterns.
-        supplied <- if any (notVisible . fst) infos
-          then go True False expression infos else pure []
+        supplied <- if any (notVisible . argumentInfo) infos
+          then go True False 0 expression infos else pure []
         pure $ inferred ++ supplied
        where
-        go _ _ _ [] = pure []
-        go supplyHidden hiddenSeen function ((info, result):rest) = do
-          operand <- if visible info || supplyHidden then freshHole scope
-            else Construction.omittedField (getHiding info)
-          let applied = A.app function [Arg info $ unnamed operand]
-              withHidden = hiddenSeen || notVisible info
-              include = if supplyHidden then withHidden else visible info
-          suffix <- go supplyHidden withHidden applied rest
-          pure $ if include && compatible expected result
-            then applied:suffix else suffix
+        go _ _ _ _ [] = pure []
+        go supplyHidden hiddenSeen index function (ArgumentShape info result _:rest) = do
+          available <- case anchor of
+            Nothing -> pure True
+            Just _ -> charge runtime $ \s -> s { applicationGenerationSteps = applicationGenerationSteps s + 1 }
+          if not available then pure [] else do
+            operand <- case anchor of
+              Just (position, supplied) | position == index -> pure supplied
+              _ -> if visible info || supplyHidden then freshHole scope
+                else Construction.omittedField (getHiding info)
+            let applied = A.app function [Arg info $ unnamed operand]
+                withHidden = hiddenSeen || notVisible info
+                anchored = maybe True ((<= index) . fst) anchor
+                include = anchored && (if supplyHidden then withHidden else visible info)
+            suffix <- go supplyHidden withHidden (index+1) applied rest
+            pure $ if include && compatible expected result
+              then applied:suffix else suffix
   -- Unification in a sibling can solve a meta without retiring its source
   -- interaction. Use Agda's own scoped solution (including its permutation)
   -- as a proposal, rather than searching for that assignment a second time.
@@ -262,6 +280,24 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
     if allowed then Just <$> Scheduling.classify forbidden constructors recursion target else pure Nothing
   let classification = maybe Classification.unknownClassification id classified
   ranked <- rankSeeds runtime classification target globals
+  -- Goal structure is only an operand hint. The candidates still come from
+  -- the already authorized local/visible inventory, never from private names
+  -- recovered from a type. Keep native binding identities, not spellings.
+  let nameKeys expression = case expression of
+        A.Var name -> Set.singleton $ Left name
+        A.Def name -> Set.singleton $ Right name
+        A.Con (I.AmbQ names) -> Set.fromList $ map Right $ toList names
+        A.Proj _ (I.AmbQ names) -> Set.fromList $ map Right $ toList names
+        _ -> Set.empty
+      headKeys expression = case appView expression of
+        Application headExpression _ -> nameKeys headExpression
+  mentioned <- if not targetFunctions then pure Nothing else localTCState $ attempt runtime $ do
+    available <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+    if not available then pure Nothing else do
+      expression <- reify =<< instantiateFull target
+      -- Include names used as values and both projection presentations.
+      -- Reification is Agda abstract syntax, not parsing a display string.
+      pure $ Just $ foldExpr nameKeys expression
   scope <- getScope
   (expected, _) <- localTCState $ signature target
   recursive <- case recursion of
@@ -277,15 +313,15 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
       operands <- fmap concat $ forM subjects $ \subject -> do
         observedSubject <- localTCState $ attempt runtime $
           queryInferWith DontExpandLast runtime subject $ \(_, ty) -> Just <$> signature ty
-        variants <- applications Nothing scope subject $ maybe [] snd observedSubject
+        variants <- applications Nothing scope subject Nothing $ maybe [] snd observedSubject
         pure $ subject:variants
       let fill supplyHidden anchor index info = case anchor of
             Just (position, subject) | position == index -> pure subject
             _ | visible info || supplyHidden -> freshHole scope
               | otherwise -> Construction.omittedField (getHiding info)
           build headExpression anchor infos = forM
-            (False : [True | any (notVisible . fst) infos]) $ \supplyHidden -> do
-              arguments' <- forM (zip [0 :: Int ..] infos) $ \(index, (info, _)) ->
+            (False : [True | any (notVisible . argumentInfo) infos]) $ \supplyHidden -> do
+              arguments' <- forM (zip [0 :: Int ..] infos) $ \(index, ArgumentShape info _ _) ->
                 Arg info . unnamed <$> fill supplyHidden anchor index info
               pure $ A.app headExpression arguments'
       wrapped <- fmap concat $ forM (maybe [] snd observed) $ \(position, wrapper) -> do
@@ -314,7 +350,7 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
       -- does; no open operand is evidence of decrease or productivity.
       expressions <- case observed of
         Just ((result, infos), _)
-          | let terminal = case reverse infos of (_, shape):_ -> shape; [] -> result
+          | let terminal = case reverse infos of shape:_ -> argumentResult shape; [] -> result
           , compatible expected terminal -> fmap concat $ forM
               ([Nothing | Recursion.copatternCall context] ++
                map Just ([(index, subject) | index <- [0 .. length infos - 1], subject <- operands] ++ wrapped)) $ \anchor ->
@@ -331,24 +367,40 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
       described <- mapM (describe runtime "recursive") proposals
       ordered <- rankDescribed runtime classification target described
       pure [(expression, picked) | (Seed expression _ _, picked) <- ordered]
-  heads <- fmap concat $ forM ranked $ \(Seed expression _ _, picked) -> do
+  headSignatures <- forM ranked $ \(Seed expression _ _, picked) -> do
     observed <- localTCState $ attempt runtime $
       queryInferWith DontExpandLast runtime expression $ \(_, ty) -> do
         (result, infos) <- signature ty
         pure $ Just (result, infos, if noMetas ty then Just ty else Nothing)
+    pure (expression, picked, observed)
+  -- Any positively observed Pi is callable, including telescopes containing
+  -- only hidden or instance binders. ExpectedShape separately models the
+  -- result after omission and is not the authority for this distinction.
+  let targetOperands = [expression | (expression, _, Just (_, _:_, _)) <- headSignatures,
+        not $ Set.disjoint (headKeys expression) (maybe Set.empty id mentioned)]
+  heads <- fmap concat $ forM headSignatures $ \(expression, picked, observed) -> do
     let (result, infos, closedType) = maybe (Nothing, [], Nothing) id observed
         terminal = case reverse infos of
-          (_, shape):_ -> shape
+          shape:_ -> argumentResult shape
           [] -> result
-    variants <- applications expected scope expression infos
+    let specialize [] = pure []
+        specialize (anchor:rest) = stopped runtime >>= \done ->
+          if done then pure [] else do
+            prefix <- applications expected scope expression (Just anchor) infos
+            suffix <- specialize rest
+            pure $ prefix ++ suffix
+    specialized <- specialize
+      [(index, operand) | (index, shape) <- zip [0..] infos, functionArgument shape,
+        operand <- targetOperands]
+    variants <- applications expected scope expression Nothing infos
     emptyApplication <- case (terminal, closedType) of
       (Just FamilyShape{}, Just ty) -> attempt runtime $ Construction.emptyResultApplication
         (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
         (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }) expression ty target
       _ -> pure Nothing
-    modify runtime $ \s -> s { applicationProposals = applicationProposals s + fromIntegral (length variants) }
+    modify runtime $ \s -> s { applicationProposals = applicationProposals s + fromIntegral (length specialized + length variants) }
     modify runtime $ \s -> s { absurdProposals = absurdProposals s + maybe 0 (const 1) emptyApplication }
-    pure [(variant, picked) | variant <- [expression | compatible expected result] ++ variants ++ maybe [] pure emptyApplication]
+    pure [(variant, picked) | variant <- [expression | compatible expected result] ++ specialized ++ variants ++ maybe [] pure emptyApplication]
   construction <- localTCState $ do
     allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
     if allowed then Construction.recordPlan forbidden target else pure Nothing

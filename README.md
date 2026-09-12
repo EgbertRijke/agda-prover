@@ -9,7 +9,10 @@ download is required.
 The strength of AgdaProver is measured by [ProverStrength](https://egbertrijke.github.io/ProverStrength/).
 
 The AgdaProver project was initiated and is maintained by Egbert Rijke. The
-codebase is implemented by GPT-5.6 (early development) and GPT-6.
+codebase is implemented by GPT-5.6 (early development) and GPT-6. The prover
+should be considered a prototype, demonstrating the achievability of an
+NNUE-guided symbolic theorem prover.
+Our hope is that humans will write a better version.
 
 ## Installation
 
