@@ -201,7 +201,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
             if remaining == Just 0 then pure $ Right N.PlanningCensored else do
               nextBudget <- moveAllowance
               (clauseCost, clauses) <- S.proposeClauseActions session goal nextBudget
-                (models settings) (ranking settings) native trace
+                (models settings) (ranking settings) native (excluded settings) trace
               recordSearch clauseCost
               case clauses of
                 Left failure -> pure $ Left failure

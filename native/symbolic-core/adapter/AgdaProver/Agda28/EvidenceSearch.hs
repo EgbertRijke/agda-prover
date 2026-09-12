@@ -321,11 +321,12 @@ constructorProposals stats limits models mode native emit namespace excluded own
 -- metadata. Generated actions retain those identities through the session;
 -- Agda decides whether splitting, coverage and without-K are admissible.
 clauseProposals :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
-                -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> I.Type
+                -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> [String] -> I.Type
                 -> TCM [(ClauseExecution.Intent, [(T.Text, T.Text)])]
-clauseProposals stats limits models mode native emit namespace target = do
+clauseProposals stats limits models mode native emit namespace excluded target = do
   pruned <- liftIO $ newIORef False
   let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
+  (forbidden, _) <- excludedGlobals excluded
   context <- getContext
   observed <- fmap catMaybes $ forM (zip [0..] context) $ \(index, entry) -> attempt runtime $ do
     allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
@@ -333,8 +334,10 @@ clauseProposals stats limits models mode native emit namespace target = do
       ty <- typeOfBV index
       splitting <- reduce ty >>= \case
         I.El _ (I.Def name _) -> getConstInfo name >>= \definition -> pure $ case theDef definition of
-          Datatype { dataCons = constructors } -> Just $ length constructors == 1
-          RecordDefn record | _recInduction record /= Just CoInductive -> Just True
+          Datatype { dataCons = constructors }
+            | not $ any (`Set.member` forbidden) constructors -> Just $ length constructors == 1
+          RecordDefn record | _recInduction record /= Just CoInductive,
+            not $ any (`Set.member` forbidden) (I.conName (_recConHead record) : map I.unDom (_recFields record)) -> Just True
           _ -> Nothing
         _ -> pure Nothing
       rendered <- prettyShow <$> prettyTCM ty

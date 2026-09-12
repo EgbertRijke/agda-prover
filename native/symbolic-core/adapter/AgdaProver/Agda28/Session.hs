@@ -619,9 +619,9 @@ checkApplication session owner goal initial identity draft
   recheck current = check session current (goalState goal) initial (DraftAction (goalId goal) draft) False
 
 proposeClauseActions :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
-                     -> Policy.RankingMode -> Maybe (NativeScorer n) -> (Value -> IO ())
+                     -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
                      -> IO (Search.SearchStats, Either Failure (ClauseProposals s))
-proposeClauseActions session goal limits models mode native emit = do
+proposeClauseActions session goal limits models mode native excluded emit = do
   stats <- newIORef Search.emptyStats
   outcome <- request session (goalState goal) $ \owner state -> do
     ledger <- work session
@@ -631,7 +631,7 @@ proposeClauseActions session goal limits models mode native emit = do
       exists <- elem point <$> openInteractionPoints
       if not exists then pure $ Left UnknownGoal else withInteractionId point $ do
         target <- getMetaTypeInContext =<< lookupInteractionId point
-        Right <$> Search.clauseProposals stats limits models mode native emit namespace target
+        Right <$> Search.clauseProposals stats limits models mode native emit namespace excluded target
     pure (owner, fmap (map (\(intent, choices) -> (ClauseMove goal intent, choices))) $ result >>= id)
   observed <- readIORef stats
   recordSearchWork session observed

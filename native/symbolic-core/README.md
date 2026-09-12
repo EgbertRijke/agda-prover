@@ -425,6 +425,13 @@ has no inferred training credit merely because a branch was visited.
 path for paired measurements. `task.model_path` replaces the focused weights;
 the OR-policy override remains separate. Each model is role-checked and pinned.
 
+Autonomous case catalogues receive the same name exclusions as term proposals.
+They do not expose an excluded constructor or record field through generated
+patterns. Explicit user clause commands remain separate. Native draft replay
+preserves the registration and source range of an already existing interaction;
+only fresh draft holes are registered anew. Presentation ranges cannot replace
+the identity of an existing obligation.
+
 `work_units` optionally limits native queries plus in-memory focused/rewrite actions. Its default
 `None` widens search depth under the caller's physical resource envelope and
 cancellation, without a fixed proof-depth or 20-second cutoff. The current

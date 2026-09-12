@@ -59,7 +59,19 @@ data ProtocolFailure = InvalidFrameBudget | UnterminatedFrame | FrameBudgetExhau
 instance E.Exception ProtocolFailure
 
 -- Soft ordering/slice settings, not proof-size or depth restrictions.
-data Scheduling = Scheduling Natural Natural Natural Bool Bool Bool Bool Bool Bool
+data Scheduling = Scheduling
+  { schedulingStructural :: Natural, schedulingMacro :: Natural, schedulingInitial :: Natural
+  , schedulingEvidence :: Bool, schedulingDependencies :: Bool, schedulingProgress :: Bool
+  , schedulingRetryWork :: Bool, schedulingJointPropagation :: Bool
+  , schedulingMultiSubject :: Bool }
+
+defaultScheduling :: Scheduling
+defaultScheduling = Scheduling
+  { schedulingStructural = 2, schedulingMacro = 8, schedulingInitial = 64
+  , schedulingEvidence = True, schedulingDependencies = True, schedulingProgress = True
+  , schedulingRetryWork = True, schedulingJointPropagation = True
+  , schedulingMultiSubject = True }
+
 instance FromJSON Scheduling where
   parseJSON = withObject "scheduling" $ \o -> do
     let required = Set.fromList ["structural_delay", "macro_delay", "initial_macro_work", "evidence_macro"]
@@ -68,15 +80,21 @@ instance FromJSON Scheduling where
     unless (required `Set.isSubsetOf` supplied && supplied `Set.isSubsetOf`
       Set.union required (Set.fromList ["dependency_ordering", "progress_ordering", "retry_work_ordering", "joint_constructor_propagation", "multi_subject_clauses"])) $
       fail "invalid scheduling fields"
-    scheduling@(Scheduling _ _ initial _ _ _ _ _ _) <- Scheduling <$> o .: "structural_delay"
-      <*> o .: "macro_delay" <*> o .: "initial_macro_work" <*> o .: "evidence_macro"
-      <*> switch "dependency_ordering"
-      <*> switch "progress_ordering"
-      <*> switch "retry_work_ordering"
-      <*> switch "joint_constructor_propagation"
-      <*> switch "multi_subject_clauses"
+    structural <- o .: "structural_delay"
+    macro <- o .: "macro_delay"
+    initial <- o .: "initial_macro_work"
+    evidence <- o .: "evidence_macro"
+    dependencies <- switch "dependency_ordering"
+    progress <- switch "progress_ordering"
+    retryWork <- switch "retry_work_ordering"
+    jointPropagation <- switch "joint_constructor_propagation"
+    multiSubject <- switch "multi_subject_clauses"
     unless (initial > 0) $ fail "initial macro allowance must be positive"
-    pure scheduling
+    pure Scheduling
+      { schedulingStructural = structural, schedulingMacro = macro, schedulingInitial = initial
+      , schedulingEvidence = evidence, schedulingDependencies = dependencies
+      , schedulingProgress = progress, schedulingRetryWork = retryWork
+      , schedulingJointPropagation = jointPropagation, schedulingMultiSubject = multiSubject }
 
 protocolFailureName :: ProtocolFailure -> String
 protocolFailureName InvalidFrameBudget = "invalid-frame-budget"
@@ -160,7 +178,7 @@ parseRequest = withObject "session request" $ \o -> do
         ("nnue" :: String) -> pure Policy.Learned
         "symbolic" -> pure Policy.Symbolic
         _ -> fail "unknown ranker"
-      scheduling <- if KM.member "scheduling" o then o .: "scheduling" else pure $ Scheduling 2 8 64 True True True True True True
+      scheduling <- if KM.member "scheduling" o then o .: "scheduling" else pure defaultScheduling
       StartSearch (opName == "start-step") <$> o .: "state" <*> o .: "limits" <*> pure mode <*> o .: "model_path"
         <*> primaryPath <*> o .: "native_path" <*> o .: "focused_search"
         <*> o .: "exclude_names" <*> pure scheduling
@@ -316,13 +334,21 @@ loadPrimary oneMove (Just path) = do
 
 perform :: S.Session s -> Run.Store s -> (Value -> IO ()) -> (Value -> IO ()) -> Operation -> IO Value
 perform session runs emit emitRun operation = case operation of
-  StartSearch oneMove key limits mode modelPath focusedPath nativePath focused excluded (Scheduling structural macro initial enabled dependenciesEnabled progressEnabled retryWorkEnabled jointPropagationEnabled multiSubjectEnabled) selection actionLimit depthLimit ->
+  StartSearch oneMove key limits mode modelPath focusedPath nativePath focused excluded scheduling selection actionLimit depthLimit ->
     resolved key $ \root -> do
       loaded <- maybe (pure $ Right []) (fmap (fmap (:[])) . Model.loadModel (Just Model.ORDecision)) modelPath
       focusedModel <- loadPrimary oneMove focusedPath
       case ((++) <$> loaded <*> focusedModel) >>= Policy.models of
         Left reason -> pure $ failureView $ KernelFailure ("model-configuration:" ++ reason)
-        Right models -> Run.start oneMove runs root (G.Settings limits mode models focused excluded structural macro initial enabled actionLimit dependenciesEnabled depthLimit progressEnabled retryWorkEnabled jointPropagationEnabled multiSubjectEnabled) nativePath selection
+        Right models -> Run.start oneMove runs root G.Settings
+          { G.limits = limits, G.ranking = mode, G.models = models, G.focused = focused
+          , G.excluded = excluded, G.structuralDelay = schedulingStructural scheduling
+          , G.macroDelay = schedulingMacro scheduling, G.initialMacroWork = schedulingInitial scheduling
+          , G.evidenceMacro = schedulingEvidence scheduling, G.actionLimit = actionLimit
+          , G.dependencyOrdering = schedulingDependencies scheduling, G.depthLimit = depthLimit
+          , G.progressOrdering = schedulingProgress scheduling, G.retryWorkOrdering = schedulingRetryWork scheduling
+          , G.jointConstructorPropagation = schedulingJointPropagation scheduling
+          , G.multiSubjectClauses = schedulingMultiSubject scheduling } nativePath selection
   AdvanceSearch key steps limits actionLimit depthLimit -> Run.advance runs key steps limits actionLimit depthLimit emitRun
   RunCost key -> Run.snapshot runs key
   DiscardSearch key -> Run.discard runs key

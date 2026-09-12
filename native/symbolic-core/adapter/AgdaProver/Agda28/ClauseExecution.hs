@@ -28,6 +28,7 @@ import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Substitute (telePi)
 import Agda.Utils.Null (empty)
 import Agda.Utils.Lens ((^.))
+import Agda.Utils.BiMap qualified as BiMap
 
 import AgdaProver.Symbolic.Clause (ClauseAction, command)
 
@@ -180,7 +181,13 @@ registerDraft :: A.Expr -> TCM A.Expr
 registerDraft = traverseExpr $ \case
   expression@(A.QuestionMark info point) -> do
     checkMeta info
-    void $ registerInteractionPoint False (Info.metaRange info) (Just $ interactionId point)
+    -- Reified types can reference an existing interaction while their meta
+    -- presentation carries a different range. The native identity still
+    -- denotes that exact obligation. Preserve its original registration;
+    -- Agda's registration operation asserts on a second, conflicting range.
+    -- Only newly introduced draft holes need registration during replay.
+    missing <- isNothing . BiMap.lookup point <$> useTC stInteractionPoints
+    when missing $ void $ registerInteractionPoint False (Info.metaRange info) (Just $ interactionId point)
     stFreshInteractionId `modifyTCLens` max (point + 1)
     pure expression
   expression@(A.Underscore info) -> checkMeta info >> pure expression
