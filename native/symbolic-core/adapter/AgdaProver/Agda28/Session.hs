@@ -18,6 +18,7 @@ module AgdaProver.Agda28.Session
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
   , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, preferStructures, withoutResultIntroductionOverlap, proposeTerms, proposeTermsWithOptions, proposeLocalClosures, proposeStructures, proposeEquations, proposeConstructors, proposePropagation, applyTerm
+  , TermPreparation, prepareTermsSlice, resumeTermsSlice
   , ClauseMove, clauseMoveGoal, clauseMoveIsBatch, applyClauseMove, ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
@@ -646,6 +647,66 @@ proposeTermsWithOptions :: Search.PrimitiveOptions -> Session s -> GoalRef s -> 
                        -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
                        -> IO (Search.SearchStats, Either Failure (TermProposals s))
 proposeTermsWithOptions options = proposeTermsUsing $ Search.primitiveProposals options
+
+-- Native inventory, loop progress and allocation state belong to this exact
+-- parent. The pending generator contains no Session, mutable state reference,
+-- scorer or response callback. Policy/visibility cannot change on resumption.
+type role TermPreparation nominal
+data TermPreparation s = TermPreparation (GoalRef s) TCState TCEnv Search.PrimitivePending
+
+prepareTermsSlice :: Search.PrimitiveOptions -> Session s -> GoalRef s -> Search.SearchLimits
+                  -> Policy.Models -> Policy.RankingMode -> Maybe (NativeScorer n)
+                  -> [String] -> (Value -> IO ())
+                  -> IO (Search.SearchStats, Either Failure ([TermProposal s], Maybe (TermPreparation s)))
+prepareTermsSlice options session goal limits models mode native excluded emit =
+  runTermPreparation session goal Nothing limits native emit $ \origin point target ->
+    Search.beginPrimitive options True models mode excluded origin point target
+
+resumeTermsSlice :: TermPreparation s -> Session s -> GoalRef s -> Search.SearchLimits
+                 -> Maybe (NativeScorer n) -> (Value -> IO ())
+                 -> IO (Search.SearchStats, Either Failure ([TermProposal s], Maybe (TermPreparation s)))
+resumeTermsSlice previous@(TermPreparation _ _ _ task) session goal limits native emit =
+  runTermPreparation session goal (Just previous) limits native emit $ \_ _ _ -> task
+
+runTermPreparation :: Session s -> GoalRef s -> Maybe (TermPreparation s) -> Search.SearchLimits
+                   -> Maybe (NativeScorer n) -> (Value -> IO ())
+                   -> (Maybe Recursion.Owner -> InteractionId -> I.Type -> Search.PrimitivePending)
+                   -> IO (Search.SearchStats, Either Failure ([TermProposal s], Maybe (TermPreparation s)))
+runTermPreparation session goal previous limits native emit beginTask = do
+  stats <- newIORef Search.emptyStats
+  outcome <- request session (goalState goal) $ \owner state -> do
+    ledger <- work session
+    let point = goalId goal
+        namespace = show (stateKey $ goalState goal) ++ ":moves:" ++ show (requests ledger)
+        origin = Map.lookup (keyBranch $ stateKey $ goalState goal) (ownerBranches owner)
+          >>= Map.findWithDefault Nothing point . branchOrigins
+        matching (TermPreparation old _ _ _) =
+          stateKey (goalState old) == stateKey (goalState goal) && goalId old == point
+        initial = case previous of
+          Just (TermPreparation _ saved _ _) -> saved
+          Nothing -> state
+        environment = case previous of
+          Just (TermPreparation _ _ saved _) -> localTC (const saved)
+          Nothing -> id
+    if maybe False (not . matching) previous then pure (owner, Left $
+      KernelFailure "term-preparation-parent-mismatch") else do
+      (result, allocation) <- kernel session initial $ environment $ do
+        exists <- elem point <$> openInteractionPoints
+        if not exists then pure $ Left UnknownGoal else withInteractionId point $ do
+          target <- getMetaTypeInContext =<< lookupInteractionId point
+          liftIO $ modifyIORef' stats $ \s -> s
+            { Search.resumedSlices = maybe 0 (const 1) previous }
+          (drafts, rest) <- Search.resumePrimitive stats limits native emit namespace $ beginTask origin point target
+          env <- askTC
+          pure $ Right (drafts, rest, env)
+      let watermark = Allocation (allocation ^. stFreshNameId) (allocation ^. stFreshInteractionId)
+      watermark `seq` pure (owner, (\(drafts, rest, env) ->
+        (zipWith (\ordinal (expression, selected) -> TermProposal goal
+          (NativeDraft expression watermark) selected (IssuedAction (requests ledger) ordinal)) [0..] drafts,
+         TermPreparation goal allocation env <$> rest)) <$> (result >>= id))
+  observed <- readIORef stats
+  recordSearchWork session observed
+  pure (observed, outcome)
 
 proposeStructures :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
                   -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())

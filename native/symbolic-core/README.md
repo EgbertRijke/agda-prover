@@ -305,11 +305,20 @@ retains completed work and the drafts needed for overlap checks; proposals
 compete with the continuation in the same agenda. Preparation consumes scheduler
 and physical work, not proof-action allowance or accepted proof depth.
 The `staged_planning=false` scheduling ablation restores all-at-once preparation.
-One-step mode keeps its original complete catalogue. Individual generators and
-Agda calls remain atomic, so a censored unfinished stage may still need replay;
-this does not claim mid-checker suspension or complete native qualification.
+One-step mode keeps its original complete catalogue. Ordinary term preparation
+now retains inventory and per-head progress within the generator as well, and
+publishes complete ready/composition tiers before finishing all refinements.
+Its continuation owns the exact checking state and receives fresh services on
+resume; no scorer or response callback is retained. Exhausted preparation
+quanta grow under the cumulative run allowance, retaining preparation priority
+rather than treating sunk work as remaining proof cost. Individual Agda calls
+and some builders (including inventory ranking
+and contextual composition) remain atomic and may replay when censored; their
+completed predecessors are retained. This is not mid-checker suspension or
+complete native qualification.
 Generic `prepare-procedure` events expose the family, parent and goal for
 external diagnostics. No benchmark-specific tracing is embedded in the engine.
+`term-preparation` events expose per-visit costs, resumes and builder replays.
 The Haskell API exposes generic agenda events and cost snapshots. Autonomous
 helper-application invention is not implied. The application routes public
 operations to this controller and supervises shared physical resource limits.

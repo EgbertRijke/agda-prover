@@ -4,7 +4,7 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE RankNTypes #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.EvidenceSearch (run, begin, resume, Pending, runHelper, localClosureProposals, primitiveProposals, structuralProposals, equationProposals, constructorProposals, propagationProposals, clauseProposals, Result (..)) where
+module AgdaProver.Agda28.EvidenceSearch (run, begin, resume, Pending, runHelper, localClosureProposals, primitiveProposals, beginPrimitive, resumePrimitive, PrimitivePending, structuralProposals, equationProposals, constructorProposals, propagationProposals, clauseProposals, Result (..)) where
 
 import Control.Monad (forM)
 import Control.Monad.Except (catchError, runExceptT, throwError)
@@ -94,6 +94,37 @@ type Search = Task.Task Services
 -- Pure continuation data. A live scorer/callback and statistics references are
 -- supplied afresh; dependent choices and rollback snapshots stay in the task.
 data Pending = Pending (Search Result) Bool Int P.Models P.RankingMode Bool
+
+type PrimitiveDraft = (A.Expr, [(T.Text, T.Text)])
+data PrimitiveResult = PrimitiveResult [PrimitiveDraft] (Maybe (Search PrimitiveResult))
+data PrimitivePending = PrimitivePending (Search PrimitiveResult) P.Models P.RankingMode
+
+-- Published batches and the remaining generator retain native syntax under
+-- one exact checking snapshot. Services (especially borrowed scorers) never
+-- escape their invocation. Non-streaming callers drain the same generator.
+beginPrimitive :: PrimitiveOptions -> Bool -> P.Models -> P.RankingMode -> [String]
+               -> Maybe Recursion.Owner -> InteractionId -> I.Type -> PrimitivePending
+beginPrimitive options streaming models mode excluded owner point target =
+  PrimitivePending (primitiveTask options streaming excluded owner point target) models mode
+
+resumePrimitive :: IORef SearchStats -> SearchLimits -> Maybe (NativeScorer s)
+                -> (Value -> IO ()) -> String -> PrimitivePending
+                -> TCM ([PrimitiveDraft], Maybe PrimitivePending)
+resumePrimitive stats limits scorer emit namespace (PrimitivePending task models mode) = do
+  pruned <- liftIO $ newIORef False
+  let runtime = Runtime limits stats pruned models mode scorer emit (T.pack namespace) False
+      keep remaining = PrimitivePending remaining models mode
+  Task.step task (Services runtime) >>= \case
+    Task.Done (PrimitiveResult drafts rest) -> pure (drafts, keep <$> rest)
+    Task.Suspended rest -> pure ([], Just $ keep rest)
+
+-- Only complete priority tiers are published; primary NNUE scoring never
+-- compares a partial tier with a silently truncated set of alternatives.
+publishPrimitive :: Bool -> [PrimitiveDraft] -> Search PrimitiveResult -> Search PrimitiveResult
+publishPrimitive True drafts rest | not (null drafts) = pure $ PrimitiveResult drafts $ Just rest
+publishPrimitive _ drafts rest = do
+  PrimitiveResult later remaining <- rest
+  pure $ PrimitiveResult (drafts ++ later) remaining
 
 liftS :: TCM a -> Search a
 liftS action = Task.operation $ const action
@@ -325,17 +356,21 @@ primitiveProposals :: PrimitiveOptions -> IORef SearchStats -> SearchLimits -> P
                    -> Maybe Recursion.Owner -> InteractionId -> I.Type
                    -> TCM [(A.Expr, [(T.Text, T.Text)])]
 primitiveProposals options stats limits models mode native emit namespace excluded owner point target = do
-  pruned <- liftIO $ newIORef False
-  originalSize <- getContextSize
-  let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
-      targetFunctions = goalFunctionOperands options
+  fst <$> resumePrimitive stats limits native emit namespace
+    (beginPrimitive options False models mode excluded owner point target)
+
+primitiveTask :: PrimitiveOptions -> Bool -> [String] -> Maybe Recursion.Owner
+              -> InteractionId -> I.Type -> Search PrimitiveResult
+primitiveTask options streaming excluded owner point target = do
+  originalSize <- liftS getContextSize
+  let targetFunctions = goalFunctionOperands options
       freshHole scope = do
         freshPoint <- registerInteractionPoint False noRange Nothing
         pure $ A.QuestionMark (Info.emptyMetaInfo { Info.metaScope = scope }) freshPoint
       explicitHole info = do
         freshPoint <- registerInteractionPoint False noRange Nothing
         pure $ A.QuestionMark (info { Info.metaNumber = Nothing, Info.metaRange = noRange }) freshPoint
-      signature ty = do
+      signature runtime ty = do
         allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
         if not allowed then pure (Nothing, []) else reduce ty >>= \case
           I.El _ (I.Pi domain body) -> do
@@ -343,16 +378,16 @@ primitiveProposals options stats limits models mode native emit namespace exclud
               else pure False
             introduced <- subtract originalSize <$> getContextSize
             domainShape <- if inspectDomain then reduce (I.unDom domain) >>= outerShape introduced else pure Nothing
-            (result, rest) <- underAbstraction domain body signature
+            (result, rest) <- underAbstraction domain body (signature runtime)
             pure (if visible domain then Just FunctionShape else result,
               ArgumentShape (getArgInfo domain) result domainShape:rest)
           exposed -> do
             introduced <- subtract originalSize <$> getContextSize
             (\shape -> (shape, [])) <$> outerShape introduced exposed
       compatible = compatibleShape
-      applications :: Maybe ExpectedShape -> ScopeInfo -> A.Expr -> [(Int, A.Expr)]
+      applications :: Runtime n -> Maybe ExpectedShape -> ScopeInfo -> A.Expr -> [(Int, A.Expr)]
                    -> [ArgumentShape] -> TCM [A.Expr]
-      applications expected scope expression anchors infos = do
+      applications runtime expected scope expression anchors infos = do
         inferred <- go False False 0 expression infos
         -- Hiding is an inference preference, not a restriction on supplying
         -- an operand. Keep the original inference-first spine, then expose
@@ -383,7 +418,7 @@ primitiveProposals options stats limits models mode native emit namespace exclud
   -- interaction. Use Agda's own scoped solution (including its permutation)
   -- as a proposal, rather than searching for that assignment a second time.
   -- Still check it through the normal transition and retain ordinary fallbacks.
-  assigned <- attempt runtime $ do
+  assigned <- nativeOperation $ \runtime -> attempt runtime $ do
     allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
     if not allowed then pure Nothing else do
       meta <- lookupInteractionId point
@@ -407,305 +442,318 @@ primitiveProposals options stats limits models mode native emit namespace exclud
               part -> pure part) expression
         _ -> pure Nothing
   let assignedProposals = maybe [] (\expression -> [(expression, [])]) assigned
-  (forbiddenHere, userExcluded) <- excludedGlobals excluded
-  inherited <- maybe (pure Set.empty) Recursion.ownerGroup owner
+  (forbiddenHere, userExcluded) <- liftS $ excludedGlobals excluded
+  inherited <- liftS $ maybe (pure Set.empty) Recursion.ownerGroup owner
   let forbidden = Set.union forbiddenHere inherited
   recursion <- case owner of
-    Just root | not $ Set.member (Recursion.ownerName root) userExcluded -> localTCState $ attempt runtime $ do
+    Just root | not $ Set.member (Recursion.ownerName root) userExcluded -> nativeOperation $ \runtime -> localTCState $ attempt runtime $ do
       allowed <- charge runtime $ \s -> s { recursiveContextQueries = recursiveContextQueries s + 1 }
       if allowed then Recursion.inspect point root else pure Nothing
     _ -> pure Nothing
-  closures <- Construction.constructorClosures
+  closures <- nativeOperation $ \runtime -> Construction.constructorClosures
     (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }) forbidden target
-  globals <- visibleGlobals forbidden
-  classified <- attempt runtime $ do
+  globals <- liftS $ visibleGlobals forbidden
+  classified <- nativeOperation $ \runtime -> attempt runtime $ do
     allowed <- charge runtime $ \s -> s
       { inferenceQueries = inferenceQueries s + 1, classificationQueries = classificationQueries s + 1 }
     let constructors = Set.fromList [name | A.Con (I.AmbQ names) <- globals, name <- toList names]
     if allowed then Just <$> Scheduling.classify forbidden constructors recursion target else pure Nothing
   let classification = maybe Classification.unknownClassification id classified
-  ranked <- rankSeeds (contextualEvidence options) runtime classification target globals
+  ranked <- nativeOperation $ \runtime -> rankSeeds (contextualEvidence options) runtime classification target globals
   -- Known complete inhabitants compete before unconstrained refinements of
   -- their heads. Freeze existing metas but let Agda infer fresh implicit
   -- operands. Readiness is not proof acceptance: the ordinary transition
   -- rechecks the draft, and incomplete alternatives remain in the catalogue.
   ready <- if not (contextualEvidence options) then pure [] else fmap catMaybes $
     forM ranked $ \(Seed expression _ _ _, picked) ->
-      localTCState $ attempt runtime $ reallyNoConstraints $ withFrozenMetas $
+      nativeOperation $ \runtime -> localTCState $ attempt runtime $ reallyNoConstraints $ withFrozenMetas $
         queryCheck runtime expression target $ \term -> do
           complete <- instantiateFull term
           pure $ if noMetas complete then Just (expression, picked) else Nothing
-  -- Goal structure is only an operand hint. The candidates still come from
-  -- the already authorized local/visible inventory, never from private names
-  -- recovered from a type. Keep native binding identities, not spellings.
-  let nameKeys expression = case expression of
-        A.Var name -> Set.singleton $ Left name
-        A.Def name -> Set.singleton $ Right name
-        A.Con (I.AmbQ names) -> Set.fromList $ map Right $ toList names
-        A.Proj _ (I.AmbQ names) -> Set.fromList $ map Right $ toList names
-        _ -> Set.empty
-      headKeys expression = case appView expression of
-        Application headExpression _ -> nameKeys headExpression
-  mentioned <- if not targetFunctions then pure Nothing else localTCState $ attempt runtime $ do
-    available <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
-    if not available then pure Nothing else do
-      instantiated <- instantiateFull target
-      expression <- reify instantiated
-      exposed <- localTCState $ attempt runtime $ do
-        expose <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
-        if expose then Just <$> (reify =<< reduce instantiated) else pure Nothing
-      -- Include names used as values and both projection presentations.
-      -- Keep both the source view and Agda's weak-head view: a named result
-      -- family can hide its callable operands until the family is reduced.
-      -- Reification is Agda abstract syntax, not parsing a display string.
-      pure $ Just $ Set.union (foldExpr nameKeys expression)
-        (maybe Set.empty (foldExpr nameKeys) exposed)
-  scope <- getScope
-  (expected, _) <- localTCState $ signature target
-  recursive <- case recursion of
-    Nothing -> pure []
-    Just context -> do
+  first <- if not streaming then pure [] else service $ \runtime ->
+    (assignedProposals ++) <$> rankPrimitive runtime target [(0, item) | item <- ready]
+  publishPrimitive streaming first $ do
+    -- Goal structure is only an operand hint. The candidates still come from
+    -- the already authorized local/visible inventory, never from private names
+    -- recovered from a type. Keep native binding identities, not spellings.
+    let nameKeys expression = case expression of
+          A.Var name -> Set.singleton $ Left name
+          A.Def name -> Set.singleton $ Right name
+          A.Con (I.AmbQ names) -> Set.fromList $ map Right $ toList names
+          A.Proj _ (I.AmbQ names) -> Set.fromList $ map Right $ toList names
+          _ -> Set.empty
+        headKeys expression = case appView expression of
+          Application headExpression _ -> nameKeys headExpression
+    mentioned <- if not targetFunctions then pure Nothing else nativeOperation $ \runtime -> localTCState $ attempt runtime $ do
+      available <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+      if not available then pure Nothing else do
+        instantiated <- instantiateFull target
+        expression <- reify instantiated
+        exposed <- localTCState $ attempt runtime $ do
+          expose <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+          if expose then Just <$> (reify =<< reduce instantiated) else pure Nothing
+        -- Include names used as values and both projection presentations.
+        -- Keep both the source view and Agda's weak-head view: a named result
+        -- family can hide its callable operands until the family is reduced.
+        -- Reification is Agda abstract syntax, not parsing a display string.
+        pure $ Just $ Set.union (foldExpr nameKeys expression)
+          (maybe Set.empty (foldExpr nameKeys) exposed)
+    scope <- liftS getScope
+    (expected, _) <- nativeOperation $ \runtime -> localTCState $ signature runtime target
+    recursive <- case recursion of
+      Nothing -> pure []
+      Just context -> do
+        observed <- nativeOperation $ \runtime -> localTCState $ attempt runtime $
+          queryInferWith DontExpandLast runtime (Recursion.callHead context) $ \(_, ty) -> do
+            callSignature <- signature runtime ty
+            wrappers <- Construction.argumentWrappers
+              (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }) forbidden ty
+            pure $ Just (callSignature, wrappers)
+        subjects <- liftS $ Recursion.callSubjects context
+        operands <- fmap concat $ forM subjects $ \subject -> nativeOperation $ \runtime -> do
+          observedSubject <- localTCState $ attempt runtime $
+            queryInferWith DontExpandLast runtime subject $ \(_, ty) -> Just <$> signature runtime ty
+          variants <- applications runtime Nothing scope subject [] $ maybe [] snd observedSubject
+          pure $ subject:variants
+        let fill supplyHidden anchor index info = case anchor of
+              Just (position, subject) | position == index -> pure subject
+              _ | visible info || supplyHidden -> freshHole scope
+                | otherwise -> Construction.omittedField (getHiding info)
+            build headExpression anchor infos = forM
+              (False : [True | any (notVisible . argumentInfo) infos]) $ \supplyHidden -> do
+                arguments' <- forM (zip [0 :: Int ..] infos) $ \(index, ArgumentShape info _ _) ->
+                  Arg info . unnamed <$> fill supplyHidden anchor index info
+                pure $ A.app headExpression arguments'
+        wrapped <- fmap concat $ forM (maybe [] snd observed) $ \(position, wrapper) -> nativeOperation $ \runtime -> do
+          expressions <- case wrapper of
+            Construction.ConstructorWrapper name arity -> do
+              let headExpression = A.Con $ I.AmbQ (name :| [])
+              constructor <- localTCState $ attempt runtime $
+                queryInferWith DontExpandLast runtime headExpression $ \(_, ty) -> Just <$> signature runtime ty
+              let infos = maybe [] snd constructor
+                  fields = [index | length infos >= arity, index <- [length infos - arity .. length infos - 1]]
+              -- The inferred constructor telescope includes uniform parameters.
+              -- Only its actual fields may contain a descendant anchor.
+              fmap concat $ forM [(index, subject) | index <- fields, subject <- operands] $ \anchor ->
+                build headExpression (Just anchor) infos
+            Construction.RecordWrapper fields -> fmap concat $ forM
+              [(index, subject) | index <- [0 .. length fields - 1], subject <- operands] $ \anchor -> forM
+                (False : [True | any (notVisible . snd) fields]) $ \supplyHidden -> Construction.recordExpression <$> forM
+                (zip [0 :: Int ..] fields) (\(index, (name, info)) -> do
+                  operand <- fill supplyHidden (Just anchor) index info
+                  pure (name, operand))
+          pure [(position, expression) | expression <- expressions]
+        -- A sealed recursive head is never an ordinary premise. Offer complete
+        -- spines anchored by a native descendant (or a real copattern context),
+        -- leaving coupled operands to the shared AND agenda. Checking the move
+        -- invokes Agda's owner-group termination check, just as a complete call
+        -- does; no open operand is evidence of decrease or productivity.
+        expressions <- case observed of
+          Just ((result, infos), _)
+            | let terminal = case reverse infos of shape:_ -> argumentResult shape; [] -> result
+            , recursiveEvidenceOperands options || compatible expected terminal -> fmap concat $ forM
+                ([Nothing | Recursion.copatternCall context] ++
+                 map Just ([(index, subject) | index <- [0 .. length infos - 1], subject <- operands] ++ wrapped)) $ \anchor ->
+                  liftS $ build (Recursion.callHead context) anchor infos
+          _ -> pure []
+        completed <- fmap catMaybes $ forM expressions $ \expression -> nativeOperation $ \runtime -> attempt runtime $
+          Construction.completeLocalOperands
+            (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
+            (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }) expression target
+        let proposals = nub $ completed ++ expressions
+        modifyS $ \s -> s { recursiveProposals = recursiveProposals s + fromIntegral (length proposals),
+          copatternProposals = copatternProposals s +
+            if Recursion.copatternCall context then fromIntegral (length proposals) else 0 }
+        described <- forM proposals $ \expression -> nativeOperation $ \runtime -> describe runtime "recursive" expression
+        ordered <- service $ \runtime -> rankDescribed runtime classification target described
+        pure [(expression, picked) | (Seed expression _ _ _, picked) <- ordered]
+    -- A recursive result can constrain an operand of another application, not
+    -- only close the current goal. Retain native closed syntax, never temporary
+    -- metas or inferred helper declarations. These are proposals, not recursive
+    -- assumptions: applyTerm still checks the complete source-owner group.
+    recursiveResults <- if not (recursiveEvidenceOperands options) then pure [] else
+      fmap catMaybes $ forM recursive $ \(expression, picked) ->
+        if getAny $ foldExpr (\case A.ExtendedLam{} -> Any True; _ -> Any False) expression
+          then pure Nothing else nativeOperation $ \runtime -> Construction.preservingAllocations $ attempt runtime $
+            queryInfer runtime expression $ \(value, ty) -> do
+              closed <- instantiateFull value
+              closedType <- instantiateFull ty
+              if not (noMetas closed && noMetas closedType) then pure Nothing else do
+                allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+                if not allowed then pure Nothing else do
+                  introduced <- subtract originalSize <$> getContextSize
+                  shape <- reduce closedType >>= outerShape introduced
+                  syntax <- reify closed
+                  pure $ Just (syntax, closedType, shape, picked)
+    -- A checked application is evidence for another operation, not only a
+    -- possible final answer. Hand these same-context values to the existing
+    -- typed operand generator used for recursive results. Keep source syntax
+    -- and provenance; do not promote speculative metas or unfold private heads.
+    contextualOperands <- if not (contextualEvidence options) then pure [] else
+      fmap catMaybes $ forM ranked $ \(seed@(Seed expression _ _ _), picked) ->
+        case appView expression of
+          Application _ (_:_) -> nativeOperation $ \runtime -> localTCState $ attempt runtime $
+            querySeed runtime seed $ \(value, ty) -> do
+              closed <- instantiateFull value
+              closedType <- instantiateFull ty
+              if not (noMetas closed && noMetas closedType) then pure Nothing else do
+                allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+                if not allowed then pure Nothing else do
+                  shape <- reduce closedType >>= outerShape 0
+                  pure $ Just (expression, closedType, shape, picked)
+          _ -> pure Nothing
+    let reusable = recursiveResults ++ contextualOperands
+    generalized <- fmap catMaybes $ forM recursiveResults $ \(expression, ty, _, picked) ->
+      nativeOperation $ \runtime -> Construction.preservingAllocations $ attempt runtime $ do
+        proposal <- Helper.generalizeEvidence
+          (\step -> charge runtime $ \s -> case step of
+            Helper.InferSignature -> s { inferenceQueries = inferenceQueries s + 1,
+              helperInferenceQueries = helperInferenceQueries s + 1 }
+            Helper.InspectSignature -> s { inferenceQueries = inferenceQueries s + 1 }
+            Helper.CheckScaffold -> s { checkerQueries = checkerQueries s + 1 }
+            Helper.GenerateClauses -> s { checkerQueries = checkerQueries s + 1,
+              helperClauseQueries = helperClauseQueries s + 1 }) forbidden point expression ty
+        modify runtime $ \s -> s { helperProposals = helperProposals s + maybe 0 (const 1) proposal }
+        pure $ fmap (\draft -> (draft, picked)) proposal
+    headSignatures <- forM ranked $ \(seed@(Seed expression _ _ _), picked) -> nativeOperation $ \runtime -> do
       observed <- localTCState $ attempt runtime $
-        queryInferWith DontExpandLast runtime (Recursion.callHead context) $ \(_, ty) -> do
-          callSignature <- signature ty
-          wrappers <- Construction.argumentWrappers
-            (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }) forbidden ty
-          pure $ Just (callSignature, wrappers)
-      subjects <- Recursion.callSubjects context
-      operands <- fmap concat $ forM subjects $ \subject -> do
-        observedSubject <- localTCState $ attempt runtime $
-          queryInferWith DontExpandLast runtime subject $ \(_, ty) -> Just <$> signature ty
-        variants <- applications Nothing scope subject [] $ maybe [] snd observedSubject
-        pure $ subject:variants
-      let fill supplyHidden anchor index info = case anchor of
-            Just (position, subject) | position == index -> pure subject
-            _ | visible info || supplyHidden -> freshHole scope
-              | otherwise -> Construction.omittedField (getHiding info)
-          build headExpression anchor infos = forM
-            (False : [True | any (notVisible . argumentInfo) infos]) $ \supplyHidden -> do
-              arguments' <- forM (zip [0 :: Int ..] infos) $ \(index, ArgumentShape info _ _) ->
-                Arg info . unnamed <$> fill supplyHidden anchor index info
-              pure $ A.app headExpression arguments'
-      wrapped <- fmap concat $ forM (maybe [] snd observed) $ \(position, wrapper) -> do
-        expressions <- case wrapper of
-          Construction.ConstructorWrapper name arity -> do
-            let headExpression = A.Con $ I.AmbQ (name :| [])
-            constructor <- localTCState $ attempt runtime $
-              queryInferWith DontExpandLast runtime headExpression $ \(_, ty) -> Just <$> signature ty
-            let infos = maybe [] snd constructor
-                fields = [index | length infos >= arity, index <- [length infos - arity .. length infos - 1]]
-            -- The inferred constructor telescope includes uniform parameters.
-            -- Only its actual fields may contain a descendant anchor.
-            fmap concat $ forM [(index, subject) | index <- fields, subject <- operands] $ \anchor ->
-              build headExpression (Just anchor) infos
-          Construction.RecordWrapper fields -> fmap concat $ forM
-            [(index, subject) | index <- [0 .. length fields - 1], subject <- operands] $ \anchor -> forM
-              (False : [True | any (notVisible . snd) fields]) $ \supplyHidden -> Construction.recordExpression <$> forM
-              (zip [0 :: Int ..] fields) (\(index, (name, info)) -> do
-                operand <- fill supplyHidden (Just anchor) index info
-                pure (name, operand))
-        pure [(position, expression) | expression <- expressions]
-      -- A sealed recursive head is never an ordinary premise. Offer complete
-      -- spines anchored by a native descendant (or a real copattern context),
-      -- leaving coupled operands to the shared AND agenda. Checking the move
-      -- invokes Agda's owner-group termination check, just as a complete call
-      -- does; no open operand is evidence of decrease or productivity.
-      expressions <- case observed of
-        Just ((result, infos), _)
-          | let terminal = case reverse infos of shape:_ -> argumentResult shape; [] -> result
-          , recursiveEvidenceOperands options || compatible expected terminal -> fmap concat $ forM
-              ([Nothing | Recursion.copatternCall context] ++
-               map Just ([(index, subject) | index <- [0 .. length infos - 1], subject <- operands] ++ wrapped)) $ \anchor ->
-                build (Recursion.callHead context) anchor infos
-        _ -> pure []
-      completed <- fmap catMaybes $ forM expressions $ \expression -> attempt runtime $
-        Construction.completeLocalOperands
-          (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
-          (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }) expression target
-      let proposals = nub $ completed ++ expressions
-      modify runtime $ \s -> s { recursiveProposals = recursiveProposals s + fromIntegral (length proposals),
-        copatternProposals = copatternProposals s +
-          if Recursion.copatternCall context then fromIntegral (length proposals) else 0 }
-      described <- mapM (describe runtime "recursive") proposals
-      ordered <- rankDescribed runtime classification target described
-      pure [(expression, picked) | (Seed expression _ _ _, picked) <- ordered]
-  -- A recursive result can constrain an operand of another application, not
-  -- only close the current goal. Retain native closed syntax, never temporary
-  -- metas or inferred helper declarations. These are proposals, not recursive
-  -- assumptions: applyTerm still checks the complete source-owner group.
-  recursiveResults <- if not (recursiveEvidenceOperands options) then pure [] else
-    fmap catMaybes $ forM recursive $ \(expression, picked) ->
-      if getAny $ foldExpr (\case A.ExtendedLam{} -> Any True; _ -> Any False) expression
-        then pure Nothing else Construction.preservingAllocations $ attempt runtime $
-          queryInfer runtime expression $ \(value, ty) -> do
-            closed <- instantiateFull value
-            closedType <- instantiateFull ty
-            if not (noMetas closed && noMetas closedType) then pure Nothing else do
-              allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
-              if not allowed then pure Nothing else do
-                introduced <- subtract originalSize <$> getContextSize
-                shape <- reduce closedType >>= outerShape introduced
-                syntax <- reify closed
-                pure $ Just (syntax, closedType, shape, picked)
-  -- A checked application is evidence for another operation, not only a
-  -- possible final answer. Hand these same-context values to the existing
-  -- typed operand generator used for recursive results. Keep source syntax
-  -- and provenance; do not promote speculative metas or unfold private heads.
-  contextualOperands <- if not (contextualEvidence options) then pure [] else
-    fmap catMaybes $ forM ranked $ \(seed@(Seed expression _ _ _), picked) ->
-      case appView expression of
-        Application _ (_:_) -> localTCState $ attempt runtime $
-          querySeed runtime seed $ \(value, ty) -> do
-            closed <- instantiateFull value
-            closedType <- instantiateFull ty
-            if not (noMetas closed && noMetas closedType) then pure Nothing else do
-              allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
-              if not allowed then pure Nothing else do
-                shape <- reduce closedType >>= outerShape 0
-                pure $ Just (expression, closedType, shape, picked)
-        _ -> pure Nothing
-  let reusable = recursiveResults ++ contextualOperands
-  generalized <- fmap catMaybes $ forM recursiveResults $ \(expression, ty, _, picked) ->
-    Construction.preservingAllocations $ attempt runtime $ do
-      proposal <- Helper.generalizeEvidence
-        (\step -> charge runtime $ \s -> case step of
-          Helper.InferSignature -> s { inferenceQueries = inferenceQueries s + 1,
-            helperInferenceQueries = helperInferenceQueries s + 1 }
-          Helper.InspectSignature -> s { inferenceQueries = inferenceQueries s + 1 }
-          Helper.CheckScaffold -> s { checkerQueries = checkerQueries s + 1 }
-          Helper.GenerateClauses -> s { checkerQueries = checkerQueries s + 1,
-            helperClauseQueries = helperClauseQueries s + 1 }) forbidden point expression ty
-      modify runtime $ \s -> s { helperProposals = helperProposals s + maybe 0 (const 1) proposal }
-      pure $ fmap (\draft -> (draft, picked)) proposal
-  headSignatures <- forM ranked $ \(seed@(Seed expression _ _ _), picked) -> do
-    observed <- localTCState $ attempt runtime $
-      querySeed runtime seed $ \(value, ty) -> do
-        (result, infos) <- signature ty
-        let originalKeys = headKeys expression
-            goalKeys = maybe Set.empty id mentioned
-        -- Elaboration can expose a transparent alias's implementation in a
-        -- dependent result. Match the authorized callable's weak-head view as
-        -- well as its source identity. This never admits the implementation
-        -- as a premise: the candidate remains the original scoped expression.
-        aliasKeys <- if targetFunctions && not (null infos) && not (Set.null goalKeys)
-            && Set.disjoint originalKeys goalKeys then localTCState $ attempt runtime $ do
-          allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
-          if allowed then Just . headKeys <$> (reify =<< reduce =<< instantiateFull value)
+        querySeed runtime seed $ \(value, ty) -> do
+          (result, infos) <- signature runtime ty
+          let originalKeys = headKeys expression
+              goalKeys = maybe Set.empty id mentioned
+          -- Elaboration can expose a transparent alias's implementation in a
+          -- dependent result. Match the authorized callable's weak-head view as
+          -- well as its source identity. This never admits the implementation
+          -- as a premise: the candidate remains the original scoped expression.
+          aliasKeys <- if targetFunctions && not (null infos) && not (Set.null goalKeys)
+              && Set.disjoint originalKeys goalKeys then localTCState $ attempt runtime $ do
+            allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+            if allowed then Just . headKeys <$> (reify =<< reduce =<< instantiateFull value)
+              else pure Nothing
             else pure Nothing
-          else pure Nothing
-        closedType <- instantiateFull ty
-        pure $ Just (result, infos, if noMetas closedType then Just closedType else Nothing,
-          Set.union originalKeys $ maybe Set.empty id aliasKeys)
-    pure (expression, picked, observed)
-  -- Any positively observed Pi is callable, including telescopes containing
-  -- only hidden or instance binders. ExpectedShape separately models the
-  -- result after omission and is not the authority for this distinction.
-  let targetOperands = [expression | (expression, _, Just (_, _:_, _, keys)) <- headSignatures,
-        not $ Set.disjoint keys (maybe Set.empty id mentioned)]
-  contextual <- if not (contextualEvidence options) then pure [] else do
-    proposals <- ContextualEvidence.propose forbiddenHere
-      (\event -> liftIO $ emit $ object $
-        ["schema_version" .= ("agdaprover.contextual-evidence-observation.v1" :: String)
-        ,"goal_id" .= interactionId point] ++ case event of
-          ContextualEvidence.Inventory sources maps joins ->
-            ["stage" .= ("inventory" :: String), "sources" .= sources,
-             "mapping_laws" .= maps, "composition_laws" .= joins]
-          ContextualEvidence.Matched -> ["stage" .= ("matched" :: String)]
-          ContextualEvidence.Grounded -> ["stage" .= ("grounded" :: String)]
-          ContextualEvidence.Lifted -> ["stage" .= ("lifted" :: String)]
-          ContextualEvidence.Completed -> ["stage" .= ("completed" :: String)]
-          ContextualEvidence.Drafted -> ["stage" .= ("drafted" :: String)])
-      (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
-      (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }) target
-      ([(e, ty, picked) | (e, picked, Just (_, _, Just ty, _)) <- headSignatures] ++
-       [(e, ty, picked) | (e, ty, _, picked) <- reusable])
-    modify runtime $ \s -> s { applicationProposals = applicationProposals s + fromIntegral (length proposals) }
-    pure [(e, nub $ concat picked) | (e, picked) <- proposals]
-  heads <- fmap concat $ forM headSignatures $ \(expression, picked, observed) -> do
-    let (result, infos, closedType, _) = maybe (Nothing, [], Nothing, Set.empty) id observed
-        terminal = case reverse infos of
-          shape:_ -> argumentResult shape
-          [] -> result
-    let specialize [] = pure []
-        specialize ((anchors, provenance, constrain):rest) = stopped runtime >>= \done ->
-          if done then pure [] else do
-            drafts <- applications expected scope expression anchors infos
-            prefix <- if not constrain then pure drafts else fmap catMaybes $ forM drafts $ \draft ->
-              attempt runtime $ Construction.determinedOperands
-                (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
-                (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }) draft target
-            suffix <- specialize rest
-            pure $ [(variant, provenance) | variant <- prefix] ++ suffix
-        functions = [(index, operand) | (index, shape) <- zip [0..] infos,
-          argumentDomain shape == Just FunctionShape, operand <- targetOperands]
-        -- Contextual values accelerate explicit, positively matching domains.
-        -- Infer hidden carriers/endpoints from them instead of speculating
-        -- with every available type in every implicit position. Unknown
-        -- compatibility retains ordinary AND search; recursive seeds keep
-        -- their existing independently checked descent path.
-        evidence = [((index, operand), provenance) | (index, shape) <- zip [0..] infos,
-          (operand, _, offered, provenance) <- recursiveResults, compatible (argumentDomain shape) offered] ++
-          [((index, operand), provenance) | (index, shape) <- zip [0..] infos,
-            visible (argumentInfo shape), Just wanted <- [argumentDomain shape],
-            (operand, _, Just offered, provenance) <- contextualOperands, wanted == offered]
-    specialized <- specialize
-      ([([anchor, known], nub $ picked ++ provenance, True) | (anchor, provenance) <- evidence,
-          known <- functions, fst anchor /= fst known] ++
-       [([anchor], picked, False) | anchor <- functions] ++
-       [([anchor], nub $ picked ++ provenance, True) | (anchor, provenance) <- evidence])
-    variants <- applications expected scope expression [] infos
-    emptyApplication <- case (terminal, closedType) of
-      (Just FamilyShape{}, Just ty) -> attempt runtime $ Construction.emptyResultApplication
+          closedType <- instantiateFull ty
+          pure $ Just (result, infos, if noMetas closedType then Just closedType else Nothing,
+            Set.union originalKeys $ maybe Set.empty id aliasKeys)
+      pure (expression, picked, observed)
+    -- Any positively observed Pi is callable, including telescopes containing
+    -- only hidden or instance binders. ExpectedShape separately models the
+    -- result after omission and is not the authority for this distinction.
+    let targetOperands = [expression | (expression, _, Just (_, _:_, _, keys)) <- headSignatures,
+          not $ Set.disjoint keys (maybe Set.empty id mentioned)]
+    contextual <- if not (contextualEvidence options) then pure [] else nativeOperation $ \runtime@(Runtime _ _ _ _ _ _ emit _ _) -> do
+      proposals <- ContextualEvidence.propose forbiddenHere
+        (\event -> liftIO $ emit $ object $
+          ["schema_version" .= ("agdaprover.contextual-evidence-observation.v1" :: String)
+          ,"goal_id" .= interactionId point] ++ case event of
+            ContextualEvidence.Inventory sources maps joins ->
+              ["stage" .= ("inventory" :: String), "sources" .= sources,
+               "mapping_laws" .= maps, "composition_laws" .= joins]
+            ContextualEvidence.Matched -> ["stage" .= ("matched" :: String)]
+            ContextualEvidence.Grounded -> ["stage" .= ("grounded" :: String)]
+            ContextualEvidence.Lifted -> ["stage" .= ("lifted" :: String)]
+            ContextualEvidence.Completed -> ["stage" .= ("completed" :: String)]
+            ContextualEvidence.Drafted -> ["stage" .= ("drafted" :: String)])
         (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
-        (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }) expression ty target
-      _ -> pure Nothing
-    modify runtime $ \s -> s { applicationProposals = applicationProposals s + fromIntegral (length specialized + length variants) }
-    modify runtime $ \s -> s { absurdProposals = absurdProposals s + maybe 0 (const 1) emptyApplication }
-    pure $ [(expression, picked) | compatible expected result, expression `notElem` map fst ready] ++ specialized ++
-      [(variant, picked) | variant <- variants ++ maybe [] pure emptyApplication]
-  construction <- localTCState $ do
-    allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
-    if allowed then Construction.recordPlan forbidden target else pure Nothing
-  record <- case construction of
-    Nothing -> pure []
-    Just (names, telescope) -> do
-      let fields :: [C.Name] -> I.Telescope -> TCM [(C.Name, A.Expr)]
-          fields [] I.EmptyTel = pure []
-          fields (name:rest) (I.ExtendTel domain body) = do
-            if visible domain then do
-              hole <- freshHole scope
-              restFields <- fields rest (I.unAbs body)
-              pure $ (name, hole):restFields
-            else fields rest (I.unAbs body)
-          fields _ _ = genericError "native-record-telescope-mismatch"
-      assignments <- fields names telescope
-      modify runtime $ \s -> s { recordProposals = recordProposals s + 1 }
-      pure [(Construction.recordExpression assignments, [])]
-  introduction <- reduce target >>= \case
-    I.El _ (I.Pi domain body) ->
-      let hint = if I.absName body `elem` ["", "_"] then "x" else I.absName body in
-      withFreshName noRange hint $ \name -> do
-        let inner = setScopeLocals ((A.nameConcrete name, LocalVar name LambdaBound []) : _scopeLocals scope) scope
-        hole <- freshHole inner
-        modify runtime $ \s -> s { lambdaProposals = lambdaProposals s + 1 }
-        pure [(A.Lam exprNoRange (A.mkDomainFree $ Arg (getArgInfo domain) $ unnamed $ A.mkBinder_ name) hole, [])]
-    _ -> pure []
-  let constructed = [(expression, []) | expression <- closures,
-        expression `notElem` map fst heads] ++ introduction ++ record
-      constructorHead expression = case appView expression of
-        Application A.Con{} _ -> True
-        _ -> False
-      -- Constructor-headed applications are introductions just as record
-      -- literals are. Keep their model order within the construction tier;
-      -- otherwise a datatype's constructor fields are scheduled as arbitrary
-      -- eliminations, while the equivalent record fields get precedence.
-      constructorHeads = [item | item@(expression, _) <- heads, constructorHead expression]
-      eliminationHeads = [item | item@(expression, _) <- heads, not $ constructorHead expression] ++ recursive ++ generalized
-      ordered = if Classification.constructionFirst classification
-        then [(0, item) | item <- constructed ++ constructorHeads] ++ [(1, item) | item <- eliminationHeads]
-        else [(0, item) | item <- heads ++ recursive ++ generalized] ++ [(1, item) | item <- constructed]
-  if not (P.hasDomain models P.Refinements) || mode == P.Symbolic
-    then pure $ assignedProposals ++ ready ++ contextual ++ map snd ordered else do
+        (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }) target
+        ([(e, ty, picked) | (e, picked, Just (_, _, Just ty, _)) <- headSignatures] ++
+         [(e, ty, picked) | (e, ty, _, picked) <- reusable])
+      modify runtime $ \s -> s { applicationProposals = applicationProposals s + fromIntegral (length proposals) }
+      pure [(e, nub $ concat picked) | (e, picked) <- proposals]
+    composed <- if not streaming then pure [] else service $ \runtime ->
+      rankPrimitive runtime target [(0, item) | item <- contextual]
+    publishPrimitive streaming composed $ do
+      heads <- fmap concat $ forM headSignatures $ \(expression, picked, observed) -> do
+        let (result, infos, closedType, _) = maybe (Nothing, [], Nothing, Set.empty) id observed
+            terminal = case reverse infos of
+              shape:_ -> argumentResult shape
+              [] -> result
+        let specialize [] = pure []
+            specialize ((anchors, provenance, constrain):rest) = do
+              drafts <- nativeOperation $ \runtime -> applications runtime expected scope expression anchors infos
+              prefix <- if not constrain then pure drafts else fmap catMaybes $ forM drafts $ \draft ->
+                nativeOperation $ \runtime -> attempt runtime $ Construction.determinedOperands
+                  (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
+                  (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }) draft target
+              suffix <- specialize rest
+              pure $ [(variant, provenance) | variant <- prefix] ++ suffix
+            functions = [(index, operand) | (index, shape) <- zip [0..] infos,
+              argumentDomain shape == Just FunctionShape, operand <- targetOperands]
+            -- Contextual values accelerate explicit, positively matching domains.
+            -- Infer hidden carriers/endpoints from them instead of speculating
+            -- with every available type in every implicit position. Unknown
+            -- compatibility retains ordinary AND search; recursive seeds keep
+            -- their existing independently checked descent path.
+            evidence = [((index, operand), provenance) | (index, shape) <- zip [0..] infos,
+              (operand, _, offered, provenance) <- recursiveResults, compatible (argumentDomain shape) offered] ++
+              [((index, operand), provenance) | (index, shape) <- zip [0..] infos,
+                visible (argumentInfo shape), Just wanted <- [argumentDomain shape],
+                (operand, _, Just offered, provenance) <- contextualOperands, wanted == offered]
+        specialized <- specialize
+          ([([anchor, known], nub $ picked ++ provenance, True) | (anchor, provenance) <- evidence,
+              known <- functions, fst anchor /= fst known] ++
+           [([anchor], picked, False) | anchor <- functions] ++
+           [([anchor], nub $ picked ++ provenance, True) | (anchor, provenance) <- evidence])
+        variants <- nativeOperation $ \runtime -> applications runtime expected scope expression [] infos
+        emptyApplication <- case (terminal, closedType) of
+          (Just FamilyShape{}, Just ty) -> nativeOperation $ \runtime -> attempt runtime $ Construction.emptyResultApplication
+            (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
+            (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }) expression ty target
+          _ -> pure Nothing
+        modifyS $ \s -> s { applicationProposals = applicationProposals s + fromIntegral (length specialized + length variants) }
+        modifyS $ \s -> s { absurdProposals = absurdProposals s + maybe 0 (const 1) emptyApplication }
+        pure $ [(expression, picked) | compatible expected result, expression `notElem` map fst ready] ++ specialized ++
+          [(variant, picked) | variant <- variants ++ maybe [] pure emptyApplication]
+      construction <- nativeOperation $ \runtime -> localTCState $ do
+        allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+        if allowed then Construction.recordPlan forbidden target else pure Nothing
+      record <- case construction of
+        Nothing -> pure []
+        Just (names, telescope) -> service $ \runtime -> do
+          let fields :: [C.Name] -> I.Telescope -> TCM [(C.Name, A.Expr)]
+              fields [] I.EmptyTel = pure []
+              fields (name:rest) (I.ExtendTel domain body) = do
+                if visible domain then do
+                  hole <- freshHole scope
+                  restFields <- fields rest (I.unAbs body)
+                  pure $ (name, hole):restFields
+                else fields rest (I.unAbs body)
+              fields _ _ = genericError "native-record-telescope-mismatch"
+          assignments <- fields names telescope
+          modify runtime $ \s -> s { recordProposals = recordProposals s + 1 }
+          pure [(Construction.recordExpression assignments, [])]
+      introduction <- service $ \runtime -> reduce target >>= \case
+        I.El _ (I.Pi domain body) ->
+          let hint = if I.absName body `elem` ["", "_"] then "x" else I.absName body in
+          withFreshName noRange hint $ \name -> do
+            let inner = setScopeLocals ((A.nameConcrete name, LocalVar name LambdaBound []) : _scopeLocals scope) scope
+            hole <- freshHole inner
+            modify runtime $ \s -> s { lambdaProposals = lambdaProposals s + 1 }
+            pure [(A.Lam exprNoRange (A.mkDomainFree $ Arg (getArgInfo domain) $ unnamed $ A.mkBinder_ name) hole, [])]
+        _ -> pure []
+      let constructed = [(expression, []) | expression <- closures,
+            expression `notElem` map fst heads] ++ introduction ++ record
+          constructorHead expression = case appView expression of
+            Application A.Con{} _ -> True
+            _ -> False
+          -- Constructor-headed applications are introductions just as record
+          -- literals are. Keep their model order within the construction tier;
+          -- otherwise a datatype's constructor fields are scheduled as arbitrary
+          -- eliminations, while the equivalent record fields get precedence.
+          constructorHeads = [item | item@(expression, _) <- heads, constructorHead expression]
+          eliminationHeads = [item | item@(expression, _) <- heads, not $ constructorHead expression] ++ recursive ++ generalized
+          ordered = if Classification.constructionFirst classification
+            then [(0, item) | item <- constructed ++ constructorHeads] ++ [(1, item) | item <- eliminationHeads]
+            else [(0, item) | item <- heads ++ recursive ++ generalized] ++ [(1, item) | item <- constructed]
+      result <- service $ \runtime -> rankPrimitive runtime target $
+        [(0, item) | item <- ready, not streaming] ++
+        [(1, item) | item <- contextual, not streaming] ++
+        [(tier + 2, item) | (tier, item) <- ordered]
+      pure $ PrimitiveResult ((if streaming then [] else assignedProposals) ++ result) Nothing
+
+rankPrimitive :: Runtime s -> I.Type -> [(Int, PrimitiveDraft)] -> TCM [PrimitiveDraft]
+rankPrimitive runtime@(Runtime _ _ _ models mode _ _ _ _) target entries
+  | not (P.hasDomain models P.Refinements) || mode == P.Symbolic = pure $ map snd entries
+  | otherwise = do
     context <- getContext
     localTypes <- forM (zip [0..] context) $ \(index, entry) -> do
       ty <- typeOfBV index
@@ -716,10 +764,8 @@ primitiveProposals options stats limits models mode native emit namespace exclud
         features expression = do
           (tag, local) <- PolicyViews.refinementView expression
           pure $ F.refinementTokens goal tag (local >>= (`lookup` localTypes))
-    (assignedProposals ++) <$> rankCompatible runtime P.Refinements goal
-      ([(0, features expression, item) | item@(expression, _) <- ready] ++
-       [(1, features expression, item) | item@(expression, _) <- contextual] ++
-       [(tier + 2, features expression, item) | (tier, item@(expression, _)) <- ordered])
+    rankCompatible runtime P.Refinements goal
+      [(tier, features expression, item) | (tier, item@(expression, _)) <- entries]
 
 -- Compound introductions are a whole-search operation, separate from the
 -- ordinary one-step catalogue and the cheap later-goal closure probe.

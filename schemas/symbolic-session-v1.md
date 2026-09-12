@@ -533,6 +533,21 @@ charged. `actions_generated` includes preparation queue entries, whereas
 `actions_attempted` counts proof actions. The cost receipt records whether
 staged planning is effective. A `prepare-procedure` agenda event identifies
 the procedure, exact parent and goal without exposing a speculative proof.
+Ordinary term preparation also retains its native inventory, completed operand
+observations and per-head progress across work slices. It publishes the complete
+ready-term and contextual-composition tiers before generating the remaining
+refinements; existing NNUE roles order each full tier. `terms-resume` identifies
+subsequent preparation visits. A `term-preparation` agenda event carries the
+per-visit evidence cost (including resumed slices and atomic-builder replays).
+Exhausted preparation quanta grow without renewing the total run allowance.
+They retain their finite preparation priority: finishing the current parent's
+catalogue is distinct from starting another coarse proof-search attempt.
+Already charged preparation cost is not charged again as proof-path cost.
+Individual Agda calls, inventory ranking, scope operations and contextual
+composition remain atomic; a censored such operation is replayed,
+not its completed predecessors. This is not mid-checker suspension. The
+`staged_planning=false` ablation and explicit one-step mode still drain the
+complete ordinary catalogue before publishing proposals.
 
 The switch defaults to true for autonomous search and is disabled by one-step
 mode or `evidence_macro=false`. False restores all-at-once preparation for

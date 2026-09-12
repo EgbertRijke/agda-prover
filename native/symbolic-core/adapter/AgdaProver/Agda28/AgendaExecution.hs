@@ -38,6 +38,7 @@ data Move s
 data Preparation s = Preparation (S.GoalRef s) Pending [Int] (PreparationStage s)
 data PreparationStage s = PrepareLocals | PrepareEquations | PreparePropagation [Int]
   | PrepareStructures | PrepareTerms [S.TermProposal s] | PrepareClauses [S.TermProposal s]
+  | PrepareMoreTerms [S.TermProposal s] [S.TermProposal s] Natural (S.TermPreparation s)
 
 data Planning s = Moves [A.Proposal (Move s)] | PlanningCensored
 

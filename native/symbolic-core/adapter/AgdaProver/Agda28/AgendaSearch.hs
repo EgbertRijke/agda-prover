@@ -283,6 +283,39 @@ advance native count run@(Run session settings initial baseline metrics owner tr
             Right (S.CompleteTerms terms) -> Right $ next terms
         generated call budget = call session goal budget (models settings)
           (ranking settings) native (excluded settings) trace
+        prepareTerms structures published quantum remaining = do
+          left <- allowance
+          if left == Just 0 then pure $ Right N.PlanningCensored else do
+            let budget = E.SearchLimits $ Just $ maybe (toInteger quantum) (min $ toInteger quantum) left
+                operands = E.PrimitiveOptions
+                  { E.goalFunctionOperands = targetFunctionOperands settings
+                  , E.recursiveEvidenceOperands = recursiveEvidenceOperands settings
+                  , E.contextualEvidence = contextualEvidence settings }
+            (stats, result) <- case remaining of
+              Nothing -> S.prepareTermsSlice operands session goal budget (models settings)
+                (ranking settings) native (excluded settings) trace
+              Just cursor -> S.resumeTermsSlice cursor session goal budget native trace
+            recordSearch stats
+            trace $ object ["schema_version" .= ("agdaprover.symbolic-agenda-event.v1" :: String),
+              "event" .= ("term-preparation" :: String), "parent" .= S.stateKey state,
+              "goal_id" .= interactionId (S.goalId goal), "cost" .= stats]
+            pure $ case result of
+              Left failure -> Left failure
+              Right (batch, rest) ->
+                let additions = drop (length structures) $ S.preferStructures structures batch
+                    combined = published ++ additions
+                    -- Grow only an exhausted scheduling quantum. It is not a
+                    -- theorem limit; completed work is retained, while an
+                    -- unfinished atomic builder can retry with more room.
+                    nextQuantum = if E.workExhausted stats then 2 * max 1 quantum else quantum
+                    next = maybe (N.PrepareClauses $ structures ++ combined)
+                      (N.PrepareMoreTerms structures combined nextQuantum) rest
+                    -- This finishes the existing parent's catalogue; it is
+                    -- not a fresh proof-search branch. Prior preparation cost
+                    -- is sunk work, not an estimate of remaining proof cost.
+                    -- Keep its finite preparation priority, with every query
+                    -- still charged to the physical/cumulative ledger.
+                in Right $ continue next $ termMoves additions
         state = S.goalState goal
         name = case stage of
           N.PrepareLocals -> "local-closure"
@@ -290,6 +323,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
           N.PreparePropagation{} -> "propagation"
           N.PrepareStructures -> "structures"
           N.PrepareTerms{} -> "terms"
+          N.PrepareMoreTerms{} -> "terms-resume"
           N.PrepareClauses{} -> "clauses"
     trace $ object ["schema_version" .= ("agdaprover.symbolic-agenda-event.v1" :: String),
       "event" .= ("prepare-procedure" :: String), "procedure" .= (name :: String),
@@ -316,16 +350,9 @@ advance native count run@(Run session settings initial baseline metrics owner tr
             continue (N.PreparePropagation rest) . termMoves
       N.PrepareStructures -> publish (generated S.proposeStructures) $ \terms ->
         continue (N.PrepareTerms terms) $ termMoves terms
-      N.PrepareTerms structures -> do
-        let operands = E.PrimitiveOptions
-              { E.goalFunctionOperands = targetFunctionOperands settings
-              , E.recursiveEvidenceOperands = recursiveEvidenceOperands settings
-              , E.contextualEvidence = contextualEvidence settings }
-        publish (generated $ S.proposeTermsWithOptions operands) $ \terms ->
-          let combined = S.preferStructures structures terms
-              -- The leading structures were already published by their stage.
-              additions = drop (length structures) combined
-          in continue (N.PrepareClauses combined) $ termMoves additions
+      N.PrepareTerms structures -> prepareTerms structures [] (max 1 $ initialMacroWork settings) Nothing
+      N.PrepareMoreTerms structures published quantum cursor ->
+        prepareTerms structures published quantum (Just cursor)
       N.PrepareClauses terms -> do
         budget <- moveAllowance
         (stats, result) <- S.proposeClauseActions session goal budget
