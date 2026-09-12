@@ -123,6 +123,12 @@ dispatch before checking, followed by `operation-result` with `outcome` and
 Malformed requests emit `request-rejected`; unvalidated IDs need not be echoed.
 Fatal startup or transport errors emit `session-error` and exit nonzero.
 
+Run-operation rejection need not carry the fields of a successful run. Clients
+retain its reason/detail before testing successful selection and model pins;
+they must not report a missing success envelope as model drift. Unexpected
+adapter exceptions close the owner and retain the diagnostic cause. Such an
+exception is never a proof-search exhaustion or an accepted candidate.
+
 An operation's rejection distinguishes foreign session, stale epoch/inputs,
 unknown/evicted state, unknown goal, kernel rejection/blocking, cancellation,
 and internal failure. Only successful transitions issue or reuse a usable child state.

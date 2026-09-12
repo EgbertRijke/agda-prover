@@ -27,7 +27,7 @@ from ..bridge.symbolic import SymbolicProtocolError, search_evidence
 from ..bridge.workspace import project_inputs
 from ..budget import SearchBudget
 from ..contracts import ProverResult, StepResult, TaskSpec, task_identity
-from ..kernel.p0 import AgdaBridgeError, open_kernel_session
+from ..kernel.p0 import AgdaBridgeError, AgdaLoadError, open_kernel_session
 from ..kernel.protocol import KernelSessionFactory
 from ..observability.policy_trace import validated_proof_evidence
 from ..offline import assert_offline_configuration
@@ -521,6 +521,11 @@ class NativeProofEngine:
         except (TimeoutError, ResourceLimitError, VerifierCallLimitExceeded) as error:
             result.status = "resource-exhausted"
             result.diagnostics.append({"kind": "resource", "message": str(error)})
+        except AgdaLoadError as error:
+            # The unchanged input failed Agda loading. Keep the same public
+            # input/toolchain distinction as the compatibility engine.
+            result.status = "invalid-task"
+            result.diagnostics.append({"kind": "input", "message": str(error)})
         except BridgeError as error:
             result.status = (
                 "resource-exhausted"

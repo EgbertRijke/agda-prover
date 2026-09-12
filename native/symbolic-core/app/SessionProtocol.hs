@@ -252,9 +252,13 @@ serve output session root = do
                     E.ThreadKilled -> pure (failureView Cancelled)
                     _ -> E.throwIO err
                 , E.Handler $ \(_ :: E.IOException) -> pure $ failureView (KernelFailure "native-io-failure")
-                , E.Handler $ \(_ :: E.SomeException) -> do
+                , E.Handler $ \(err :: E.SomeException) -> do
                     S.close session
-                    pure $ failureView (KernelFailure "native-internal-failure")
+                    -- Unexpected adapter failures poison the owner, but the
+                    -- caller still needs the cause, not a fabricated search
+                    -- exhaustion or a content-free failure label.
+                    pure $ failureView (KernelFailure
+                      ("native-internal-failure: " ++ E.displayException err))
                 ]
               cost <- S.work session
               modifyMVar_ active $ \currentActive -> do

@@ -6,10 +6,24 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+from ..resource_budget import ResourceLimitError
 from .contracts import BridgeBudget
 from .project import ResolvedProject
 from .resources import CancellationToken
 from .symbolic import SymbolicProtocolError, resident_session
+
+
+def _require_run_response(outcome: dict[str, Any], operation: str) -> None:
+    """A refused operation has no successful-run identity envelope to compare.
+
+    Keep its actual failure rather than inventing selection/model drift. The
+    connection has already checked request identity and published spent work.
+    Successful run responses still undergo every selection/model check below.
+    """
+    if outcome.get("status") == "rejected":
+        if outcome.get("reason") == "cancelled":
+            raise ResourceLimitError(f"native {operation} was cancelled")
+        raise SymbolicProtocolError(f"native {operation} rejected: {outcome}")
 
 
 def search_agenda(
@@ -78,6 +92,7 @@ def search_agenda(
             publish,
         )
         current = reply["outcome"]
+        _require_run_response(current, "start")
         if current.get("status") != "ready":
             raise SymbolicProtocolError(f"native agenda could not start: {current}")
         models = current["cost"].get("models")
@@ -85,6 +100,7 @@ def search_agenda(
         def variation() -> dict[str, Any]:
             viewed = connection.request("search-cost", {"run": current["run"]}, publish)
             snapshot = viewed["outcome"]
+            _require_run_response(snapshot, "snapshot")
             if (
                 snapshot.get("status") != "retained"
                 or snapshot.get("run") != current["run"]
@@ -156,6 +172,7 @@ def search_agenda(
                 publish,
             )
             current = reply["outcome"]
+            _require_run_response(current, "advance")
             if (
                 current.get("goal_ids") != list(goal_ids)
                 or current.get("cost", {}).get("models") != models

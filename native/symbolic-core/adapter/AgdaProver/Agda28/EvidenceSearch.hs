@@ -390,22 +390,31 @@ visibleGlobals forbidden = do
     if not (all (\n -> not (C.isNoName n) && C.isInScope n == C.InScope) $ C.qnameParts alias)
       then pure Nothing else do
         meaning <- runExceptT $ tryResolveName allKindsOfNames Nothing alias
-        pure $ case meaning of
+        case meaning of
           Right value@(DefinedName _ name _)
-            | not (Set.member (anameName name) forbidden) -> case A.nameToExpr value of
-                expression@A.Def'{} -> Just expression
-                _ -> Nothing
-          Right (FieldName fields) -> case filter (not . (`Set.member` forbidden) . anameName) (toList fields) of
+            | not (Set.member (anameName name) forbidden) -> do
+                definition <- getConstInfo $ anameName name
+                available <- case theDef definition of
+                  -- Generalizable names describe binders, not closed global
+                  -- terms. Agda's inferDef requires a live generalization
+                  -- binding; invoking it outside that context is invalid.
+                  -- Generalized local parameters remain ordinary local heads.
+                  GeneralizableVar{} -> Map.member (anameName name) <$> viewTC eGeneralizedVars
+                  _ -> pure True
+                pure $ if not available then Nothing else case A.nameToExpr value of
+                  expression@A.Def'{} -> Just expression
+                  _ -> Nothing
+          Right (FieldName fields) -> pure $ case filter (not . (`Set.member` forbidden) . anameName) (toList fields) of
             [] -> Nothing
             -- This is a prefix function head, not a postfix projection
             -- elimination. Preserve that distinction through reconstruction.
             name:names -> Just $ A.Proj ProjPrefix $ I.AmbQ (anameName name :| map anameName names)
-          Right (ConstructorName _ constructors) ->
+          Right (ConstructorName _ constructors) -> pure $
             case filter (not . (`Set.member` forbidden) . anameName) (toList constructors) of
               [] -> Nothing
               name:names -> Just $ A.Con $ I.AmbQ (anameName name :| map anameName names)
-          Right value@VarName{} -> Just $ A.nameToExpr value
-          _ -> Nothing
+          Right value@VarName{} -> pure $ Just $ A.nameToExpr value
+          _ -> pure Nothing
   -- An overloaded constructor head cannot always be inferred without its
   -- operands. Preserve each resolved, visible QName as a distinct proposal;
   -- Agda still checks its result indices and the final printed expression.
