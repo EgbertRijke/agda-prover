@@ -209,8 +209,14 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
       variable <- lookupLocalMeta meta
       case mvInstantiation variable of
         InstV{} -> do
-          solutions <- Basic.getSolvedInteractionPoints False AsIs
-          pure $ lookup point [(p, expression) | (p, _, expression) <- solutions]
+          arguments <- getContextArgs
+          value <- instantiateFull $ I.MetaV meta $ map I.Apply arguments
+          -- Agda's False flag excludes only a meta at the root. A lambda or
+          -- record containing unresolved metas is not yet a reconstructible
+          -- assignment: retiring its interaction would hide those obligations.
+          if not (noMetas value) then pure Nothing else do
+            solutions <- Basic.getSolvedInteractionPoints False AsIs
+            pure $ lookup point [(p, expression) | (p, _, expression) <- solutions]
         _ -> pure Nothing
   let assignedProposals = maybe [] (\expression -> [(expression, [])]) assigned
   (forbiddenHere, _) <- excludedGlobals excluded
