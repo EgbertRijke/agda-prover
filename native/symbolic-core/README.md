@@ -112,6 +112,11 @@ with the dependent context suffix. Unrelated earlier parameters remain captured
 instead of being copied into new arguments at every nested split. Native coverage
 checking can fall back to the full telescope when more generalization is needed;
 all attempts remain charged and checked.
+Leading hidden and instance function arguments are introduced using Agda's
+reduced target and retained as explicit native lambdas before helper preparation.
+Their identities, hiding and modality therefore remain available when child
+proofs are reconstructed. Result splitting stops after introducing arguments;
+splitting a resulting record requires a subsequent action, as in Agda itself.
 Displayed evidence can require exposing hidden parent binders before insertion;
 the source-export/application path below performs that operation. Direct
 session results never substitute for independently checked source export.

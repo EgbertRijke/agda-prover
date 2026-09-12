@@ -331,6 +331,17 @@ non-elaboration failures propagate. An accepted suffix retains its ambient
 parameters, and the final draft still passes the ordinary check from the
 original parent. No numerical context-width or attempt ceiling is introduced.
 
+Before helper preparation, leading hidden/instance Pi binders in the reduced
+goal type are introduced and checked by Agda, preserving their native argument
+information. These lambdas are explicit nodes in the retained draft: relying on
+implicit insertion during checking would leave later child proofs referring to
+names absent from the reconstructed parent syntax. Definitionally equal type
+aliases use the same operation; no surface spelling determines applicability.
+Result splitting stops when argument introduction reaches the codomain, even
+for a hidden-only function. A subsequent action may split a resulting record.
+Target inspections and introduction scaffolds are charged, but introduction
+alone does not count as a clause-generation query.
+
 Autonomous clause proposals retain native binding identities in opaque,
 session/parent/goal-branded `ClauseMove` values. Printed local names are ranking
 features only, not split addresses. User-supplied `apply-clause` commands keep

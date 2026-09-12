@@ -28,7 +28,7 @@ import Agda.Syntax.Scope.Base
 import Agda.Syntax.Translation.InternalToAbstract (reify)
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Constraints (reallyNoConstraints)
-import Agda.TypeChecking.Reduce (instantiateFull)
+import Agda.TypeChecking.Reduce (instantiateFull, reduce)
 import Agda.TypeChecking.Rules.Term (checkExpr)
 import Agda.TypeChecking.Substitute (telePi)
 import Agda.TypeChecking.Telescope (splitTelescopeAt)
@@ -53,7 +53,41 @@ data Intent = UserAction ClauseAction | BoundSubjects (NonEmpty Name)
 -- already checked global definition. The helper and its case clauses are native
 -- syntax. Ordinary give checks the final draft again from the unsplit parent.
 prepare :: (PreparationStep -> TCM ()) -> InteractionId -> Intent -> TCM A.Expr
-prepare chargeStep point (ClosingSubjects chosen) = trySubjects $ NE.toList chosen
+prepare = prepareTarget False
+
+prepareTarget :: Bool -> (PreparationStep -> TCM ()) -> InteractionId -> Intent -> TCM A.Expr
+prepareTarget introduced chargeStep point action = withInteractionId point $ do
+  chargeStep CheckContext
+  target <- getMetaTypeInContext =<< lookupInteractionId point
+  reduce target >>= \case
+    I.El _ (I.Pi domain body) | notVisible domain -> do
+      -- Ordinary checking inserts these lambdas even around a let-bound
+      -- helper. They must be syntax in the retained draft: later child proofs
+      -- can refer to their exact native identities. Let Agda establish the
+      -- child context, including the binder's hiding and modality.
+      before <- getTC
+      name <- C.setNotInScope <$> freshName_ (I.absName body)
+      scope <- getScope
+      temporary <- registerInteractionPoint False noRange Nothing
+      let hole = A.QuestionMark (Info.emptyMetaInfo { Info.metaScope = scope }) temporary
+          wrap = A.Lam Info.exprNoRange $
+            A.mkDomainFree $ Arg (getArgInfo domain) $ unnamed $ A.mkBinder_ name
+      chargeStep CheckScaffold
+      void $ give_ False WithoutForce point Nothing $ wrap hole
+      expression <- prepareTarget True chargeStep temporary action
+      restoreAllocations before
+      registerDraft $ wrap expression
+    I.El _ I.Pi{} -> prepareBody chargeStep point action
+    _ | introduced, UserAction requested <- action, null (command requested) -> do
+      -- Agda's result split stops after introducing arguments; it does not
+      -- also split the resulting record. Hidden-only functions likewise leave
+      -- their codomain as an ordinary obligation, even when it is rigid.
+      scope <- getScope
+      pure $ A.QuestionMark (Info.emptyMetaInfo { Info.metaScope = scope }) point
+    _ -> prepareBody chargeStep point action
+
+prepareBody :: (PreparationStep -> TCM ()) -> InteractionId -> Intent -> TCM A.Expr
+prepareBody chargeStep point (ClosingSubjects chosen) = trySubjects $ NE.toList chosen
  where
   -- A bounded lookahead for an existing inhabitant after one elimination.
   -- The full batch and ordinary single-subject moves remain alternatives.
@@ -90,7 +124,7 @@ prepare chargeStep point (ClosingSubjects chosen) = trySubjects $ NE.toList chos
         PatternErr{} -> pure False
         _ -> throwError err
     if found then pure expression else close target rest
-prepare chargeStep point action = withInteractionId point $ do
+prepareBody chargeStep point action = withInteractionId point $ do
   context <- getContext
   target <- getMetaTypeInContext =<< lookupInteractionId point
   telescope <- getContextTelescope
