@@ -32,7 +32,7 @@ data Settings = Settings
   , dependencyOrdering :: Bool, depthLimit :: Maybe Natural, progressOrdering :: Bool
   , retryWorkOrdering :: Bool, jointConstructorPropagation :: Bool, multiSubjectClauses :: Bool
   , evidenceDepthReuse :: Bool, coalesceIntroductions :: Bool, targetFunctionOperands :: Bool
-  , recursiveEvidenceOperands :: Bool }
+  , recursiveEvidenceOperands :: Bool, contextualEvidence :: Bool }
 
 data Metrics = Metrics
   { schedulerSteps :: !Integer, modelItems :: !Integer, modelNanoseconds :: !Integer
@@ -122,6 +122,7 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "coalesce_introductions" .= coalesceIntroductions settings,
     "target_function_operands" .= targetFunctionOperands settings,
     "recursive_evidence_operands" .= recursiveEvidenceOperands settings,
+    "contextual_evidence" .= contextualEvidence settings,
     "joint_constructor_propagation" .= jointConstructorPropagation settings,
     "multi_subject_clauses" .= multiSubjectClauses settings,
     "model_items_scored" .= modelItems measured, "model_elapsed_ns" .= modelNanoseconds measured,
@@ -199,7 +200,8 @@ advance native count run@(Run session settings initial baseline metrics owner tr
         budget <- moveAllowance
         let operands = E.PrimitiveOptions
               { E.goalFunctionOperands = targetFunctionOperands settings
-              , E.recursiveEvidenceOperands = recursiveEvidenceOperands settings }
+              , E.recursiveEvidenceOperands = recursiveEvidenceOperands settings
+              , E.contextualEvidence = contextualEvidence settings }
         (termCost, atomicTerms) <- S.proposeTermsWithOptions operands session goal budget (models settings)
           (ranking settings) native (excluded settings) trace
         recordSearch termCost

@@ -4,7 +4,7 @@
 -- A narrow structural view of the existing binary AC fragment. All native
 -- terms/eliminations remain intact; this module never parses display strings.
 module AgdaProver.Agda28.Algebra
-  ( View, Role, inspectGoal, inspectEvidence, operations, endpoints, contexts, render ) where
+  ( View, Role (..), inspectGoal, relationView, binary, inspectEvidence, operations, endpoints, contexts, render ) where
 
 import Control.Monad (guard)
 import Agda.Syntax.Abstract qualified as A
@@ -60,6 +60,16 @@ inspectGoal supplied = do
     ++ case commonContext left right of
       Just (f,a,b) -> views relation (f:wrappers) a b
       Nothing -> []
+
+-- A relation need not contain a binary algebraic operation. This view also
+-- lets contextual evidence use the supplied mapping/composition schemas.
+relationView :: I.Type -> TCM (Maybe View)
+relationView supplied = do
+  I.El _ term <- instantiateFull supplied >>= reduce
+  pure $ do
+    guard $ noMetas term
+    (relation, left, right) <- binary term
+    pure $ View relation relation (R.Atom left) (R.Atom right) []
 
 -- Preserve a shared application context as an actual native lambda. Agda's
 -- raising operation protects free variables; no substitution by printed name.

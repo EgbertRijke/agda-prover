@@ -66,7 +66,7 @@ data Scheduling = Scheduling
   , schedulingRetryWork :: Bool, schedulingJointPropagation :: Bool
   , schedulingMultiSubject :: Bool, schedulingEvidenceDepthReuse :: Bool
   , schedulingCoalesceIntroductions :: Bool, schedulingTargetFunctionOperands :: Bool
-  , schedulingRecursiveEvidenceOperands :: Bool }
+  , schedulingRecursiveEvidenceOperands :: Bool, schedulingContextualEvidence :: Bool }
 
 defaultScheduling :: Scheduling
 defaultScheduling = Scheduling
@@ -75,7 +75,7 @@ defaultScheduling = Scheduling
   , schedulingRetryWork = True, schedulingJointPropagation = True
   , schedulingMultiSubject = True, schedulingEvidenceDepthReuse = True
   , schedulingCoalesceIntroductions = True, schedulingTargetFunctionOperands = True
-  , schedulingRecursiveEvidenceOperands = True }
+  , schedulingRecursiveEvidenceOperands = True, schedulingContextualEvidence = True }
 
 instance FromJSON Scheduling where
   parseJSON = withObject "scheduling" $ \o -> do
@@ -83,7 +83,7 @@ instance FromJSON Scheduling where
         supplied = Set.fromList (KM.keys o)
         switch key = if KM.member key o then o .: key else pure True
     unless (required `Set.isSubsetOf` supplied && supplied `Set.isSubsetOf`
-      Set.union required (Set.fromList ["dependency_ordering", "progress_ordering", "retry_work_ordering", "joint_constructor_propagation", "multi_subject_clauses", "evidence_depth_reuse", "coalesce_introductions", "target_function_operands", "recursive_evidence_operands"])) $
+      Set.union required (Set.fromList ["dependency_ordering", "progress_ordering", "retry_work_ordering", "joint_constructor_propagation", "multi_subject_clauses", "evidence_depth_reuse", "coalesce_introductions", "target_function_operands", "recursive_evidence_operands", "contextual_evidence"])) $
       fail "invalid scheduling fields"
     structural <- o .: "structural_delay"
     macro <- o .: "macro_delay"
@@ -98,6 +98,7 @@ instance FromJSON Scheduling where
     coalesce <- switch "coalesce_introductions"
     targetFunctions <- switch "target_function_operands"
     recursiveOperands <- switch "recursive_evidence_operands"
+    contextual <- switch "contextual_evidence"
     unless (initial > 0) $ fail "initial macro allowance must be positive"
     pure Scheduling
       { schedulingStructural = structural, schedulingMacro = macro, schedulingInitial = initial
@@ -106,7 +107,7 @@ instance FromJSON Scheduling where
       , schedulingJointPropagation = jointPropagation, schedulingMultiSubject = multiSubject
       , schedulingEvidenceDepthReuse = depthReuse, schedulingCoalesceIntroductions = coalesce
       , schedulingTargetFunctionOperands = targetFunctions
-      , schedulingRecursiveEvidenceOperands = recursiveOperands }
+      , schedulingRecursiveEvidenceOperands = recursiveOperands, schedulingContextualEvidence = contextual }
 
 protocolFailureName :: ProtocolFailure -> String
 protocolFailureName InvalidFrameBudget = "invalid-frame-budget"
@@ -367,7 +368,8 @@ perform session runs modelCache emit emitRun operation = case operation of
           , G.evidenceDepthReuse = schedulingEvidenceDepthReuse scheduling
           , G.coalesceIntroductions = schedulingCoalesceIntroductions scheduling
           , G.targetFunctionOperands = schedulingTargetFunctionOperands scheduling
-          , G.recursiveEvidenceOperands = schedulingRecursiveEvidenceOperands scheduling } nativePath selection
+          , G.recursiveEvidenceOperands = schedulingRecursiveEvidenceOperands scheduling
+          , G.contextualEvidence = schedulingContextualEvidence scheduling } nativePath selection
   AdvanceSearch key steps limits actionLimit depthLimit -> Run.advance runs key steps limits actionLimit depthLimit emitRun
   RunCost key -> Run.snapshot runs key
   DiscardSearch key -> Run.discard runs key

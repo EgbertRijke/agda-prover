@@ -454,11 +454,11 @@ and `exclude_names` is the existing list of forbidden premise names. The optiona
 `scheduling` object has the first four required fields below and optional
 `dependency_ordering`, `progress_ordering`, `retry_work_ordering`, `evidence_depth_reuse`, `coalesce_introductions`,
 `target_function_operands`, `recursive_evidence_operands`,
-`joint_constructor_propagation` and `multi_subject_clauses` booleans
+`joint_constructor_propagation`, `multi_subject_clauses` and `contextual_evidence` booleans
 (defaults shown):
 
 ```json
-{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true,"evidence_depth_reuse":true,"coalesce_introductions":true,"target_function_operands":true,"recursive_evidence_operands":true,"joint_constructor_propagation":true,"multi_subject_clauses":true}
+{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true,"retry_work_ordering":true,"evidence_depth_reuse":true,"coalesce_introductions":true,"target_function_operands":true,"recursive_evidence_operands":true,"joint_constructor_propagation":true,"multi_subject_clauses":true,"contextual_evidence":true}
 ```
 
 Delays are nonnegative scheduling priorities, not proof-depth restrictions.
@@ -477,6 +477,35 @@ search uses zero remaining-work estimate and keeps its previous ordering.
 The cost receipt records `ordering: cost-plus-obligations-v2`; disabling the
 switch records `cost-only-v1`. This is an internal native scheduling option,
 not a change to Python defaults or the public task's resource envelope.
+
+`contextual_evidence` enables target-directed composition of already available
+evidence, including closed recursive calls and pointwise premises. Agda infers
+the complete premise telescope from either endpoint. Native, modality-preserving
+application contexts admit constructors, definitions and local functions;
+lifting and composition require actual supplied operations. No particular
+relation, datatype, constructor or theorem name is distinguished.
+
+The adapter computes redexes while retaining named neutral calls, rather than
+re-elaborating normalized private case-function implementations. It proposes
+strictly size-decreasing steps (or a step reaching the requested endpoint),
+plus one finite chain of those steps. All individual steps remain alternatives;
+the ordinary search remains available when this restricted accelerator fails.
+Duplicate checked proof terms are removed, never distinct proofs with equal
+endpoints. Contextual candidates precede unconstrained applications, with the
+existing NNUE ordering within that class. Disabling the switch removes this
+additional candidate class and its preference without changing allowances.
+Reification does not grant visibility: unnameable, explicitly excluded, or
+declaration-generating context drafts are deferred to ordinary scoped search.
+
+Inspections, inference and conversion/checking consume the existing work ledger.
+Speculative native assignments are rolled back; complete proposals still pass
+the source-owner checker, reconstruction and fresh independent validation.
+The agenda cost reports the switch. Generic observer events use
+`agdaprover.contextual-evidence-observation.v1`, a `goal_id`, and stages
+`inventory`, `matched`, `grounded`, `lifted`, `drafted`, or `completed`.
+Inventory adds `sources`, `mapping_laws`, and `composition_laws` counts.
+These describe proposal generation, not accepted or verified proofs; diagnostics
+and benchmark interpretation remain outside the runtime generator.
 
 `retry_work_ordering` adds the exhausted macro attempt's measured work units to
 its continuation priority. Its next allowance still grows, but an exponential

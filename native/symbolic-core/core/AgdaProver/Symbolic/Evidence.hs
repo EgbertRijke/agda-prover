@@ -17,12 +17,13 @@ newtype SearchLimits = SearchLimits { workUnitLimit :: Maybe Integer } deriving 
 
 -- Independent proposal ablations; neither changes checker authority or limits.
 data PrimitiveOptions = PrimitiveOptions
-  { goalFunctionOperands :: Bool, recursiveEvidenceOperands :: Bool }
+  { goalFunctionOperands :: Bool, recursiveEvidenceOperands :: Bool
+  , contextualEvidence :: Bool }
   deriving (Eq, Show)
 
 defaultPrimitiveOptions :: PrimitiveOptions
 defaultPrimitiveOptions = PrimitiveOptions
-  { goalFunctionOperands = True, recursiveEvidenceOperands = True }
+  { goalFunctionOperands = True, recursiveEvidenceOperands = True, contextualEvidence = True }
 
 instance FromJSON SearchLimits where
   parseJSON = withObject "evidence search limits" $ \o -> do

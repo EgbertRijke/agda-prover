@@ -9,7 +9,7 @@ module AgdaProver.Agda28.EvidenceSearch (run, begin, resume, Pending, runHelper,
 import Control.Monad (forM)
 import Control.Monad.Except (catchError, runExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (Value (..), toJSON)
+import Data.Aeson (Value (..), toJSON, object, (.=))
 import Data.Aeson.KeyMap qualified as KM
 import Data.Foldable (toList)
 import Data.IORef
@@ -53,6 +53,7 @@ import Agda.Utils.Impossible (impossible)
 import AgdaProver.Symbolic.Evidence
 import AgdaProver.Symbolic.Agenda qualified as Agenda
 import AgdaProver.Agda28.Construction qualified as Construction
+import AgdaProver.Agda28.ContextualEvidence qualified as ContextualEvidence
 import AgdaProver.Agda28.SearchTask qualified as Task
 import AgdaProver.Agda28.ObservedEquations qualified as ObservedEquations
 import AgdaProver.Agda28.Recursion qualified as Recursion
@@ -528,7 +529,8 @@ primitiveProposals options stats limits models mode native emit namespace exclud
           if allowed then Just . headKeys <$> (reify =<< reduce =<< instantiateFull value)
             else pure Nothing
           else pure Nothing
-        pure $ Just (result, infos, if noMetas ty then Just ty else Nothing,
+        closedType <- instantiateFull ty
+        pure $ Just (result, infos, if noMetas closedType then Just closedType else Nothing,
           Set.union originalKeys $ maybe Set.empty id aliasKeys)
     pure (expression, picked, observed)
   -- Any positively observed Pi is callable, including telescopes containing
@@ -536,6 +538,25 @@ primitiveProposals options stats limits models mode native emit namespace exclud
   -- result after omission and is not the authority for this distinction.
   let targetOperands = [expression | (expression, _, Just (_, _:_, _, keys)) <- headSignatures,
         not $ Set.disjoint keys (maybe Set.empty id mentioned)]
+  contextual <- if not (contextualEvidence options) then pure [] else do
+    proposals <- ContextualEvidence.propose forbiddenHere
+      (\event -> liftIO $ emit $ object $
+        ["schema_version" .= ("agdaprover.contextual-evidence-observation.v1" :: String)
+        ,"goal_id" .= interactionId point] ++ case event of
+          ContextualEvidence.Inventory sources maps joins ->
+            ["stage" .= ("inventory" :: String), "sources" .= sources,
+             "mapping_laws" .= maps, "composition_laws" .= joins]
+          ContextualEvidence.Matched -> ["stage" .= ("matched" :: String)]
+          ContextualEvidence.Grounded -> ["stage" .= ("grounded" :: String)]
+          ContextualEvidence.Lifted -> ["stage" .= ("lifted" :: String)]
+          ContextualEvidence.Completed -> ["stage" .= ("completed" :: String)]
+          ContextualEvidence.Drafted -> ["stage" .= ("drafted" :: String)])
+      (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
+      (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }) target
+      ([(e, ty, picked) | (e, picked, Just (_, _, Just ty, _)) <- headSignatures] ++
+       [(e, ty, picked) | (e, ty, _, picked) <- reusable])
+    modify runtime $ \s -> s { applicationProposals = applicationProposals s + fromIntegral (length proposals) }
+    pure [(e, nub $ concat picked) | (e, picked) <- proposals]
   heads <- fmap concat $ forM headSignatures $ \(expression, picked, observed) -> do
     let (result, infos, closedType, _) = maybe (Nothing, [], Nothing, Set.empty) id observed
         terminal = case reverse infos of
@@ -612,7 +633,7 @@ primitiveProposals options stats limits models mode native emit namespace exclud
         then [(0, item) | item <- constructed ++ constructorHeads] ++ [(1, item) | item <- eliminationHeads]
         else [(0, item) | item <- heads ++ recursive ++ generalized] ++ [(1, item) | item <- constructed]
   if not (P.hasDomain models P.Refinements) || mode == P.Symbolic
-    then pure $ assignedProposals ++ map snd ordered else do
+    then pure $ assignedProposals ++ contextual ++ map snd ordered else do
     context <- getContext
     localTypes <- forM (zip [0..] context) $ \(index, entry) -> do
       ty <- typeOfBV index
@@ -624,7 +645,8 @@ primitiveProposals options stats limits models mode native emit namespace exclud
           (tag, local) <- PolicyViews.refinementView expression
           pure $ F.refinementTokens goal tag (local >>= (`lookup` localTypes))
     (assignedProposals ++) <$> rankCompatible runtime P.Refinements goal
-      [(tier, features expression, item) | (tier, item@(expression, _)) <- ordered]
+      ([(0, features expression, item) | item@(expression, _) <- contextual] ++
+       [(tier + 1, features expression, item) | (tier, item@(expression, _)) <- ordered])
 
 -- Compound introductions are a whole-search operation, separate from the
 -- ordinary one-step catalogue and the cheap later-goal closure probe.
