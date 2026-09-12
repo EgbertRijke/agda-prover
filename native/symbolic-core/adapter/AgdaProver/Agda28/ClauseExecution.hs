@@ -5,6 +5,7 @@ module AgdaProver.Agda28.ClauseExecution (Intent (..), PreparationStep (..), pre
 
 import Control.Monad (forM, void, when)
 import Control.Monad.Except (catchError, throwError)
+import Data.IntSet qualified as IntSet
 import Data.List (elemIndex)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
@@ -21,11 +22,15 @@ import Agda.Syntax.Common
 import Agda.Syntax.Common.Pretty (prettyShow)
 import Agda.Syntax.Concrete.Name qualified as C
 import Agda.Syntax.Info qualified as Info
+import Agda.Syntax.Internal qualified as I
 import Agda.Syntax.Position (noRange)
 import Agda.Syntax.Scope.Base
 import Agda.Syntax.Translation.InternalToAbstract (reify)
 import Agda.TypeChecking.Monad
+import Agda.TypeChecking.Free (allFreeVars)
+import Agda.TypeChecking.Reduce (reduce)
 import Agda.TypeChecking.Substitute (telePi)
+import Agda.TypeChecking.Telescope (splitTelescopeAt)
 import Agda.Utils.Null (empty)
 import Agda.Utils.Lens ((^.))
 import Agda.Utils.BiMap qualified as BiMap
@@ -48,12 +53,50 @@ prepare chargeStep point action = withInteractionId point $ do
   context <- getContext
   target <- getMetaTypeInContext =<< lookupInteractionId point
   telescope <- getContextTelescope
-  signature <- inTopContext $ reify $ telePi telescope target
   originalScope <- getScope
   names <- forM (zip [0 :: Int ..] context) $ \(i, _) ->
     freshName_ $ "argument" ++ show i
-  selected <- subjects chargeStep point action (map ctxEntryName context) names
-  let entries = reverse $ zip context names
+  (selected, indices) <- subjects chargeStep point action (map ctxEntryName context) names
+  width <- abstractionWidth chargeStep indices
+  before <- getTC
+  let build count = do
+        let (_, suffix) = splitTelescopeAt (length context - count) telescope
+        -- Reification must retain the actual meta argument spines. Reusing a
+        -- checkpoint strengthened past the abstracted variables would leave
+        -- impossible entries in Agda's identity-substitution comparison.
+        signature <- inTopContext $ addContext (reverse $ drop count context) $
+          reify $ telePi suffix target
+        prepareHelper chargeStep point originalScope signature selected
+          (take count $ zip context names)
+  if width >= length context then build (length context) else
+    build width `catchError` \err -> case err of
+      TypeError{} -> restoreAllocations before >> build (length context)
+      PatternErr{} -> restoreAllocations before >> build (length context)
+      _ -> throwError err
+
+-- Abstract the subjects and the variables in their datatype indices, plus the
+-- intervening dependent suffix. Datatype parameters stay in the ambient
+-- context. Generalizing that context wholesale on every nested split copies
+-- unrelated binders into the helper while Agda also captures their originals.
+-- The native coverage checker remains authoritative: unusual dependencies
+-- which need more generalization retry the original full telescope.
+abstractionWidth :: (PreparationStep -> TCM ()) -> [Int] -> TCM Int
+abstractionWidth chargeStep selectedIndices = do
+  dependencies <- forM selectedIndices $ \index -> do
+    chargeStep CheckContext
+    typeOfBV index >>= reduce >>= \case
+      I.El _ (I.Def family eliminations) -> getConstInfo family >>= \definition ->
+        pure $ case theDef definition of
+          Datatype { dataPars = parameters } ->
+            IntSet.toList $ allFreeVars $ drop parameters eliminations
+          _ -> []
+      _ -> pure []
+  pure $ maximum $ 0 : map (+ 1) (selectedIndices ++ concat dependencies)
+
+prepareHelper :: (PreparationStep -> TCM ()) -> InteractionId -> ScopeInfo
+              -> A.Expr -> String -> [(ContextEntry, Name)] -> TCM A.Expr
+prepareHelper chargeStep point originalScope signature selected arguments = do
+  let entries = reverse arguments
       patterns = [Arg (getArgInfo entry) $ unnamed $ A.VarP $ A.mkBindName name
                  | (entry, name) <- entries]
       operands = [Arg (getArgInfo entry) $ unnamed $ A.Var $ ctxEntryName entry
@@ -79,15 +122,19 @@ prepare chargeStep point action = withInteractionId point $ do
     -- omitted pattern invents fresh identities and leaves spliced terms free.
     (_, _, generated) <- withShowAllArguments $ makeCase temporary noRange selected
     instantiated <- mapM (freshClause originalScope) generated
-    allocation <- getTC
-    putTC before
-    -- Only allocation high-water marks survive speculative preparation. No
-    -- helper definition, original-goal assignment or constraint may leak back.
-    stFreshNameId `setTCLens` (allocation ^. stFreshNameId)
-    stFreshInteractionId `setTCLens` (allocation ^. stFreshInteractionId)
+    restoreAllocations before
     case instantiated of
       [] -> genericError "native-clause-execution-empty-proposal"
       first:rest -> registerDraft $ build (first :| rest)
+
+-- Only allocation high-water marks survive speculative preparation. No
+-- helper definition, original-goal assignment or constraint may leak back.
+restoreAllocations :: TCState -> TCM ()
+restoreAllocations before = do
+  allocation <- getTC
+  putTC before
+  stFreshNameId `setTCLens` (allocation ^. stFreshNameId)
+  stFreshInteractionId `setTCLens` (allocation ^. stFreshInteractionId)
 
 -- Keep each native binder's hiding, including nested constructor and record
 -- patterns. Only pattern-bound names become splittable in the helper scope.
@@ -108,17 +155,18 @@ patternLocals argument = case namedArg argument of
 
 -- Ask Agda to resolve subjects (including hidden and as-bound variables). The
 -- resulting identities, not printed type/name comparisons, map to helper args.
-subjects :: (PreparationStep -> TCM ()) -> InteractionId -> Intent -> [Name] -> [Name] -> TCM String
+subjects :: (PreparationStep -> TCM ()) -> InteractionId -> Intent -> [Name] -> [Name]
+         -> TCM (String, [Int])
 subjects chargeStep _ (BoundSubjects chosen) originals renamed = do
   chargeStep CheckContext
   mapped <- forM (NE.toList chosen) $ \name -> case elemIndex name originals of
     Nothing -> genericError "native-clause-execution-foreign-binding"
     Just index -> case drop index renamed of
-      replacement:_ -> pure $ prettyShow $ nameConcrete replacement
+      replacement:_ -> pure (prettyShow $ nameConcrete replacement, index)
       [] -> genericError "native-clause-execution-invalid-subject-index"
-  pure $ unwords mapped
+  pure (unwords $ map fst mapped, map snd mapped)
 subjects chargeStep point (UserAction action) originals renamed
-  | command action `elem` ["", "."] = pure $ command action
+  | command action `elem` ["", "."] = pure (command action, [])
   | otherwise = do
       -- A generalized helper can eliminate module parameters and lambda-bound
       -- variables that make_case cannot split in the original source clause.
@@ -135,7 +183,9 @@ subjects chargeStep point (UserAction action) originals renamed
             PatternErr{} -> pure Nothing
             _ -> throwError err
       case direct of
-        Just indices -> unwords <$> mapM (fmap showName . (`at` renamed)) indices
+        Just indices -> do
+          mapped <- mapM (fmap showName . (`at` renamed)) indices
+          pure (unwords mapped, indices)
         Nothing -> originalSubjects
  where
   originalSubjects = do
@@ -155,8 +205,12 @@ subjects chargeStep point (UserAction action) originals renamed
               entry <- at index context
               case elemIndex (ctxEntryName entry) originals of
                 Nothing -> genericError "native-clause-execution-missing-subject"
-                Just i -> (:[]) . showName <$> at i renamed
-          pure $ case concat mapped of [] -> "."; values -> unwords values
+                Just i -> do
+                  replacement <- at i renamed
+                  pure [(showName replacement, i)]
+          pure $ case concat mapped of
+            [] -> (".", [])
+            values -> (unwords $ map fst values, map snd values)
   showName = prettyShow . nameConcrete
   at :: Int -> [a] -> TCM a
   at index values = case drop index values of

@@ -94,6 +94,11 @@ helper. Agda generates the helper's native clauses and checks the final draft;
 new goals retain their dependent types and can be split or filled in subsequent
 branches. The original global definitions and parent remain intact. Rejections,
 cancellation and replay preserve the same transaction/cost rules as `give`.
+The helper abstracts the selected subjects and their datatype indices, together
+with the dependent context suffix. Unrelated earlier parameters remain captured
+instead of being copied into new arguments at every nested split. Native coverage
+checking can fall back to the full telescope when more generalization is needed;
+all attempts remain charged and checked.
 Displayed evidence can require exposing hidden parent binders before insertion;
 the source-export/application path below performs that operation. Direct
 session results never substitute for independently checked source export.
