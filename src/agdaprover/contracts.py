@@ -112,7 +112,7 @@ class CaseSplitCheck:
 class TaskSpec:
     source_file: Path
     goal_id: int | None = None
-    max_candidates: int = 500
+    max_candidates: int | None = None
     max_term_size: int = 8
     max_depth: int | None = None
     timeout_seconds: float | None = None

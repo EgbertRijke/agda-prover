@@ -105,11 +105,11 @@ edits automatically, then reloads through an available companion extension.
 Cancel stops the current buffer's search in Emacs or the active operation in
 VS Code.
 
-Deep search allows 8,000 actions instead of 500, without adding a time or
-depth cap. Explicit limits override the preset. To make it the default, set
-`agdaprover-search-profile` (Emacs) or `agdaprover.searchProfile` (VS Code) to
-`deep`, leaving `agdaprover-max-candidates` / `agdaprover.maxCandidates` unset
-(`nil` / `null`). See [deep-search settings](docs/interactive.md#deep-search).
+Search has no default action, time, or depth ceiling. The deep-search command
+remains available, with the same defaults as ordinary search. Memory and other
+physical resource limits still apply. To remove an older explicit action cap,
+set `agdaprover-max-candidates` / `agdaprover.maxCandidates` to `nil` / `null`.
+See [search controls](docs/interactive.md#deep-search).
 
 Open Emacs settings with `M-x customize-group RET agdaprover RET`, or use
 VS Code's AgdaProver settings. The

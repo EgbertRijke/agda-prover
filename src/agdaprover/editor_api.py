@@ -61,7 +61,7 @@ class EditorRequest:
     ranker: Literal["symbolic", "nnue"] = "nnue"
     model: Path | None = None
     action_model: Path | None = None
-    max_candidates: int = 500
+    max_candidates: int | None = None
     max_term_size: int = 8
     max_depth: int | None = None
     timeout_seconds: float | None = None
@@ -151,7 +151,11 @@ class EditorRequest:
             ranker=ranker,
             model=optional_path("model"),
             action_model=optional_path("action_model"),
-            max_candidates=positive_int("max_candidates", profile.max_candidates),
+            max_candidates=(
+                positive_int("max_candidates", 1)
+                if value.get("max_candidates") is not None
+                else profile.max_candidates
+            ),
             max_term_size=positive_int("max_term_size", 8),
             max_depth=max_depth,
             max_verifier_calls=max_verifier_calls,

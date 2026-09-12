@@ -393,7 +393,7 @@ def solve_relation_path(
     goal: GoalInfo,
     heads: tuple[RelationHead, ...],
     *,
-    query_budget: int,
+    query_budget: float,
     deadline: float,
     max_terms: int = 128,
     seed_terms: tuple[tuple[str, str], ...] = (),

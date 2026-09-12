@@ -176,13 +176,13 @@
           "type": "string",
           "enum": ["standard", "deep"],
           "default": "standard",
-          "description": "Search effort: standard (500 actions) or deep (8000 actions). Explicit limits override the preset."
+          "description": "Compatibility search preset. Neither standard nor deep imposes an action, time, or depth ceiling."
         },
         "agdaprover.maxCandidates": {
           "type": ["integer", "null"],
           "default": null,
           "minimum": 1,
-          "description": "Whole-run action allowance. Null uses the search profile's default; an explicit value overrides it."
+          "description": "Optional whole-run action allowance. Null means no action ceiling; physical resource limits still apply."
         },
         "agdaprover.maxTermSize": {
           "type": "integer",

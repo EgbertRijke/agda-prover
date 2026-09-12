@@ -113,7 +113,7 @@ def propose_step(
         resource_scope.open()
         call_scope.open(task.max_verifier_calls)
         require_agda_source_file(source_file)
-        if task.max_candidates <= 0 or (
+        if (task.max_candidates is not None and task.max_candidates <= 0) or (
             task.timeout_seconds is not None and task.timeout_seconds <= 0
         ):
             raise ValueError("budgets must be positive")

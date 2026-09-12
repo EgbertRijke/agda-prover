@@ -1,6 +1,5 @@
 import tempfile
 import unittest
-from dataclasses import replace
 from pathlib import Path
 
 from agdaprover.cli import build_parser, task_from_arguments
@@ -13,13 +12,13 @@ class SearchProfileTests(unittest.TestCase):
         arguments = build_parser().parse_args([operation, "Example.agda", *options])
         return task_from_arguments(arguments, Path("Example.agda"), "symbolic", None)
 
-    def test_deep_only_changes_default_effort_in_every_search_entry_point(self):
+    def test_profiles_have_no_implicit_action_ceiling_in_every_search_entry_point(self):
         for operation in ("prove", "prove-prefix", "step", "interactive"):
             with self.subTest(operation=operation):
                 standard = self.task(operation=operation)
                 deep = self.task("--deep", operation=operation)
-                self.assertEqual(standard.max_candidates, 500)
-                self.assertEqual(deep, replace(standard, max_candidates=8000))
+                self.assertIsNone(standard.max_candidates)
+                self.assertEqual(deep, standard)
                 self.assertEqual(
                     deep, self.task("--search-profile", "deep", operation=operation)
                 )
@@ -63,9 +62,12 @@ class SearchProfileTests(unittest.TestCase):
             )
             standard = EditorRequest.from_dict(value)
             deep = EditorRequest.from_dict({**value, "search_profile": "deep"})
-            self.assertEqual(standard.max_candidates, 500)
-            self.assertEqual(deep.max_candidates, 8000)
-            self.assertEqual(deep.to_namespace_values()["max_candidates"], 8000)
+            self.assertIsNone(standard.max_candidates)
+            self.assertIsNone(deep.max_candidates)
+            self.assertIsNone(deep.to_namespace_values()["max_candidates"])
+            self.assertEqual(
+                EditorRequest.from_dict({**value, "max_candidates": None}), standard
+            )
             self.assertEqual(
                 EditorRequest.from_dict(
                     {**value, "search_profile": "deep", "max_candidates": 11}

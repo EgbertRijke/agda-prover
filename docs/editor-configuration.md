@@ -108,12 +108,12 @@ for library registration and path resolution.
 | Depth limit | `agdaprover-max-depth` | `agdaprover.maxDepth` |
 | Time limit in seconds | `agdaprover-timeout` | `agdaprover.timeoutSeconds` |
 
-The default preset is `standard` (500 actions). Select `deep` for 8,000
-actions, keeping the action allowance unset (`nil` / `null`) to use the
-preset. An explicit allowance overrides both presets; it counts search
-actions, not physical Agda calls. The term-size setting defaults to 8.
-Time and depth limits are unset by default. Deep search does not remove
-explicit limits or increase the other resource allowances. See
+Both `standard` (default) and `deep` have no implicit action ceiling.
+Keep the action allowance unset (`nil` / `null`) for uncapped actions.
+An explicit allowance limits both presets; it counts search actions, not
+physical Agda calls. The small term enumerator's term-size setting defaults to 8.
+Time and depth limits are also unset by default. Physical resource allowances
+still apply. Deep search does not remove explicit limits. See
 [deep search](interactive.md#deep-search).
 
 ## NNUE models

@@ -22,6 +22,7 @@ from typing import Literal
 
 from .bridge.contracts import StateToken
 from .bridge.interaction import RewriteMode
+from .budget import action_limit_view
 from .contracts import ContextEntry, GoalInfo
 from .dependency_planner import goal_has_concrete_nullary_scrutinee
 from .focused import FocusedCandidatesResult, focused_candidates, parse_type
@@ -480,7 +481,7 @@ class ConstructorStats(ScopedRetrievalStats):
     premise_catalog_queries: int = 0
     premise_queries: int = 0
     premise_refinement_queries: int = 0
-    premise_query_limit: int = _SCOPE_PREMISE_QUERY_LIMIT
+    premise_query_limit: float = _SCOPE_PREMISE_QUERY_LIMIT
     premise_candidates: int = 0
     relation_path: dict[str, object] = field(default_factory=dict)
     evidence_inference_queries: int = 0
@@ -533,7 +534,9 @@ class ConstructorStats(ScopedRetrievalStats):
     focused: dict[str, int | float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
-        return self.stats_dict()
+        result = self.stats_dict()
+        result["premise_query_limit"] = action_limit_view(self.premise_query_limit)
+        return result
 
 
 @dataclass(frozen=True)
@@ -549,7 +552,7 @@ class _ConstructorSearch:
         self,
         session: TransactionalKernelSession,
         *,
-        action_budget: int,
+        action_budget: float,
         deadline: float,
         max_depth: int | None,
         solution_limit: int,
@@ -833,7 +836,7 @@ class _ConstructorSearch:
         goal: GoalInfo,
         depth: int,
         ancestors: frozenset[tuple[object, ...]],
-        premise_query_stop: int,
+        premise_query_stop: float,
     ) -> Iterator[ConstructorSolution]:
         """Refine a copattern leaf with its owner; solve arguments normally.
 
@@ -922,7 +925,7 @@ class _ConstructorSearch:
         goal: GoalInfo,
         depth: int,
         ancestors: frozenset[tuple[object, ...]],
-        premise_query_stop: int,
+        premise_query_stop: float,
         *,
         continuation_only: bool | None = None,
         deprioritized_terms: frozenset[str] = frozenset(),
@@ -1049,7 +1052,7 @@ class _ConstructorSearch:
         goal: GoalInfo,
         depth: int,
         ancestors: frozenset[tuple[object, ...]],
-        premise_query_stop: int,
+        premise_query_stop: float,
         deprioritized_locals: frozenset[str] = frozenset(),
         *,
         closure_only: bool = False,
@@ -1265,7 +1268,7 @@ class _ConstructorSearch:
         goal: GoalInfo,
         depth: int,
         ancestors: frozenset[tuple[object, ...]],
-        premise_query_stop: int,
+        premise_query_stop: float,
         deprioritized_locals: frozenset[str] = frozenset(),
     ) -> Iterator[ConstructorSolution]:
         """Apply a polymorphic eliminator to an available concrete source."""
@@ -2078,7 +2081,7 @@ class _ConstructorSearch:
         goal: GoalInfo,
         depth: int,
         ancestors: frozenset[tuple[object, ...]],
-        premise_query_stop: int,
+        premise_query_stop: float,
     ) -> Iterator[ConstructorSolution]:
         """Refine a rigid goal by a kernel-observed polymorphic eliminator."""
 
@@ -2158,7 +2161,7 @@ class _ConstructorSearch:
                     "new_expressions": [a.expression for a in additions],
                     "retained_expressions": [a.expression for a in actions],
                     "actions_considered": self.stats.actions_considered,
-                    "action_limit": self.action_budget,
+                    "action_limit": action_limit_view(self.action_budget),
                 },
             )
         return (*actions, *additions)
@@ -2602,7 +2605,7 @@ class _ConstructorSearch:
         goal: GoalInfo,
         depth: int,
         ancestors: frozenset[tuple[object, ...]],
-        premise_query_stop: int,
+        premise_query_stop: float,
     ) -> Iterator[ConstructorSolution]:
         if not self.contextual_evidence_enabled or _INTERNAL_META.search(goal.target):
             return
@@ -2740,7 +2743,7 @@ class _ConstructorSearch:
         goal: GoalInfo,
         depth: int,
         ancestors: frozenset[tuple[object, ...]],
-        premise_query_stop: int,
+        premise_query_stop: float,
     ) -> Iterator[ConstructorSolution]:
         if not self.contextual_evidence_enabled:
             return
@@ -2861,7 +2864,7 @@ class _ConstructorSearch:
         goal: GoalInfo,
         depth: int,
         ancestors: frozenset[tuple[object, ...]],
-        premise_query_stop: int,
+        premise_query_stop: float,
     ) -> Iterator[ConstructorSolution]:
         """Eliminate a checked projection without discarding its source record.
 
@@ -2955,7 +2958,7 @@ class _ConstructorSearch:
         goal: GoalInfo,
         depth: int,
         ancestors: frozenset[tuple[object, ...]],
-        premise_query_stop: int,
+        premise_query_stop: float,
     ) -> Iterator[ConstructorSolution]:
         """Let the goal instantiate mapped evidence with structured arguments.
 
@@ -3240,7 +3243,7 @@ class _ConstructorSearch:
         goal: GoalInfo,
         depth: int,
         ancestors: frozenset[tuple[object, ...]],
-        premise_query_stop: int,
+        premise_query_stop: float,
         *,
         selected_actions: tuple[ScopePremiseAction, ...] | None = None,
         observations: _SkeletonObservations | None = None,
@@ -3433,7 +3436,7 @@ class _ConstructorSearch:
         index: int,
         depth: int,
         ancestors: frozenset[tuple[object, ...]],
-        premise_query_stop: int,
+        premise_query_stop: float,
         plans: tuple[ProofPlan, ...] = (),
         deprioritized_locals: frozenset[str] = frozenset(),
     ) -> Iterator[tuple[StateToken, tuple[ProofPlan, ...]]]:
@@ -3474,7 +3477,7 @@ class _ConstructorSearch:
         checked: CommittedProofAction,
         depth: int,
         ancestors: frozenset[tuple[object, ...]],
-        premise_query_stop: int,
+        premise_query_stop: float,
         *,
         deprioritized_locals: frozenset[str] = frozenset(),
         policy_choice: PolicyChoice | None = None,
@@ -3515,7 +3518,7 @@ class _ConstructorSearch:
         self,
         state: StateToken,
         goal: GoalInfo,
-        premise_query_stop: int,
+        premise_query_stop: float,
         *,
         function_values: bool,
     ) -> Iterator[ConstructorSolution]:
@@ -3629,7 +3632,7 @@ class _ConstructorSearch:
         self,
         state: StateToken,
         goal: GoalInfo,
-        premise_query_stop: int,
+        premise_query_stop: float,
     ) -> Iterator[ConstructorSolution]:
         """Check result-determined applications before operand enumeration.
 
@@ -3751,7 +3754,7 @@ class _ConstructorSearch:
         self,
         state: StateToken,
         goal: GoalInfo,
-        premise_query_stop: int,
+        premise_query_stop: float,
     ) -> Iterator[ConstructorSolution]:
         """Check ready, fully supplied applications before structural expansion.
 
@@ -3842,7 +3845,7 @@ class _ConstructorSearch:
         )
 
     def _solve_with_backward_support(
-        self, state: StateToken, goal: GoalInfo, premise_query_stop: int
+        self, state: StateToken, goal: GoalInfo, premise_query_stop: float
     ) -> Iterator[ConstructorSolution]:
         if (
             not self.contextual_evidence_enabled
@@ -3895,7 +3898,7 @@ class _ConstructorSearch:
                     excluded_names=self.excluded_premises,
                     poll=poll,
                 ),
-                remaining,
+                action_limit_view(remaining),
             )
         )
         yield from self._check_evidence_applications(
@@ -3907,7 +3910,7 @@ class _ConstructorSearch:
         state: StateToken,
         goal: GoalInfo,
         proposals: tuple[EvidenceApplication, ...],
-        premise_query_stop: int,
+        premise_query_stop: float,
     ) -> Iterator[ConstructorSolution]:
         """Shared expected-type checking and NNUE credit for composed evidence."""
         policy = EvidencePolicy(self.policy_router, goal)
@@ -4006,7 +4009,7 @@ class _ConstructorSearch:
         ancestors: frozenset[tuple[object, ...]],
         *,
         deprioritized_locals: frozenset[str] = frozenset(),
-        premise_query_stop: int | None = None,
+        premise_query_stop: float | None = None,
     ) -> Iterator[ConstructorSolution]:
         if not self._available():
             return
@@ -4946,7 +4949,7 @@ class _ConstructorSearch:
         goal: GoalInfo,
         depth: int,
         ancestors: frozenset[tuple[object, ...]],
-        premise_query_stop: int,
+        premise_query_stop: float,
         *,
         allow_skeletons: bool = True,
     ) -> Iterator[ConstructorSolution]:
@@ -5463,7 +5466,7 @@ def constructor_tree_prove(
     session: TransactionalKernelSession,
     root_goal: GoalInfo,
     *,
-    action_budget: int,
+    action_budget: float,
     timeout_seconds: float,
     max_depth: int | None,
     solution_limit: int = 1,

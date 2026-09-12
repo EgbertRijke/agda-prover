@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     goal = parser.add_mutually_exclusive_group()
     goal.add_argument("--goal", type=int)
     goal.add_argument("--goal-position", type=int)
-    parser.add_argument("--max-candidates", type=int, required=True)
+    parser.add_argument("--max-candidates", type=int)
     parser.add_argument("--max-verifier-calls", type=int)
     parser.add_argument("--max-term-size", type=int, required=True)
     parser.add_argument("--max-depth", type=int)

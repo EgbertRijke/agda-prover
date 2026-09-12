@@ -190,7 +190,7 @@ def prove(
         call_scope.open(task.max_verifier_calls)
         require_agda_source_file(source_file)
         if (
-            task.max_candidates <= 0
+            (task.max_candidates is not None and task.max_candidates <= 0)
             or task.max_term_size <= 0
             or (task.timeout_seconds is not None and task.timeout_seconds <= 0)
             or (task.max_depth is not None and task.max_depth < 0)

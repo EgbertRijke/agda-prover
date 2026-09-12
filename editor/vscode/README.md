@@ -50,10 +50,10 @@ wall-time limit; set `agdaprover.timeoutSeconds` for a hard deadline. The client
 saves before search, hashes the snapshot, rejects stale results, applies only
 versioned reconstruction edits, saves again, and never starts a shell.
 
-For harder tasks, choose **AgdaProver: Deep Search Through Current Goal or All
-Goals** (`Ctrl+C Ctrl+X Ctrl+D`), or set `agdaprover.searchProfile` to `deep`.
-It requests 8,000 actions instead of 500. Keep `agdaprover.maxCandidates` at
-`null` to use the preset; explicit action/time limits remain authoritative.
+**AgdaProver: Deep Search Through Current Goal or All Goals**
+(`Ctrl+C Ctrl+X Ctrl+D`) remains available. Ordinary and deep search now both
+have no default action ceiling. Keep `agdaprover.maxCandidates` at `null` for
+uncapped actions; explicit action/time limits and physical resources remain authoritative.
 Cancel remains available. See [deep search](../../docs/interactive.md#deep-search).
 
 NNUE is enabled by default and needs no model setup. Set `agdaprover.ranker`

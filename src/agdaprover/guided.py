@@ -10,6 +10,7 @@ from typing import Literal
 
 from .actions import RefinementCandidate
 from .bridge.resources import temporary_workspace
+from .budget import action_limit_view
 from .contracts import GoalInfo
 from .focused import focused_prove
 from .kernel.p0 import AgdaLoadError, AgdaSession, open_kernel_session
@@ -107,7 +108,7 @@ def guided_prove(
     source_file: Path,
     root_goal: GoalInfo,
     *,
-    action_budget: int,
+    action_budget: float,
     timeout_seconds: float,
     max_depth: int | None,
     focused_model: SparsePolicyRanker | None,
@@ -141,7 +142,7 @@ def guided_prove(
         focused_model=focused_model,
         refinement_model=refinement_model,
         budget_envelope={
-            "max_actions": action_budget,
+            "max_actions": action_limit_view(action_budget),
             "max_depth": max_depth,
             "timeout_seconds": timeout_seconds,
         },

@@ -22,6 +22,7 @@ from typing import Literal
 from .actions import RefinementCandidate
 from .bridge.contracts import StateToken
 from .bridge.interaction import ClauseAction
+from .budget import action_limit_view
 from .constructor_search import (
     ConstructorResult,
     ConstructorStats,
@@ -670,7 +671,7 @@ def batched_case_prove(
     source_file: Path,
     root_goal: GoalInfo,
     *,
-    action_budget: int,
+    action_budget: float,
     timeout_seconds: float,
     max_depth: int | None,
     focused_model: SparsePolicyRanker | None,
@@ -727,7 +728,7 @@ def _batched_case_prove(
     source_file: Path,
     root_goal: GoalInfo,
     *,
-    action_budget: int,
+    action_budget: float,
     timeout_seconds: float,
     max_depth: int | None,
     focused_model: SparsePolicyRanker | None,
@@ -750,7 +751,7 @@ def _batched_case_prove(
         focused_model=focused_model,
         refinement_model=refinement_model,
         budget_envelope={
-            "max_actions": action_budget,
+            "max_actions": action_limit_view(action_budget),
             "max_depth": max_depth,
             "timeout_seconds": timeout_seconds,
         },
@@ -2116,7 +2117,9 @@ def _batched_case_prove(
 
                     zero_actions = generate_zero_constructor_actions(
                         goal,
-                        max_actions=min(16, action_budget - stats.actions_considered),
+                        max_actions=int(
+                            min(16, action_budget - stats.actions_considered)
+                        ),
                     )
                     stats.actions_generated += len(zero_actions)
                     stats.zero_constructor_candidates += len(zero_actions)

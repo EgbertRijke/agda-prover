@@ -242,6 +242,8 @@ class EvidenceProposalTests(unittest.TestCase):
         )
 
     def test_restart_policy_respects_the_shared_remaining_allowance(self):
+        self.assertFalse(_can_amortize_budget_widening(float("inf"), 1))
+        self.assertFalse(_can_amortize_budget_widening(float("inf"), 31))
         self.assertFalse(_can_amortize_budget_widening(500, 9))
         self.assertFalse(_can_amortize_budget_widening(160, 1))
         self.assertTrue(_can_amortize_budget_widening(161, 1))

@@ -342,7 +342,7 @@ class FocusedCandidatesResult:
 
 @dataclass
 class _Search:
-    action_budget: int
+    action_budget: float
     deadline: float
     eliminators: tuple[tuple[str, tuple[TypeExpr, ...]], ...] = ()
     max_search_depth: int | None = None
@@ -557,8 +557,8 @@ class _EnumerationSearch:
     OR alternatives and bounded Cartesian products at AND nodes.
     """
 
-    action_budget: int
-    solution_limit: int
+    action_budget: float
+    solution_limit: float
     deadline: float
     eliminators: tuple[tuple[str, tuple[TypeExpr, ...]], ...] = ()
     max_search_depth: int | None = None
@@ -816,7 +816,7 @@ def parse_type(type_text: str) -> TypeExpr:
 def focused_prove(
     goal: GoalInfo,
     *,
-    action_budget: int,
+    action_budget: float,
     timeout_seconds: float,
     max_depth: int | None = None,
     branch_scorer: FocusedBranchScorer | None = None,
@@ -883,8 +883,8 @@ def focused_prove(
 def focused_candidates(
     goal: GoalInfo,
     *,
-    action_budget: int,
-    solution_limit: int,
+    action_budget: float,
+    solution_limit: float,
     timeout_seconds: float,
     max_depth: int | None = None,
     branch_scorer: FocusedBranchScorer | None = None,

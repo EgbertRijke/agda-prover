@@ -839,13 +839,16 @@ clauseProposals stats limits models mode native emit namespace excluded target =
       -- sequence may be inadmissible. Preserve native telescope dependencies
       -- inside the compound action; singles retain their learned ordering.
       batches = case Agenda.dependentFirst dependencies linearSubjects of
-        first:second:rest -> [(ClauseExecution.BoundSubjects (first :| (second:rest)), [])]
+        first:second:rest ->
+          [(ClauseExecution.ClosingSubjects (first :| (second:rest)), []),
+           (ClauseExecution.BoundSubjects (first :| (second:rest)), [])]
         _ -> []
       features action = case [(ty) | (_, ty, _, proposed) <- subjects, proposed == action] of
         ty:_ -> Just $ F.refinementTokens goal "case-split" (Just $ T.pack ty)
         [] -> Just $ F.refinementTokens goal "case-split" Nothing
   refinements <- rankCompatible runtime P.Refinements goal
-    [(0, features action, item) | item@(action, _) <- batches ++ ordered]
+    [(case action of ClauseExecution.ClosingSubjects{} -> 0; _ -> 1,
+      features action, item) | item@(action, _) <- batches ++ ordered]
   -- Result splitting also exposes binders that are absent from the local
   -- context. Keep that Agda operation; do not guess a telescope from text.
   resultAvailable <- attempt runtime $ do

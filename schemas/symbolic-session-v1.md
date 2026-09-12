@@ -647,12 +647,27 @@ evidence fallbacks. No whole-goal search is hidden inside this propagation pass.
 whose types have positively observed one-constructor inductive metadata. It
 uses the native case-subject ranking order, then Agda's multi-variable case
 operation; it does not enumerate subsets or multiply constructor branches.
-Every individual subject remains an alternative. Agda still rejects inadmissible
+Before the full batch it also offers a bounded local-closure lookahead: try each
+subject individually in the same dependency-aware order, accepting a draft only
+if existing local inhabitants close all generated leaves. Every inhabitant is
+checked without metavariable assignments or new constraints, retaining Agda's
+modality checks. This avoids unnecessary patterns when elimination already
+exposes a usable hypothesis. Only newly generated holes are replaced; existing
+source holes are not filled by the lookahead. All probes restore their original
+parent, preserve allocation high-water marks and charge their actual checker
+work. The completed draft is checked again from that parent before publication.
+No recursive child search, constructor proof or theorem-specific rule runs in
+the lookahead. Its structural tier precedes the ordinary case alternatives;
+the model still orders subjects, and different inhabitants remain available
+through ordinary single-subject search. Explicit user case commands keep their
+requested full splitting semantics.
+The full batch and every individual subject remain alternatives. Agda still rejects inadmissible
 dependent elimination, including violations of `--without-K`. The existing
 refinement role can rank the compound move; it is not credited as a choice of
 several mutually exclusive single-subject model actions. The cost receipt
-records this switch. False omits compound moves from the queue, retaining the
-same catalogue checks and all single-subject moves.
+records this switch. False omits both compound moves and their local-closure
+lookahead from the queue, retaining the same catalogue checks and all ordinary
+single-subject moves.
 
 When unification solves a source meta indirectly, Agda may retain its interaction
 point for source bookkeeping. The native catalogue retrieves Agda's scoped
@@ -696,6 +711,9 @@ a positive value replaces the cap without resetting the attempted count. A
 denied attempt does not increment it. `limits.work_units` still counts scheduler
 steps and native checks independently; neither allowance overrides the other.
 The application maps `task.max_candidates` to `action_limit`, not to work units.
+Ordinary and deep frontend presets now both supply null by default; only an
+explicit caller action quota imposes a ceiling. Native work accounting and
+physical resource supervision are unchanged.
 
 Optional `depth_limit` accepts a nonnegative integer or null. Start omission/null
 means no depth cap; advance omission preserves it and explicit null removes it.

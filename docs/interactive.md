@@ -68,7 +68,7 @@ no transitions). Reaching it reports resource exhaustion, never impossibility.
 Native and Python depth units differ: a compound native move is one transition,
 but all its internal checking/search work is still charged to the physical and
 work allowances. This is not a proof-term size bound. Time and depth remain
-unset by default; `--deep` increases the action allowance as usual.
+unset by default, as is the action limit.
 `--max-term-size` pertains to Python's small term enumerator, not native syntax
 proposals; use native depth, action or physical limits to bound native work.
 
@@ -81,12 +81,11 @@ agda-prover interactive MyFile.agda --deep
 agda-prover prove-prefix MyFile.agda --deep --timeout 360
 ```
 
-`--deep` is shorthand for `--search-profile deep`. It changes the default
-whole-run action allowance from 500 to 8,000, giving joint search more room to
-reconsider earlier definitions. It uses the same solver, candidate generators, optional
-NNUE models and fresh validation. It is not a promise that every goal will solve.
-Depth is already unbounded by default; this is a larger effort allowance, not
-a different proof system. Memory and other resource defaults are unchanged.
+Ordinary search has no implicit action, time or depth ceiling. `--deep`, shorthand
+for `--search-profile deep`, remains a compatible spelling for these same defaults.
+Both use the same solver, candidate generators, optional NNUE models and fresh
+validation. Neither promises that every goal will solve. Memory and other
+physical resource defaults are unchanged.
 
 Explicit `--max-candidates`, `--max-verifier-calls`, `--timeout`, `--cpu-seconds`
 and other limits remain authoritative. For example, `--deep --max-candidates
@@ -99,8 +98,8 @@ In Emacs, use `C-c C-x C-d` (`agdaprover-prove-deep`). In VS Code, choose
 `Ctrl+C Ctrl+X Ctrl+D`. Selection is unchanged: through the containing goal,
 or every open goal when outside one. Both editors retain their cancel command.
 
-To make deep search the usual preset, configure `agdaprover-search-profile` in
-Emacs or `agdaprover.searchProfile` in VS Code. Leave `agdaprover-max-candidates`
-at `nil`, or `agdaprover.maxCandidates` at `null`, to use preset defaults.
-Existing explicit values (including a previously configured 500) still override
-deep search; reset them if you want the preset's larger allowance.
+Leave `agdaprover-max-candidates` at `nil` in Emacs, or
+`agdaprover.maxCandidates` at `null` in VS Code, for no action ceiling.
+Existing explicit values still limit both commands; reset older configured
+limits if you want uncapped actions. Use pause, variations and stop to supervise
+long searches, or supply a time/CPU allowance for unattended runs.

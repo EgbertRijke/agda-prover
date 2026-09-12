@@ -141,16 +141,16 @@ It must have the `or-decision-ranking' role.  In particular, a
   :group 'agdaprover)
 
 (defcustom agdaprover-search-profile 'standard
-  "Search effort preset: `standard' (500 actions) or `deep' (8000 actions).
-Explicit limits override preset values.
-Neither preset adds a time or depth cap."
+  "Compatibility search preset: `standard' or `deep'.
+Neither preset imposes an action, time or depth ceiling.
+Explicit limits and physical resource allowances remain authoritative."
   :type '(choice (const standard) (const deep))
   :group 'agdaprover)
 
 (defcustom agdaprover-max-candidates nil
-  "Whole-run action allowance, or nil to use the search profile's default.
+  "Optional whole-run action allowance, or nil for no action ceiling.
 This counts search actions, not physical Agda calls."
-  :type '(choice (const :tag "Use search profile" nil) integer)
+  :type '(choice (const :tag "No action ceiling" nil) integer)
   :group 'agdaprover)
 
 (defcustom agdaprover-max-term-size 8

@@ -23,12 +23,15 @@ import Agda.Syntax.Common.Pretty (prettyShow)
 import Agda.Syntax.Concrete.Name qualified as C
 import Agda.Syntax.Info qualified as Info
 import Agda.Syntax.Internal qualified as I
+import Agda.Syntax.Internal.MetaVars (noMetas)
 import Agda.Syntax.Position (noRange)
 import Agda.Syntax.Scope.Base
 import Agda.Syntax.Translation.InternalToAbstract (reify)
 import Agda.TypeChecking.Monad
+import Agda.TypeChecking.Constraints (reallyNoConstraints)
 import Agda.TypeChecking.Free (allFreeVars)
-import Agda.TypeChecking.Reduce (reduce)
+import Agda.TypeChecking.Reduce (instantiateFull, reduce)
+import Agda.TypeChecking.Rules.Term (checkExpr)
 import Agda.TypeChecking.Substitute (telePi)
 import Agda.TypeChecking.Telescope (splitTelescopeAt)
 import Agda.Utils.Null (empty)
@@ -43,12 +46,50 @@ data PreparationStep = GenerateClauses | CheckContext | CheckScaffold
 -- loses shadowing and disambiguation. User commands deliberately retain Agda's
 -- own resolution/exposure behavior. Session seals either intent to its goal.
 data Intent = UserAction ClauseAction | BoundSubjects (NonEmpty Name)
+  | ClosingSubjects (NonEmpty Name)
   deriving Eq
 
 -- A split is implemented as a local, dependent eliminator, not by mutating an
 -- already checked global definition. The helper and its case clauses are native
 -- syntax. Ordinary give checks the final draft again from the unsplit parent.
 prepare :: (PreparationStep -> TCM ()) -> InteractionId -> Intent -> TCM A.Expr
+prepare chargeStep point (ClosingSubjects chosen) = trySubjects $ NE.toList chosen
+ where
+  -- A bounded lookahead for an existing inhabitant after one elimination.
+  -- The full batch and ordinary single-subject moves remain alternatives.
+  -- Do not inspect further subjects once a branch can reuse its context: an
+  -- unnecessary pattern can destroy computation useful to later obligations.
+  trySubjects [] = genericError "native-clause-no-local-closure"
+  trySubjects (name:rest) = do
+    before <- getTC
+    existing <- getInteractionPoints
+    let probe = do
+          draft <- prepare chargeStep point $ BoundSubjects (name :| [])
+          chargeStep CheckScaffold
+          void $ give_ False WithoutForce point Nothing draft
+          result <- traverseExpr (\case
+            A.QuestionMark _ child | child `notElem` existing ->
+              withInteractionId child $ do
+                target <- getMetaTypeInContext =<< lookupInteractionId child
+                context <- getContext
+                close target $ map (A.Var . ctxEntryName) context
+            expression -> pure expression) draft
+          restoreAllocations before
+          pure result
+    probe `catchError` \err -> case err of
+      TypeError{} -> restoreAllocations before >> trySubjects rest
+      PatternErr{} -> restoreAllocations before >> trySubjects rest
+      _ -> throwError err
+  close _ [] = genericError "native-clause-no-local-inhabitant"
+  close target (expression:rest) = do
+    chargeStep CheckContext
+    found <- localTCState $ (do
+      term <- reallyNoConstraints $ dontAssignMetas $ checkExpr expression target
+      noMetas <$> instantiateFull term) `catchError` \err -> case err of
+        TypeError{} -> pure False
+        PatternErr{} -> pure False
+        _ -> throwError err
+    if found then pure expression else close target rest
 prepare chargeStep point action = withInteractionId point $ do
   context <- getContext
   target <- getMetaTypeInContext =<< lookupInteractionId point
@@ -183,6 +224,7 @@ subjects chargeStep _ (BoundSubjects chosen) originals renamed = do
       replacement:_ -> pure (prettyShow $ nameConcrete replacement, index)
       [] -> genericError "native-clause-execution-invalid-subject-index"
   pure (unwords $ map fst mapped, map snd mapped)
+subjects _ _ ClosingSubjects{} _ _ = genericError "native-clause-unprepared-closure"
 subjects chargeStep point (UserAction action) originals renamed
   | command action `elem` ["", "."] = pure (command action, [])
   | otherwise = do

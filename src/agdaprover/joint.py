@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -252,15 +253,23 @@ class _DeferredBudgetWidening:
     region_end: int
     remaining_goals: int
     action_start: int
-    action_limit: int
+    action_limit: float
 
     def exhausted(self, actions_considered: int) -> bool:
         return actions_considered - self.action_start >= self.action_limit
 
 
-def _can_amortize_budget_widening(remaining_actions: int, remaining_goals: int) -> bool:
-    """Do not add restart work to a run already short of one slice per goal."""
-    return remaining_actions > 160 * max(1, remaining_goals)
+def _can_amortize_budget_widening(
+    remaining_actions: float, remaining_goals: int
+) -> bool:
+    """Subdivide only an explicit finite quota that can amortize a replay.
+
+    An absent quota is not a large finite grant: treating infinity as one
+    introduces artificial local cutoffs and duplicates unfinished proof work.
+    """
+    return math.isfinite(remaining_actions) and remaining_actions > 160 * max(
+        1, remaining_goals
+    )
 
 
 def _search_state_digest(
@@ -1127,7 +1136,7 @@ def prove_joint_prefix(
         call_scope.open(task.max_verifier_calls)
         require_agda_source_file(source_file)
         if (
-            task.max_candidates <= 0
+            (task.max_candidates is not None and task.max_candidates <= 0)
             or task.max_term_size <= 0
             or (task.timeout_seconds is not None and task.timeout_seconds <= 0)
             or (task.max_depth is not None and task.max_depth < 0)
@@ -1327,11 +1336,17 @@ def prove_joint_prefix(
                     if digest in seen or digest in queued:
                         stats.transposition_hits += 1
                         return
-                    if len(queue) >= task.max_candidates:
+                    if (
+                        task.max_candidates is not None
+                        and len(queue) >= task.max_candidates
+                    ):
                         stats.frontier_pruned += 1
                         saw_exhaustion = True
                         return
-                    if len(queue) + len(deferred_fallbacks) >= task.max_candidates:
+                    if (
+                        task.max_candidates is not None
+                        and len(queue) + len(deferred_fallbacks) >= task.max_candidates
+                    ):
                         # Deferred work must not displace an ordinary candidate
                         # at a tight frontier limit. Retain the resource refusal
                         # if the surviving candidates subsequently fail.
@@ -1365,7 +1380,10 @@ def prove_joint_prefix(
                     kind: Literal["focused", "observation"],
                 ) -> None:
                     nonlocal saw_exhaustion
-                    if len(queue) + len(deferred_fallbacks) >= task.max_candidates:
+                    if (
+                        task.max_candidates is not None
+                        and len(queue) + len(deferred_fallbacks) >= task.max_candidates
+                    ):
                         stats.frontier_pruned += 1
                         saw_exhaustion = True
                         return
@@ -1717,6 +1735,8 @@ def prove_joint_prefix(
                         if (dependency_ready_selected and not fully_widened)
                         or competing_alternatives
                         else task.max_candidates
+                        if task.max_candidates is not None
+                        else math.inf
                     )
                     if (
                         competing_alternatives
@@ -1734,9 +1754,9 @@ def prove_joint_prefix(
                         )
 
                     def remaining_goal_actions(
-                        current_goal_action_limit: int = goal_action_limit,
+                        current_goal_action_limit: float = goal_action_limit,
                         current_goal_action_start: int = goal_action_start,
-                    ) -> int:
+                    ) -> float:
                         return min(
                             budget.remaining_actions(),
                             max(
@@ -2531,9 +2551,11 @@ def prove_joint_prefix(
                                 else task.max_depth - state.depth
                             ),
                             solution_limit=(
-                                min(
-                                    _MAX_STRUCTURAL_ALTERNATIVES,
-                                    remaining_goal_actions(),
+                                int(
+                                    min(
+                                        _MAX_STRUCTURAL_ALTERNATIVES,
+                                        remaining_goal_actions(),
+                                    )
                                 )
                                 if retain_alternatives
                                 else 1

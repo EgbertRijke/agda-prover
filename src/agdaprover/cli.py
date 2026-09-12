@@ -94,19 +94,19 @@ def add_search_options(
         "--search-profile",
         choices=("standard", "deep"),
         default="standard",
-        help="effort preset: standard (500 actions) or deep (8000 actions)",
+        help="compatibility search profile; neither imposes an action ceiling",
     )
     profiles.add_argument(
         "--deep",
         dest="search_profile",
         action="store_const",
         const="deep",
-        help="use the deep-search effort preset; explicit limits still take precedence",
+        help="compatibility alias for unrestricted action search (now the default)",
     )
     parser.add_argument(
         "--max-candidates",
         type=int,
-        help="explicit whole-run action allowance, overriding the search profile",
+        help="optional explicit whole-run action allowance (no default action cap)",
     )
     parser.add_argument(
         "--max-verifier-calls",

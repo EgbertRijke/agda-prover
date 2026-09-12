@@ -411,14 +411,14 @@ def launch_interactive_run(
         str(variation_path),
         "--result-file",
         str(result_path),
-        "--max-candidates",
-        str(task.max_candidates),
         "--max-term-size",
         str(task.max_term_size),
         "--ranker",
         task.ranker,
         *selection.worker_arguments(),
     ]
+    if task.max_candidates is not None:
+        argv.extend(("--max-candidates", str(task.max_candidates)))
     if task.goal_id is not None:
         argv.extend(("--goal", str(task.goal_id)))
     if task.goal_position is not None:

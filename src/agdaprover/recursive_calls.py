@@ -137,7 +137,7 @@ def _focused_subjects(
     goal: GoalInfo,
     domain: str,
     *,
-    action_budget: int,
+    action_budget: float,
     deadline: float,
     extra_context: tuple[ContextEntry, ...] = (),
 ) -> tuple[tuple[str, ...], int]:
@@ -197,7 +197,7 @@ def _observational_subjects(
     goal: GoalInfo,
     target_type: str,
     *,
-    query_budget: int,
+    query_budget: float,
     deadline: float,
     structural_seeds: tuple[str, ...] = (),
     extra_terms: tuple[tuple[str, str], ...] = (),
@@ -368,7 +368,7 @@ def generate_recursive_call_actions(
     goal: GoalInfo,
     spec: RecursiveCallSpec,
     *,
-    query_budget: int,
+    query_budget: float,
     deadline: float,
     extra_terms: tuple[tuple[str, str], ...] = (),
 ) -> tuple[tuple[RecursiveCallAction, ...], RecursiveCallStats]:
@@ -634,7 +634,7 @@ def generate_recursive_compositions(
     declarations: tuple[tuple[str, str], ...],
     *,
     excluded_names: frozenset[str],
-    query_budget: int,
+    query_budget: float,
     deadline: float,
 ) -> tuple[tuple[RecursiveCallAction, ...], RecursiveCallStats]:
     """Apply result-relevant visible functions around recursive results.

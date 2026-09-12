@@ -288,15 +288,18 @@ task-wide failure from this optional hint.
 
 Editor request v1 accepts an optional `search_profile`: `standard` (default)
 or `deep`. This is a search-only option, not valid for `inspect`. Omitted
-`max_candidates` resolves to 500 or 8,000 respectively; an explicitly supplied
-positive integer always overrides the preset. Other fields retain their existing
-meaning. The CLI exposes `--search-profile` and the `--deep` alias. Frontends
-resolve the preset into the ordinary TaskSpec budget before search, so task
-identity, worker forwarding and accounting use the effective numeric allowance.
-No additional trusted path or unbounded resource mode is introduced.
+or null `max_candidates` means no action ceiling for either preset; an explicitly
+supplied positive integer remains authoritative. The inherited 500/8,000
+whole-run ceilings are retired, not replaced by larger numeric guards.
+Other fields retain their existing meaning. The CLI exposes `--search-profile`
+and the `--deep` alias. Task identity, workers and native `action_limit` carry
+the effective integer or null allowance. JSON never uses Infinity as a sentinel.
+Physical resource accounting, optional deadlines and cancellation remain active.
+No additional trusted path or unbounded physical-resource mode is introduced.
 Updated editors omit the profile field for standard searches, retaining
 compatibility with older backends. Deep requests require a backend recognizing
-the field; they must not silently fall back to the smaller allowance.
+the field. Older backend versions may still impose their historical defaults;
+update the backend together with the editor to remove those inherited ceilings.
 
 Tasks and editor requests may supply an explicit
 [project checking configuration](../../project-configuration-v1.md). It carries
