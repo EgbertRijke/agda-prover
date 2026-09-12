@@ -198,7 +198,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
                 Right (S.CompleteClauses clauseMoves) -> Right $ N.Moves $
                   A.rankedProposals 0 (map N.Term termMoves)
                   ++ A.rankedProposals (structuralDelay settings)
-                        [N.Clause goal action | (action, _) <- clauseMoves]
+                        [N.PlannedClause action | (action, _) <- clauseMoves]
                   ++ [A.Proposal (N.SlicedEvidence goal $ initialMacroWork settings)
                         (macroDelay settings) | evidenceMacro settings]
   go refutation 0 queue = pure $ Paused SliceEnded $ saved refutation queue

@@ -13,10 +13,10 @@ import Data.Set qualified as Set
 import Agda.Interaction.MakeCase (makeCase, recheckAbstractClause)
 import Agda.Syntax.Abstract qualified as A
 import Agda.Syntax.Abstract.Name (qnameModule)
-import Agda.Syntax.Abstract.Pattern (lhsToSpine)
+import Agda.Syntax.Abstract.Pattern (lhsToSpine, spineToLhs)
 import Agda.Syntax.Abstract.Pretty (prettyAUnqualify)
 import Agda.Syntax.Abstract.Views (deepUnscope, foldExpr, mapExpr)
-import Agda.Syntax.Common (InteractionId)
+import Agda.Syntax.Common (InteractionId, Origin (CaseSplit), setOrigin)
 import Agda.Syntax.Common.Pretty (prettyShow)
 import Agda.Syntax.Internal qualified as I
 import Agda.Syntax.Position (Range, getRange, fuseRange)
@@ -31,11 +31,12 @@ import Structure qualified as S
 data Snapshot = Expression Range String | Clause Range Range String
 
 render :: TCM () -> InteractionId -> A.Expr -> TCM Snapshot
-render charge point expression = withInteractionId point $ do
+render charge point retained = withInteractionId point $ do
   interaction <- lookupInteractionPoint point
   context <- getContext
   scope <- getScope
-  let referenced = foldExpr (\case A.Var name -> Set.singleton name; _ -> Set.empty) expression
+  let expression = mapExpr freshen retained
+      referenced = foldExpr (\case A.Var name -> Set.singleton name; _ -> Set.empty) expression
       visible = Set.fromList $ map snd $ notShadowedLocals $ _scopeLocals scope
       missing = [(index, ctxEntryName entry) | (index, entry) <- zip [0..] context,
         Set.member (ctxEntryName entry) referenced,
@@ -79,6 +80,21 @@ render charge point expression = withInteractionId point $ do
       printed <- inTopContext $ addContext telescope $ prettyAUnqualify completed
       pure $ Clause (fuseRange (getRange $ A.clauseLHS original) $ ipRange interaction)
         (ipRange interaction) $ prettyShow printed
+
+-- Nested generated clauses are rendered together, not in the separate scopes
+-- where make_case originally printed them. Preserve their native identities
+-- while asking Agda's binding-pattern printer to avoid enclosing spellings.
+freshen :: A.Expr -> A.Expr
+freshen (A.ExtendedLam info definition erased name clauses) =
+  A.ExtendedLam info definition erased name $ fmap clause clauses
+ where
+  clause :: A.Clause -> A.Clause
+  clause original =
+    let spined = lhsToSpine original
+        lhs = A.clauseLHS spined
+    in spineToLhs spined { A.clauseLHS = lhs
+         { A.spLhsPats = map (setOrigin CaseSplit) $ A.spLhsPats lhs } }
+freshen expression = expression
 
 view :: Snapshot -> Value
 view snapshot = object $

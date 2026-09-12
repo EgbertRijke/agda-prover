@@ -51,6 +51,7 @@ import AgdaProver.Agda28.Focused qualified as NativeFocused
 import AgdaProver.Agda28.Algebra qualified as NativeAlgebra
 import AgdaProver.Symbolic.Algebra qualified as Algebra
 import AgdaProver.Agda28.HelperConstruction qualified as Helper
+import AgdaProver.Agda28.ClauseExecution qualified as ClauseExecution
 import AgdaProver.Symbolic.Focused qualified as Focused
 import AgdaProver.Symbolic.Classification qualified as Classification
 import AgdaProver.Symbolic.Clause qualified as Clause
@@ -251,11 +252,11 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
       [(tier, features expression, item) | (tier, item@(expression, _)) <- ordered]
 
 -- Clause subjects come from native context identities and datatype/record
--- metadata. Agda's operation resolves their local spelling and decides whether
--- splitting, hidden-binder exposure, coverage and without-K are admissible.
+-- metadata. Generated actions retain those identities through the session;
+-- Agda decides whether splitting, coverage and without-K are admissible.
 clauseProposals :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
                 -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> I.Type
-                -> TCM [(Clause.ClauseAction, [(T.Text, T.Text)])]
+                -> TCM [(ClauseExecution.Intent, [(T.Text, T.Text)])]
 clauseProposals stats limits models mode native emit namespace target = do
   pruned <- liftIO $ newIORef False
   let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
@@ -272,9 +273,8 @@ clauseProposals stats limits models mode native emit namespace target = do
         _ -> pure False
       rendered <- prettyShow <$> prettyTCM ty
       let name = prettyShow $ A.nameConcrete $ ctxEntryName entry
-          subject = case Clause.splitSubjects [name] of
-            Right action | reducible -> Just (name, rendered, action)
-            _ -> Nothing
+          subject = if reducible then Just (name, rendered,
+            ClauseExecution.BoundSubjects (ctxEntryName entry :| [])) else Nothing
       pure $ Just (rendered, subject)
   targetText <- T.pack . prettyShow <$> prettyTCM target
   let subjects = catMaybes $ map snd observed
@@ -303,7 +303,18 @@ clauseProposals stats limits models mode native emit namespace target = do
         [] -> Nothing
   refinements <- rankCompatible runtime P.Refinements goal
     [(0, features action, item) | item@(action, _) <- ordered]
-  pure $ (Clause.splitResult, []):refinements
+  resultAvailable <- attempt runtime $ do
+    allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
+    if not allowed then pure Nothing else reduce target >>= \case
+      I.El _ (I.Def name _) -> getConstInfo name >>= \definition -> pure $ case theDef definition of
+        Datatype{} -> Just False
+        _ -> Just True
+      I.El _ I.Sort{} -> pure $ Just False
+      _ -> pure $ Just True
+  -- A rigid datatype/sort result has no fields or trailing arguments. Asking
+  -- make_case to expose the already-generated helper's hidden parameters only
+  -- wraps the same obligation again. Explicit user commands remain available.
+  pure $ [(ClauseExecution.UserAction Clause.splitResult, []) | resultAvailable /= Just False] ++ refinements
 
 -- Optional legacy roles only see compatible native feature views. Unmodelled
 -- actions keep their original slots, and structural tiers are never crossed.

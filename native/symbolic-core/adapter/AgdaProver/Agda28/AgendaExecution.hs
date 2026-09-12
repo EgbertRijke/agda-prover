@@ -26,6 +26,7 @@ data Move s
   | SlicedEvidence (S.GoalRef s) Natural
   | Term (S.TermProposal s)
   | Clause (S.GoalRef s) ClauseAction
+  | PlannedClause (S.ClauseMove s)
   | Helper (S.GoalRef s) ObservationMode DraftExpression
 
 data Planning s = Moves [A.Proposal (Move s)] | PlanningCensored
@@ -137,6 +138,7 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
           SlicedEvidence g _ -> g
           Term proposal -> S.termProposalGoal proposal
           Clause g _ -> g
+          PlannedClause proposal -> S.clauseMoveGoal proposal
           Helper g _ _ -> g
     if S.stateKey (S.goalState goal) /= S.stateKey state ||
         maybe False (Set.notMember $ fromIntegral $ S.goalId goal) selected
@@ -144,6 +146,7 @@ stepWithDepth limit session config queue = runExceptT (A.stepWithDepth limit hoo
       else case move of
         Term proposal -> liftIO (S.applyTerm session proposal) >>= transition current
         Clause _ action -> liftIO (S.applyClause session goal action) >>= transition current
+        PlannedClause proposal -> liftIO (S.applyClauseMove session proposal) >>= transition current
         Evidence _ -> search current Nothing $ S.solveEvidence session goal (moveLimits config)
           (models config) (ranking config) (scorer config) (focused config)
           (excluded config) (policyTrace config)

@@ -279,21 +279,33 @@ transition (`status`, new `state`, `pending`, native `evidence`, and false
 `proof_authority`). The named goal must still be open in the requested branch.
 It does not consume or parse the displayed `make-clause` response.
 
-Execution first asks Agda whether the original action is admissible. It then
-abstracts the goal's dependent context into a native local helper, using Agda's
-telescope/type reification, and resolves the selected subjects by native name
-identity. Agda generates the corresponding helper clauses. This preserves the
+Execution abstracts the goal's dependent context into a native local helper,
+using Agda's telescope/type reification, and resolves the selected subjects by
+native name identity. Agda generates the corresponding helper clauses and
+decides whether the elimination is admissible. This preserves the
 parent's global definitions rather than mutating an already checked declaration
 or its compiled clauses. The final native helper is checked through non-forced
 `give` from the unsplit parent. Nested splits can operate on its new goals.
 Dependent field/branch obligations live in Agda's shared child state; they are
 not independent text placeholders.
 
+Autonomous clause proposals retain native binding identities in opaque,
+session/parent/goal-branded `ClauseMove` values. Printed local names are ranking
+features only, not split addresses. User-supplied `apply-clause` commands keep
+Agda's own name-resolution behavior and their unchanged wire schema. The
+generated catalogue omits result splitting for a known datatype or sort leaf:
+there are no fields or trailing arguments to expose in its generalized helper.
+Functions, records and unknown/stuck heads retain that alternative.
+
 Hidden-binder exposure is not mistaken for elimination. Pattern hiding and
-modality are retained, and module-, let-, lambda-bound or without-K-forbidden
-subjects remain subject to the original `makeCase` rejection. Helper clauses may
+modality are retained. Captured module or lambda variables may become helper
+arguments; scope resolution, coverage and without-K remain Agda's decisions.
+Helper clauses may
 cover more cases than an original clause filtered by surrounding clauses; they
 must themselves pass Agda's coverage/checking. No original source is rewritten.
+Retained helper drafts explicitly bind hidden arguments returned by Agda, so
+rechecking cannot silently replace their identities before later drafts are
+spliced into them.
 
 Speculative helper assignments/definitions/constraints are rolled back before
 the final check. Native drafts reserve their retained name and interaction ID
@@ -304,12 +316,12 @@ recheck and scaffold check charges the cumulative checking ledger; the two
 generations also charge `clause_queries`. Replay rechecks the retained draft,
 without regenerating clauses or resetting work.
 
-These are session primitives, not autonomous clause search or authorized source
-patches. Full proof-plan reconstruction belongs to H8: in particular, display
+These session primitives also feed the autonomous native agenda; their direct
+results are not authorized source patches. In particular, display
 text can mention a hidden parent binder that must first be exposed in source.
 Do not paste it blindly or interpret a closed native branch as `verified`.
-Independent fresh checking remains mandatory. Autonomous clause selection and
-full workflow integration are separate migration tasks.
+Independent fresh checking remains mandatory. The opt-in native workflow uses
+`export-goals` below; default promotion remains subject to qualification.
 
 ## Native goal reconstruction
 
@@ -362,6 +374,12 @@ instance arguments and native helper layout are preserved. No textual
 substitution, constructor recognition or library-specific rules are involved.
 Exposure and its context check are charged in the session ledger. Rendering
 does not mutate input branches or count as independent validation.
+
+When nested native clauses are exported together, Agda's binding-pattern
+printer freshens their local spellings against the enclosing scope. This is a
+presentation-only traversal: the retained search drafts, native identities and
+NNUE ordering inputs are unchanged. The final rendered source must still pass
+independent Agda validation.
 
 The source consumer permits direct expression edits and exposed whole-clause
 holes with single- or multiline original heads. Agda supplies the LHS-through-RHS

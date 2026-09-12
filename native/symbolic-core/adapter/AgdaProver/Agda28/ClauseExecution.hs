@@ -1,12 +1,13 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.ClauseExecution (PreparationStep (..), prepare, registerDraft, patternLocals) where
+module AgdaProver.Agda28.ClauseExecution (Intent (..), PreparationStep (..), prepare, registerDraft, patternLocals) where
 
 import Control.Monad (forM, void, when)
 import Control.Monad.Except (catchError, throwError)
 import Data.List (elemIndex)
 import Data.List.NonEmpty (NonEmpty (..))
+import Data.List.NonEmpty qualified as NE
 import Data.Maybe (isNothing)
 
 import Agda.Interaction.BasicOps (give_, parseExprIn)
@@ -32,10 +33,16 @@ import AgdaProver.Symbolic.Clause (ClauseAction, command)
 
 data PreparationStep = GenerateClauses | CheckContext | CheckScaffold
 
+-- Search already has Agda binding identities; round-tripping their base names
+-- loses shadowing and disambiguation. User commands deliberately retain Agda's
+-- own resolution/exposure behavior. Session seals either intent to its goal.
+data Intent = UserAction ClauseAction | BoundSubjects (NonEmpty Name)
+  deriving Eq
+
 -- A split is implemented as a local, dependent eliminator, not by mutating an
 -- already checked global definition. The helper and its case clauses are native
 -- syntax. Ordinary give checks the final draft again from the unsplit parent.
-prepare :: (PreparationStep -> TCM ()) -> InteractionId -> ClauseAction -> TCM A.Expr
+prepare :: (PreparationStep -> TCM ()) -> InteractionId -> Intent -> TCM A.Expr
 prepare chargeStep point action = withInteractionId point $ do
   context <- getContext
   target <- getMetaTypeInContext =<< lookupInteractionId point
@@ -66,7 +73,10 @@ prepare chargeStep point action = withInteractionId point $ do
     chargeStep CheckScaffold
     void $ give_ False WithoutForce point Nothing $ build (clause :| [])
     chargeStep GenerateClauses
-    (_, _, generated) <- makeCase temporary noRange selected
+    -- Retained drafts are syntax, not a compact display. Hidden patterns must
+    -- bind the exact names used by later refinements; otherwise rechecking an
+    -- omitted pattern invents fresh identities and leaves spliced terms free.
+    (_, _, generated) <- withShowAllArguments $ makeCase temporary noRange selected
     instantiated <- mapM (freshClause originalScope) generated
     allocation <- getTC
     putTC before
@@ -97,8 +107,16 @@ patternLocals argument = case namedArg argument of
 
 -- Ask Agda to resolve subjects (including hidden and as-bound variables). The
 -- resulting identities, not printed type/name comparisons, map to helper args.
-subjects :: (PreparationStep -> TCM ()) -> InteractionId -> ClauseAction -> [Name] -> [Name] -> TCM String
-subjects chargeStep point action originals renamed
+subjects :: (PreparationStep -> TCM ()) -> InteractionId -> Intent -> [Name] -> [Name] -> TCM String
+subjects chargeStep _ (BoundSubjects chosen) originals renamed = do
+  chargeStep CheckContext
+  mapped <- forM (NE.toList chosen) $ \name -> case elemIndex name originals of
+    Nothing -> genericError "native-clause-execution-foreign-binding"
+    Just index -> case drop index renamed of
+      replacement:_ -> pure $ prettyShow $ nameConcrete replacement
+      [] -> genericError "native-clause-execution-invalid-subject-index"
+  pure $ unwords mapped
+subjects chargeStep point (UserAction action) originals renamed
   | command action `elem` ["", "."] = pure $ command action
   | otherwise = do
       -- A generalized helper can eliminate module parameters and lambda-bound

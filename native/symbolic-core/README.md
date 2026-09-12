@@ -159,6 +159,13 @@ or lambda variables into checked local helpers, while Agda still enforces
 coverage, modalities and without-K. Hidden-binder exposure retains Agda's
 original source-clause operation.
 
+Generated case actions carry opaque parent-bound native binding identities,
+including when different locals have the same base spelling. Helper drafts
+retain hidden patterns explicitly. During source export, Agda freshens nested
+pattern spellings without changing the retained search terms. Known datatype
+and sort leaves omit redundant result-split wrappers; record/function and
+unknown results keep the operation. User clause commands are unchanged.
+
 Scheduling slices keep the queue and alternatives after provisional solutions.
 Coarse evidence search runs in soft, increasing work slices and yields to other
 branches; retries are charged, not treated as free continuation inside Agda.

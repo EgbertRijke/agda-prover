@@ -18,7 +18,7 @@ module AgdaProver.Agda28.Session
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
   , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, proposeTerms, applyTerm
-  , ClauseProposals (..), proposeClauseActions
+  , ClauseMove, clauseMoveGoal, applyClauseMove, ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
   , transitionState, transitionKind, transitionPending, transitionEvidence
   , evict, replay, close, cancel, work, evidenceView
@@ -139,8 +139,13 @@ data TermProposal s = TermProposal (GoalRef s) Draft [(T.Text, T.Text)] ActionId
 
 data TermProposals s = CompleteTerms [TermProposal s] | CensoredTerms [TermProposal s]
 
-data ClauseProposals = CompleteClauses [(ClauseAction, [(T.Text, T.Text)])]
-  | CensoredClauses [(ClauseAction, [(T.Text, T.Text)])]
+type role ClauseMove nominal
+data ClauseMove s = ClauseMove (GoalRef s) ClauseExecution.Intent
+data ClauseProposals s = CompleteClauses [(ClauseMove s, [(T.Text, T.Text)])]
+  | CensoredClauses [(ClauseMove s, [(T.Text, T.Text)])]
+
+clauseMoveGoal :: ClauseMove s -> GoalRef s
+clauseMoveGoal (ClauseMove goal _) = goal
 
 termProposalGoal :: TermProposal s -> GoalRef s
 termProposalGoal (TermProposal goal _ _ _) = goal
@@ -480,7 +485,11 @@ clauseView (ClauseProposal goal snapshot _) = object
   ,"proposal" .= Clauses.view snapshot, "proof_authority" .= False]
 
 applyClause :: Session s -> GoalRef s -> ClauseAction -> IO (Either Failure (Transition s))
-applyClause session goal action = request session (goalState goal) $ \owner state -> do
+applyClause session goal action = applyClauseMove session $
+  ClauseMove goal $ ClauseExecution.UserAction action
+
+applyClauseMove :: Session s -> ClauseMove s -> IO (Either Failure (Transition s))
+applyClauseMove session (ClauseMove goal action) = request session (goalState goal) $ \owner state -> do
   let chargeStep step = liftIO $ charge (sessionWork session) $ \w -> w
         { checkingAttempts = checkingAttempts w + 1
         , clauseQueries = clauseQueries w + case step of
@@ -583,7 +592,7 @@ checkApplication session owner goal initial identity draft
 
 proposeClauseActions :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
                      -> Policy.RankingMode -> Maybe (NativeScorer n) -> (Value -> IO ())
-                     -> IO (Search.SearchStats, Either Failure ClauseProposals)
+                     -> IO (Search.SearchStats, Either Failure (ClauseProposals s))
 proposeClauseActions session goal limits models mode native emit = do
   stats <- newIORef Search.emptyStats
   outcome <- request session (goalState goal) $ \owner state -> do
@@ -595,7 +604,7 @@ proposeClauseActions session goal limits models mode native emit = do
       if not exists then pure $ Left UnknownGoal else withInteractionId point $ do
         target <- getMetaTypeInContext =<< lookupInteractionId point
         Right <$> Search.clauseProposals stats limits models mode native emit namespace target
-    pure (owner, result >>= id)
+    pure (owner, fmap (map (\(intent, choices) -> (ClauseMove goal intent, choices))) $ result >>= id)
   observed <- readIORef stats
   recordSearchWork session observed
   pure (observed, (if Search.workExhausted observed then CensoredClauses else CompleteClauses) <$> outcome)
