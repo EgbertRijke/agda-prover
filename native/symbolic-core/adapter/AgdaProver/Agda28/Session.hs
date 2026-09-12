@@ -54,6 +54,7 @@ import AgdaProver.Agda28.Observation (observeGoal, encodeGoal, openInteractionPo
 import AgdaProver.Agda28.EvidenceSearch qualified as Search
 import AgdaProver.Agda28.Clauses qualified as Clauses
 import AgdaProver.Agda28.ClauseExecution qualified as ClauseExecution
+import AgdaProver.Agda28.Recursion qualified as Recursion
 import AgdaProver.Symbolic.Clause (ClauseAction)
 import AgdaProver.Symbolic.Evidence qualified as Search
 import AgdaProver.Symbolic.NNUE.Native (NativeScorer)
@@ -95,7 +96,9 @@ data ClauseProposal s = ClauseProposal (GoalRef s) Clauses.ClauseSnapshot TCStat
 data Allocation = Allocation NameId InteractionId
 data Draft = TextDraft DraftExpression | NativeDraft A.Expr Allocation
 data DraftAction = DraftAction InteractionId Draft
-data Branch = Branch { branchState :: Maybe TCState, branchTrail :: Maybe (Integer, DraftAction) }
+data Branch = Branch
+  { branchState :: Maybe TCState, branchTrail :: Maybe (Integer, DraftAction)
+  , branchOrigins :: Map.Map InteractionId (Maybe Recursion.Owner) }
 data Owner = Owner
   { ownerEpoch :: Integer, ownerClosed :: Bool, ownerNext :: Integer
   , ownerBranches :: Map.Map Integer Branch }
@@ -128,13 +131,15 @@ withSession root use = do
       Nothing -> genericError "symbolic-session-missing-source"
       Just source -> (, iSource iface) . filePath <$> srcFilePath source
   env <- askTC
+  points <- openInteractionPoints
+  origins <- Map.fromList <$> forM points (\point -> (point,) <$> Recursion.owner point)
   initial <- getTC
   liftIO $ do
     ledger <- newIORef emptyWork
     witnesses <- mapM (pin ledger) sources
     a <- randomIO :: IO Word64
     b <- randomIO :: IO Word64
-    owner <- newMVar $ Owner 0 False 1 (Map.singleton 0 $ Branch (Just initial) Nothing)
+    owner <- newMVar $ Owner 0 False 1 (Map.singleton 0 $ Branch (Just initial) Nothing origins)
     active <- newIORef Nothing
     let nonce = showHex a "-" ++ showHex b ""
         session = Session nonce owner env witnesses ledger active
@@ -335,12 +340,21 @@ solveEvidence session goal limits models mode native excluded emit = do
     ledger <- work session
     let point = goalId goal
         namespace = show (stateKey $ goalState goal) ++ ":" ++ show (requests ledger)
+        origin = Map.lookup (keyBranch $ stateKey $ goalState goal) (ownerBranches owner)
+          >>= Map.findWithDefault Nothing point . branchOrigins
     (searched, allocation) <- kernel session state $ do
       exists <- elem point <$> openInteractionPoints
       if not exists then pure $ Left UnknownGoal else withInteractionId point $ do
         meta <- lookupInteractionId point
         target <- getMetaTypeInContext meta
-        Right <$> Search.run stats limits models mode native emit namespace excluded target
+        let validate expression = do
+              warnings <- useTC stTCWarnings
+              _ <- give_ False WithoutForce point Nothing expression
+              maybe (pure ()) (`Recursion.checkOwner` expression) origin
+              changed <- Set.difference <$> useTC stTCWarnings <*> pure warnings
+              let bad = filter (not . expectedWarning) (Set.toAscList changed)
+              unless (null bad) $ genericError $ unlines $ map tcWarningString bad
+        Right <$> Search.run stats limits models mode native emit namespace excluded point origin validate target
     case searched >>= id of
       Left failure -> pure (owner, Left failure)
       Right (Search.Result status Nothing selected) -> pure (owner, Right (status, Nothing, selected))
@@ -357,6 +371,9 @@ solveEvidence session goal limits models mode native excluded emit = do
 check :: Session s -> Owner -> StateRef s -> TCState -> DraftAction -> Bool
       -> IO (Owner, Either Failure (Transition s))
 check session owner parent initial draft@(DraftAction point expression) isReplay = do
+  let previous = maybe Map.empty branchOrigins $
+        Map.lookup (keyBranch $ stateKey parent) (ownerBranches owner)
+      origin = Map.findWithDefault Nothing point previous
   charge (sessionWork session) $ \w -> w
     { checkingAttempts = checkingAttempts w + 1
     , replayedActions = replayedActions w + if isReplay then 1 else 0 }
@@ -373,6 +390,7 @@ check session owner parent initial draft@(DraftAction point expression) isReplay
       -- Same transition as Agda's give, retaining its *returned* internal term
       -- rather than guessing how the meta's context permutation applies.
       checked <- give_ False WithoutForce point Nothing scoped
+      maybe (pure ()) (`Recursion.checkOwner` scoped) origin
       removeInteractionPoint point
       display <- prettyShow <$> prettyTCM scoped
       term <- instantiateFull checked
@@ -389,7 +407,10 @@ check session owner parent initial draft@(DraftAction point expression) isReplay
       charge (sessionWork session) $ \w -> w { acceptedChecks = acceptedChecks w + 1 }
       let number = ownerNext owner
           ref = StateRef $ StateKey (sessionNonce session) (ownerEpoch owner) number
-          branch = Branch (Just child) (Just (keyBranch $ stateKey parent, draft))
+          origins = Map.fromList
+            [(p, Map.findWithDefault origin p previous)
+            | number' <- pendingGoals obligations, let p = fromIntegral number']
+          branch = Branch (Just child) (Just (keyBranch $ stateKey parent, draft)) origins
           next = owner { ownerNext = number + 1,
                          ownerBranches = Map.insert number branch (ownerBranches owner) }
           kind | not (null $ pendingGoals obligations) = AcceptedPartial

@@ -176,7 +176,7 @@ These are session primitives, not autonomous clause search or authorized source
 patches. Full proof-plan reconstruction belongs to H8: in particular, display
 text can mention a hidden parent binder that must first be exposed in source.
 Do not paste it blindly or interpret a closed native branch as `verified`.
-Independent fresh checking remains mandatory. Clause selection/recursion and
+Independent fresh checking remains mandatory. Autonomous clause selection and
 full workflow integration are separate migration tasks.
 
 ## Evidence operation
@@ -191,8 +191,10 @@ The application normally supplies the pinned bundled OR artifact. The response
 includes its loaded hash, checked against the application's pinned model.
 
 `exclude_names` lists visible global aliases to exclude after Agda resolution.
-The current mutual group is excluded automatically: recursion remains a later
-structural action. Excluding a record constructor also excludes construction by
+The current and inherited source owner's mutual groups are excluded automatically
+from ordinary premises. Dedicated recursive proposals are described below;
+excluding the owner's visible alias disables those proposals too.
+Excluding a record constructor also excludes construction by
 a record literal; changing syntax must not bypass exclusions.
 Locals, scoped globals, constructors and projected functions are ranked as complete candidate
 sets. `search-policy` events bind each ranking trace to the active request;
@@ -219,6 +221,40 @@ fields; record-field backtracking retains dependent constraints. Coinductive
 clause construction is not implied by this capability. Additive
 `record_proposals` and `absurd_proposals` counters in search cost count proposals,
 not accepted proofs. Inference and checking still charge `work_units`.
+
+`structural-recursion-v1` adds current-definition calls from Agda-owned clause
+context. It preserves native identities, hiding and dependent operands for
+direct descendants, function-valued children and reconstructed wrappers. Source
+with-functions resolve through Agda's parent metadata. An abstracted-away parent
+pattern is unknown descent: typed contextual arguments remain proposals, never
+termination evidence. This is not mutual-program synthesis, general corecursion
+or autonomous clause scheduling.
+
+Goals inherit their source owner through accepted refinements and helper
+transitions, including eviction/replay; existing unrelated goals keep their own
+owner (including no owner). A newly declared native lambda helper is assigned
+to the source owner's mutual block before Agda's termination checker runs.
+This restores the source-equivalent call graph without replacing any checked
+global body. A recursive candidate must pass ordinary non-forced `give` and the
+owner-group check inside search, allowing rejection to resume other choices.
+Every final transition with a known source owner also checks this group. Parent rollback includes all
+mutual-group metadata and termination information.
+
+Expected-result application proposals first compare the inferred native result
+type with the target using Agda conversion. Their interaction-hole operands
+then retain those constraints, even when constructor checking creates fresh
+hidden parameters. Original native argument syntax is retained; general forward
+applications remain a fallback. Recursive expected-type saturation is one depth step,
+while its per-parameter checker work is fully charged.
+
+Search cost adds `recursive_context_queries`, `recursive_proposals` and
+`recursive_validation_queries`. The last counts whole candidate admissibility
+queries (non-forced assignment plus source-owner termination) and is a subset
+of `checker_queries`, not extra proof authority. `work_units` equals
+`inference_queries + checker_queries + recursive_context_queries`; native
+result-type comparisons count as checker queries. Rejected proposals and
+recursive validation work survive rollback. There are no per-term Python
+callbacks, datatype-specific rules or model-weight changes.
 
 Expression displays have column-zero relative Agda layout. The native
 application path preserves and anchors this layout in a parenthesized

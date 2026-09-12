@@ -37,7 +37,8 @@ capabilities = object
       (["pending", "observe", "give", "make-clause", "apply-clause", "solve-evidence", "evict", "replay", "cost", "cancel", "close"] :: [String])
   , "observation_modes" .= map modeName [minBound .. maxBound]
   , "search_available" .= True
-  , "search_fragments" .= (["evidence-application-v1", "structural-construction-v1"] :: [String])
+  , "search_fragments" .=
+      (["evidence-application-v1", "structural-construction-v1", "structural-recursion-v1"] :: [String])
   , "production_default" .= False
   , "proof_authority" .= False
   ]

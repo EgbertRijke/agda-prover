@@ -1,10 +1,10 @@
 # Haskell symbolic core
 
 This is the experimental typed Haskell core. It supports resident checking and
-autonomous evidence/application and structural-construction fragments, including
+autonomous evidence/application, structural-construction and recursive-call fragments, including
 the bundled NNUE.
 It does **not** replace AgdaProver's current search engine. A default-engine
-switch requires autonomous clause search, recursion, joint-search and qualification work.
+switch requires autonomous clause search, coinductive construction, joint-search and qualification work.
 
 ## Build and inspect
 
@@ -140,6 +140,23 @@ The native draft retains generated helpers; replay never depends on a temporary
 checker-generated helper name. At source handoff, Agda's relative expression
 layout is anchored at the hole, including multiline typed lets.
 
+Recursive calls use the enclosing source definition and Agda's checked clause
+patterns. The current mutual group is never ordinary evidence. Dedicated calls
+can use direct descendants, function-valued children and reconstructed wrappers;
+Agda infers unchanged and hidden parameters from the expected result. Unknown
+descent through with-abstraction retains a typed fallback, not a termination
+claim. Generated helper goals retain their source owner across branch replay.
+New helpers join that owner's mutual group before Agda checks termination, so
+cycles spanning a helper and the source function cannot evade the check.
+
+Expected-result applications are tried before unconstrained operand enumeration.
+Agda relates their inferred result to the goal before arguments are searched,
+preserving dependencies even when constructor elaboration creates fresh hidden
+parameters. Other application alternatives remain available. A recursive winner
+must pass a non-forced assignment and owner-group termination check inside search;
+rejection resumes alternatives. The final draft is checked again from its parent
+and still requires independent fresh validation.
+
 Use `ProverApplication.prove_evidence(task, engine=NativeEvidenceEngine(path))`
 from `agdaprover.application.service` and `agdaprover.application.evidence` to
 exercise the explicit application path. `path` is the built executable, not a
@@ -152,7 +169,7 @@ reconstructs the candidate and freshly validates it with ordinary Agda before
 reporting `verified`. This slice accepts standalone projects and explicit
 source imports; `.agda-lib` manifest routing awaits H8 and is explicitly
 rejected here, never silently ignored. Existing production library support is
-unchanged. Autonomous clause search, induction, joint solving and editor migration remain
+unchanged. Autonomous clause scheduling, full induction workflows, joint solving and editor migration remain
 later milestones, not implied by `search_available`.
 
 `work_units` optionally limits native inference/checking queries. Its default
