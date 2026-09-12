@@ -152,7 +152,7 @@ class NativeProofEngine:
                 "native_action_limit": task.max_candidates
                 if self.controller == "agenda"
                 else None,
-                "native_work_unit": "scheduler-step-or-checking-attempt",
+                "native_work_unit": "scheduler-step-or-checking-attempt-or-symbolic-action",
                 "completion_known": False,
                 "final_search_cost": None,
             }

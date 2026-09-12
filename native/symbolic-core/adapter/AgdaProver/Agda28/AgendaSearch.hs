@@ -54,7 +54,7 @@ beginSelection selection session state settings trace accepted = S.pending sessi
       Set.size (Set.fromList ids) /= length ids || not (all (`elem` pendingGoals pending) ids) ->
     pure $ Left UnknownGoal
   Right pending -> do
-    baseline <- checkingAttempts <$> S.work session
+    baseline <- nativeWork <$> S.work session
     metrics <- newIORef $ Metrics 0 0 0 0 0 0
     owner <- newMVar ()
     let queue = maybe (N.start state)
@@ -82,7 +82,7 @@ cost (Run session settings _ baseline metrics _ _ _) = do
   measured <- readIORef metrics
   let steps = schedulerSteps measured
   pure $ object ["schema_version" .= ("agdaprover.symbolic-agenda-cost.v1" :: String),
-    "scheduler_steps" .= steps, "work_units" .= (steps + checkingAttempts physical - baseline),
+    "scheduler_steps" .= steps, "work_units" .= (steps + nativeWork physical - baseline),
     "actions_generated" .= generatedMoves measured, "actions_attempted" .= attemptedMoves measured,
     "actions_accepted" .= acceptedMoves measured,
     "action_limit" .= actionLimit settings,
@@ -101,7 +101,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
   allowance = do
     physical <- S.work session
     steps <- schedulerSteps <$> readIORef metrics
-    pure $ fmap (\limit -> max 0 $ limit - steps - checkingAttempts physical + baseline) $
+    pure $ fmap (\limit -> max 0 $ limit - steps - nativeWork physical + baseline) $
       E.workUnitLimit $ limits settings
   moveAllowance = E.SearchLimits . fmap (max 1) <$> allowance
   recordSearch stats = modifyIORef' metrics $ \m -> m
@@ -165,3 +165,6 @@ advance native count run@(Run session settings initial baseline metrics owner tr
         N.MoveAllowanceExhausted{} -> Paused AllowanceSpent $ saved next
         N.SessionFailure Cancelled -> Paused CancelledByCaller $ saved next
         N.SessionFailure failure -> Failed failure $ saved next
+
+nativeWork :: Work -> Integer
+nativeWork ledger = checkingAttempts ledger + symbolicActions ledger

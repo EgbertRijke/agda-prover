@@ -20,6 +20,7 @@ library
     AgdaProver.Symbolic.Clause,
     AgdaProver.Symbolic.Classification,
     AgdaProver.Symbolic.Focused,
+    AgdaProver.Symbolic.Algebra,
     AgdaProver.Symbolic.Agenda,
     AgdaProver.Symbolic.NNUE.Hash,
     AgdaProver.Symbolic.NNUE.Model,
@@ -51,7 +52,7 @@ library agda28
     AgdaProver.Agda28.Recursion, AgdaProver.Agda28.Scheduling,
     AgdaProver.Agda28.Focused, AgdaProver.Agda28.Helpers,
     AgdaProver.Agda28.HelperConstruction, AgdaProver.Agda28.DraftAssembly,
-    AgdaProver.Agda28.Source
+    AgdaProver.Agda28.Source, AgdaProver.Agda28.Algebra
   build-depends:
     agda-prover-symbolic,
     Agda ==2.8.0,

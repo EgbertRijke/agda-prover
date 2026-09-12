@@ -47,6 +47,8 @@ import AgdaProver.Agda28.Construction qualified as Construction
 import AgdaProver.Agda28.Recursion qualified as Recursion
 import AgdaProver.Agda28.Scheduling qualified as Scheduling
 import AgdaProver.Agda28.Focused qualified as NativeFocused
+import AgdaProver.Agda28.Algebra qualified as NativeAlgebra
+import AgdaProver.Symbolic.Algebra qualified as Algebra
 import AgdaProver.Agda28.HelperConstruction qualified as Helper
 import AgdaProver.Symbolic.Focused qualified as Focused
 import AgdaProver.Symbolic.Classification qualified as Classification
@@ -511,11 +513,43 @@ search runtime@(Runtime _ _ _ _ _ _ _ _ enableFocused) inventory@(GlobalInventor
     choices runtime $
       [queryCheck runtime expression target $ \term -> use expression term (selected ++ picked)
        | (Seed expression _ _, picked) <- seeds]
+      ++ [algebraic seeds]
       ++ [recursiveCall inferredArguments context | Just context <- [recursion]]
       ++ (if Classification.constructionFirst classification
             then construction ++ application else application ++ construction)
       ++ [recursiveCall arguments context | Just context <- [recursion]]
       ++ [produce expression picked | (Seed expression _ _, picked) <- seeds]
+  -- Recognizers consume native types; ranked visible/local evidence supplies
+  -- every law and relation operation. Pure rewrite paths preserve distinct
+  -- proofs, and a downstream rejection resumes alternative paths. This does
+  -- not confer commutativity, equality elimination or proof irrelevance.
+  algebraic seeds = do
+    allowed <- charge runtime $ \s -> s
+      { inferenceQueries = inferenceQueries s + 1, algebraObservationQueries = algebraObservationQueries s + 1 }
+    if not allowed then pure Nothing else do
+      views <- NativeAlgebra.inspectGoal target
+      choices runtime [rewriteView view | view <- views]
+   where
+      rewriteView view = do
+        observed <- fmap catMaybes $ forM seeds $ \(Seed expression _ _, picked) -> localTCState $ attempt runtime $
+          queryInferWith DontExpandLast runtime expression $ \(_, ty) ->
+            fmap (\role -> (role,(expression,picked))) <$> NativeAlgebra.inspectEvidence view ty
+        let (ops, edges) = NativeAlgebra.operations observed
+            (left,right) = NativeAlgebra.endpoints view
+            note Algebra.Deferred = deferDepth runtime >> pure ()
+            note _ = pure ()
+        wrappers <- NativeAlgebra.contexts view
+        let finish [] expression picked = do
+              modify runtime $ \s -> s { algebraCandidates = algebraCandidates s + 1 }
+              queryCheck runtime expression target $ \term -> use expression term picked
+            finish (f:rest) expression picked = choices runtime
+              [finish rest (A.app lift [defaultArg $ unnamed f, defaultArg $ unnamed expression])
+                (picked ++ labels) | (lift,labels) <- Algebra.congruence ops]
+        Algebra.enumerate (Algebra.Hooks
+          (charge runtime $ \s -> s { algebraActions = algebraActions s + 1 }) note)
+          depth ops edges left right $ \proof -> attempt runtime $ do
+            expression <- NativeAlgebra.render view (fmap fst proof)
+            finish wrappers expression (selected ++ concatMap snd (toList proof))
   -- The recursive head is sealed away from ordinary argument search. Only a
   -- fully applied call using a descent seed or a real coinductive copattern
   -- context is offered as evidence.

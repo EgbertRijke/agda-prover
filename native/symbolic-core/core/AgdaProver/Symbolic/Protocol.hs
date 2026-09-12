@@ -41,7 +41,7 @@ capabilities = object
   , "search_available" .= True
   , "search_fragments" .=
       (["evidence-application-v1", "structural-construction-v1", "structural-recursion-v1",
-        "copattern-evidence-v1", "focused-implication-v1"] :: [String])
+        "copattern-evidence-v1", "focused-implication-v1", "typed-algebra-v1"] :: [String])
   , "production_default" .= False
   , "proof_authority" .= False
   ]

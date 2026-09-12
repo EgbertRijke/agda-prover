@@ -36,6 +36,7 @@ data SearchStats = SearchStats
   , focusedObservationQueries :: !Integer, focusedActions :: !Integer
   , focusedNodes :: !Integer, focusedCacheHits :: !Integer, focusedCycles :: !Integer
   , focusedCandidates :: !Integer
+  , algebraObservationQueries :: !Integer, algebraActions :: !Integer, algebraCandidates :: !Integer
   , recordObservationQueries :: !Integer, projectedSeeds :: !Integer
   , helperInferenceQueries :: !Integer, helperClauseQueries :: !Integer, helperProposals :: !Integer
   , searchNodes :: !Integer, depthIterations :: !Integer, currentDepth :: !Int
@@ -53,6 +54,7 @@ emptyStats = SearchStats
   , classificationQueries = 0
   , focusedObservationQueries = 0, focusedActions = 0
   , focusedNodes = 0, focusedCacheHits = 0, focusedCycles = 0, focusedCandidates = 0
+  , algebraObservationQueries = 0, algebraActions = 0, algebraCandidates = 0
   , recordObservationQueries = 0, projectedSeeds = 0
   , helperInferenceQueries = 0, helperClauseQueries = 0, helperProposals = 0
   , searchNodes = 0, depthIterations = 0, currentDepth = 0
@@ -75,6 +77,8 @@ instance ToJSON SearchStats where
     ,"focused_actions" .= focusedActions s, "focused_nodes" .= focusedNodes s
     ,"focused_cache_hits" .= focusedCacheHits s, "focused_cycles" .= focusedCycles s
     ,"focused_candidates" .= focusedCandidates s
+    ,"algebra_observation_queries" .= algebraObservationQueries s
+    ,"algebra_actions" .= algebraActions s, "algebra_candidates" .= algebraCandidates s
     ,"record_observation_queries" .= recordObservationQueries s
     ,"projected_seeds" .= projectedSeeds s
     ,"helper_inference_queries" .= helperInferenceQueries s

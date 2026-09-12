@@ -97,10 +97,13 @@ class NativeReceipts:
                     "absurd_proposals",
                     "recursive_proposals",
                     "focused_candidates",
+                    "algebra_candidates",
                 )
             )
-            result.cost.actions_expanded = cost.get("nodes", 0) + cost.get(
-                "focused_nodes", 0
+            result.cost.actions_expanded = (
+                cost.get("nodes", 0)
+                + cost.get("focused_nodes", 0)
+                + cost.get("algebra_actions", 0)
             )
         else:
             raise SymbolicProtocolError("unsupported native search cost schema")

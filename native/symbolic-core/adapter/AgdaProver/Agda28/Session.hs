@@ -453,9 +453,7 @@ proposeTerms session goal limits models mode native excluded emit = do
     pure (owner, fmap (map $ \(expression, selected) -> TermProposal goal
       (nativeDraft expression allocation) selected) $ result >>= id)
   observed <- readIORef stats
-  charge (sessionWork session) $ \w -> w
-    { checkingAttempts = checkingAttempts w + Search.workUnits observed
-    , rejectedChecks = rejectedChecks w + Search.rejectedQueries observed }
+  recordSearchWork session observed
   pure (observed, (if Search.workExhausted observed then CensoredTerms else CompleteTerms) <$> outcome)
 
 applyTerm :: Session s -> TermProposal s -> IO (Either Failure (Transition s))
@@ -478,9 +476,7 @@ proposeClauseActions session goal limits models mode native emit = do
         Right <$> Search.clauseProposals stats limits models mode native emit namespace target
     pure (owner, result >>= id)
   observed <- readIORef stats
-  charge (sessionWork session) $ \w -> w
-    { checkingAttempts = checkingAttempts w + Search.workUnits observed
-    , rejectedChecks = rejectedChecks w + Search.rejectedQueries observed }
+  recordSearchWork session observed
   pure (observed, (if Search.workExhausted observed then CensoredClauses else CompleteClauses) <$> outcome)
 
 runGoalSearch :: Session s -> GoalRef s
@@ -517,12 +513,21 @@ runGoalSearch session goal search = do
           (DraftAction point $ nativeDraft term allocation) False
         pure (next, (\transition -> (status, Just transition, selected)) <$> checked)
   observed <- readIORef stats
+  recordSearchWork session observed
+  pure (observed, outcome)
+
+-- Pure symbolic traversal is work, but not an Agda checking request. Keeping
+-- both components avoids losing work at the agenda boundary or misreporting
+-- in-memory focused/rewrite steps as checker calls.
+recordSearchWork :: Session s -> Search.SearchStats -> IO ()
+recordSearchWork session observed =
   charge (sessionWork session) $ \w -> w
-    { checkingAttempts = checkingAttempts w + Search.workUnits observed
+    { checkingAttempts = checkingAttempts w + Search.checkerQueries observed
+        + Search.inferenceQueries observed + Search.recursiveContextQueries observed
+    , symbolicActions = symbolicActions w + Search.focusedActions observed + Search.algebraActions observed
     , rejectedChecks = rejectedChecks w + Search.rejectedQueries observed
     , helperQueries = helperQueries w + Search.helperInferenceQueries observed
     , clauseQueries = clauseQueries w + Search.helperClauseQueries observed }
-  pure (observed, outcome)
 
 check :: Session s -> Owner -> StateRef s -> TCState -> DraftAction -> Bool
       -> IO (Owner, Either Failure (Transition s))

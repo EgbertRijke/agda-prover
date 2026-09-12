@@ -348,8 +348,10 @@ identity, plus coarse `actions_generated`, `actions_attempted` and
 `actions_accepted` counters and the nullable `action_limit`. Native evidence macro internals are not falsely
 counted as individual agenda moves. Application counters retain the physical
 checking receipt separately, including later export/reconstruction checks.
-`work_units` charges native checking since this run was started plus its own
-scheduler steps. Other work deliberately performed in the same session during
+`work_units` charges native checking and in-memory `symbolic_actions` since
+this run was started, plus its own scheduler steps. The session's
+`checking_attempts` excludes pure focused/rewrite traversal; both components
+remain charged across rollback. Other work deliberately performed in the same session during
 a pause also consumes that shared-session allowance; do not sum overlapping
 run receipts as disjoint costs. OS CPU/RSS/I/O/temporary-storage supervision,
 stop escalation and source patch validation remain the application's duty.
@@ -480,7 +482,7 @@ Search cost adds `recursive_context_queries`, `recursive_proposals` and
 `recursive_validation_queries`. The last counts whole candidate admissibility
 queries (non-forced assignment plus source-owner termination) and is a subset
 of `checker_queries`, not extra proof authority. `work_units` equals
-`inference_queries + checker_queries + recursive_context_queries + focused_actions`; native
+`inference_queries + checker_queries + recursive_context_queries + focused_actions + algebra_actions`; native
 result-type comparisons count as checker queries. Rejected proposals and
 recursive validation work survive rollback. There are no per-term Python
 callbacks, datatype-specific rules or model-weight changes.
@@ -557,6 +559,33 @@ Expression displays have column-zero relative Agda layout. The native
 application path preserves and anchors this layout in a parenthesized
 expression; it does not flatten typed let blocks through the legacy formatter.
 Fresh ordinary Agda validation remains mandatory after reconstruction.
+
+## Typed algebraic proposals
+
+`typed-algebra-v1` recognizes the current binary commutativity/associativity
+fragment from scoped native types, including Agda's exposure of nondependent
+binders. Relation and operation heads retain native identity and spines.
+Polymorphic parameters are proposal-compatible until Agda checks their actual
+application; a shape match is not a proof or a replacement unifier.
+
+Symmetry, transitivity and congruence are supplied evidence too, not properties
+silently assumed of an arbitrary binary relation. Concrete edges, rewrites
+inside the binary operation, and common outer application contexts produce
+explicit native proof expressions. The latter are reified native lambdas with
+Agda-owned raising, not string substitution. Meta-blocked or unsupported shapes
+retain general evidence search. No datatype, theorem, library or operator name
+selects this path.
+
+Distinct witnesses and composed paths with identical endpoints survive caller
+rejection. No endpoint-only visited set erases proof-relevant alternatives.
+Traversal and composition are charged to `algebra_actions`; their enclosing
+depth widens under the existing resource controller. `algebra_candidates`
+counts constructed candidates, not accepted proofs, and
+`algebra_observation_queries` is a subset of `inference_queries`. These are
+additive fields in the evidence cost v2. The session's `symbolic_actions`
+combines focused and algebraic actions while `checking_attempts` retains only
+native queries/checks. Agenda work allowances include both. Every returned
+proof still passes original-parent reconstruction and independent validation.
 
 The process accepts checking pragmas after `--`, parsed by Agda's own option
 parser. The application passes its resolved command options explicitly. Library

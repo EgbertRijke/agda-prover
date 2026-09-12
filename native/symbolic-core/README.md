@@ -231,6 +231,17 @@ completed candidates are checked by Agda. Dependent, hidden and unsupported
 types retain the general native path; a failed fast path never proves impossibility.
 Its separately role-checked NNUE uses the unchanged focused weights.
 
+The algebraic path recognizes supplied commutativity/associativity and relation
+operations from native telescopes and application spines. It constructs explicit
+rewrite proofs, including symmetry, composition, binary congruence and shared
+outer application contexts. It works with an arbitrary supplied relation, not
+only identity, and preserves distinct evidence with the same endpoints. All
+operations must be available in scope; no names or notation grant algebraic laws.
+Agda checks every candidate and failed continuations retain other evidence.
+The existing widening depth and cumulative work allowance bound exploration;
+there is no separate fixed term/node ceiling or unbounded normalizer. This is
+the current binary AC fragment, not general algebraic decision-procedure coverage.
+
 The first native fragment handles exact local/global evidence, lambda
 introduction, partial applications, hidden/instance inference, dependent
 arguments and function-valued record projections. All semantic terms retain
@@ -316,7 +327,8 @@ resumes the retained native frontier, not a new search or a Python fallback.
 
 For this controller, `task.max_candidates` limits native move attempts (including
 the standard/deep frontend numeric presets). An independent engine `work_units`
-limit optionally bounds scheduler steps plus native checking attempts; `None`
+limit optionally bounds scheduler steps, native checking attempts and in-memory
+symbolic actions; `None`
 adds no such limit. Raising one allowance never overrides the other. A native
 move can include several checker calls; it is not identical in granularity to
 a legacy Python action. Generated/attempted moves and native checking are
@@ -337,7 +349,7 @@ has no inferred training credit merely because a branch was visited.
 path for paired measurements. `task.model_path` replaces the focused weights;
 the OR-policy override remains separate. Each model is role-checked and pinned.
 
-`work_units` optionally limits native queries plus in-memory focused actions. Its default
+`work_units` optionally limits native queries plus in-memory focused/rewrite actions. Its default
 `None` widens search depth under the caller's physical resource envelope and
 cancellation, without a fixed proof-depth or 20-second cutoff. The current
 implementation is a first functional slice, not a performance claim: repeated
