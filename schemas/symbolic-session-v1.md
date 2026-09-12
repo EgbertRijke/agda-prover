@@ -671,11 +671,22 @@ the lookahead. Its structural tier precedes the ordinary case alternatives;
 the model still orders subjects, and different inhabitants remain available
 through ordinary single-subject search. Explicit user case commands keep their
 requested full splitting semantics.
-The full batch and every individual subject remain alternatives. Agda still rejects inadmissible
-dependent elimination, including violations of `--without-K`. The existing
+The compound move first tries the full batch. If Agda rejects it, it grows an
+admissible prefix in the same preferred order, checking each proposed extension
+from the original parent. A rejected subject is deferred and reconsidered only
+after another subject is accepted. If no further extension is admissible, the
+last checked partial draft returns to ordinary search. Each success removes one
+subject from the finite input; the fallback does not enumerate permutations or
+introduce a numerical depth/action ceiling. Preparation, failed probes and
+draft checks are charged, cancellation propagates, and all probes restore the
+parent while retaining fresh allocation identities. This feedback-driven
+fallback is search-only: explicit user case commands never silently drop or
+reorder requested subjects. Every individual subject remains an alternative.
+Agda still rejects inadmissible dependent elimination, including violations of
+`--without-K`. The existing
 refinement role can rank the compound move; it is not credited as a choice of
 several mutually exclusive single-subject model actions. The cost receipt
-records this switch. False omits both compound moves and their local-closure
+records this switch. False omits the compound fallback and its local-closure
 lookahead from the queue, retaining the same catalogue checks and all ordinary
 single-subject moves.
 

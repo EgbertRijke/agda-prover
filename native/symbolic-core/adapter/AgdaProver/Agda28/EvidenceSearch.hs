@@ -827,7 +827,7 @@ clauseProposals stats limits models mode native emit namespace excluded target =
         liftIO $ emit $ P.traceView $ P.decisionTrace batch
         pure [(P.candidateValue candidate, [(decision, P.candidateId candidate)])
           | candidate <- P.rankedCandidates batch]
-  -- A single finite batch exposes the existing multi-subject Agda operation
+  -- A finite adaptive batch exposes the existing multi-subject Agda operation
   -- to autonomous search. Positive one-constructor metadata avoids a product
   -- of case branches; admissibility and dependent substitution remain Agda's
   -- responsibility. Preserve every single-subject alternative.
@@ -836,12 +836,13 @@ clauseProposals stats limits models mode native emit namespace excluded target =
       linearSubjects = [name | (ClauseExecution.BoundSubjects names, _) <- ordered,
         name <- NE.toList names, Set.member name linearNames]
       -- A dependent witness can make its index splittable, while the reverse
-      -- sequence may be inadmissible. Preserve native telescope dependencies
-      -- inside the compound action; singles retain their learned ordering.
+      -- sequence may be inadmissible. This is an initial preference, not an
+      -- admissibility certificate: the compound action retries deferred
+      -- subjects after checked progress. Singles retain their learned order.
       batches = case Agenda.dependentFirst dependencies linearSubjects of
         first:second:rest ->
           [(ClauseExecution.ClosingSubjects (first :| (second:rest)), []),
-           (ClauseExecution.BoundSubjects (first :| (second:rest)), [])]
+           (ClauseExecution.AdaptiveSubjects (first :| (second:rest)), [])]
         _ -> []
       features action = case [(ty) | (_, ty, _, proposed) <- subjects, proposed == action] of
         ty:_ -> Just $ F.refinementTokens goal "case-split" (Just $ T.pack ty)

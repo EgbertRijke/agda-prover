@@ -45,12 +45,42 @@ data PreparationStep = GenerateClauses | CheckContext | CheckScaffold
 -- own resolution/exposure behavior. Session seals either intent to its goal.
 data Intent = UserAction ClauseAction | BoundSubjects (NonEmpty Name)
   | ClosingSubjects (NonEmpty Name)
+  | AdaptiveSubjects (NonEmpty Name)
   deriving Eq
 
 -- A split is implemented as a local, dependent eliminator, not by mutating an
 -- already checked global definition. The helper and its case clauses are native
 -- syntax. Ordinary give checks the final draft again from the unsplit parent.
 prepare :: (PreparationStep -> TCM ()) -> InteractionId -> Intent -> TCM A.Expr
+prepare chargeStep point (AdaptiveSubjects chosen) = do
+  -- Keep the existing full batch when Agda accepts it. Otherwise learn an
+  -- admissible sequence from checked prefixes, not from the original types
+  -- alone. An earlier rejection is retried only after another subject has
+  -- changed the context. Every success removes one subject, so this explores
+  -- a finite sequence, not permutations or an uncharged nested proof search.
+  checked (NE.toList chosen) >>= \case
+    Just draft -> registerDraft draft
+    Nothing -> grow [] (NE.toList chosen) [] Nothing
+ where
+  checked [] = pure Nothing
+  checked (first:rest) = do
+    before <- getTC
+    (do
+      draft <- prepare chargeStep point $ BoundSubjects (first :| rest)
+      chargeStep CheckScaffold
+      void $ give_ False WithoutForce point Nothing draft
+      restoreAllocations before
+      pure $ Just draft) `catchError` \err -> case err of
+        TypeError{} -> restoreAllocations before >> pure Nothing
+        PatternErr{} -> restoreAllocations before >> pure Nothing
+        _ -> throwError err
+  grow _ [] _ Nothing = genericError "native-clause-no-admissible-subject"
+  grow _ [] _ (Just draft) = registerDraft draft
+  grow prefix (name:rest) deferred latest = do
+    let next = prefix ++ [name]
+    checked next >>= \case
+      Nothing -> grow prefix rest (name:deferred) latest
+      Just draft -> grow next (reverse deferred ++ rest) [] (Just draft)
 prepare chargeStep point (ClosingSubjects chosen) = trySubjects $ NE.toList chosen
  where
   -- A bounded lookahead for an existing inhabitant after one elimination.
@@ -209,6 +239,7 @@ subjects chargeStep _ (BoundSubjects chosen) originals renamed = do
       [] -> genericError "native-clause-execution-invalid-subject-index"
   pure (unwords $ map fst mapped, map snd mapped)
 subjects _ _ ClosingSubjects{} _ _ = genericError "native-clause-unprepared-closure"
+subjects _ _ AdaptiveSubjects{} _ _ = genericError "native-clause-unprepared-sequence"
 subjects chargeStep point (UserAction action) originals renamed
   | command action `elem` ["", "."] = pure (command action, [])
   | otherwise = do

@@ -157,6 +157,7 @@ clauseMoveGoal (ClauseMove goal _) = goal
 clauseMoveIsBatch :: ClauseMove s -> Bool
 clauseMoveIsBatch (ClauseMove _ (ClauseExecution.BoundSubjects (_ :| (_:_)))) = True
 clauseMoveIsBatch (ClauseMove _ ClauseExecution.ClosingSubjects{}) = True
+clauseMoveIsBatch (ClauseMove _ ClauseExecution.AdaptiveSubjects{}) = True
 clauseMoveIsBatch _ = False
 
 termProposalGoal :: TermProposal s -> GoalRef s
