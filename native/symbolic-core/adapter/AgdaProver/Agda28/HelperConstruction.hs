@@ -1,13 +1,15 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.HelperConstruction (Step (..), generate) where
+module AgdaProver.Agda28.HelperConstruction (Step (..), generate, generalizeEvidence) where
 
-import Control.Monad (guard, forM, void)
+import Control.Monad (guard, forM, void, filterM)
 import Control.Monad.Except (catchError, throwError)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Maybe (MaybeT (..))
 import Data.List.NonEmpty (NonEmpty (..))
+import Data.List (nub, sortOn)
+import Data.Set qualified as Set
 
 import Agda.Interaction.BasicOps (give_, parseExprIn)
 import Agda.Interaction.Base (UseForce (WithoutForce))
@@ -20,21 +22,84 @@ import Agda.Syntax.Common
 import Agda.Syntax.Common.Pretty (prettyShow)
 import Agda.Syntax.Info qualified as Info
 import Agda.Syntax.Internal qualified as I
+import Agda.Syntax.Internal.MetaVars (noMetas)
 import Agda.Syntax.Position (noRange)
 import Agda.Syntax.Scope.Base
+import Agda.Syntax.Translation.InternalToAbstract (reify)
 import Agda.TypeChecking.Monad
+import Agda.TypeChecking.Level (isLevelType)
 import Agda.TypeChecking.Reduce (reduce)
-import Agda.TypeChecking.Rules.Term (isType_)
+import Agda.TypeChecking.Rules.Term (isType_, inferExpr)
 import Agda.TypeChecking.Substitute (absApp, raise)
 import Agda.Utils.Lens ((^.))
 import Agda.Utils.Null (empty)
 
 import AgdaProver.Agda28.ClauseExecution (patternLocals)
+import AgdaProver.Agda28.ClauseExecution qualified as Clauses
 import AgdaProver.Agda28.Helpers qualified as Helpers
 import AgdaProver.Symbolic.Protocol (ObservationMode)
 import AgdaProver.Symbolic.SessionTypes (DraftExpression (..))
 
 data Step = InferSignature | InspectSignature | CheckScaffold | GenerateClauses
+
+-- Abstract the parameters/indices of closed one-constructor evidence before
+-- eliminating it. Splitting a compound value in a fixed context is often
+-- inadmissible; Agda's with-abstraction supplies the dependent generalization.
+-- The generated branches stay open for the shared agenda. This uses datatype
+-- metadata only and never assumes a distinguished identity family or UIP.
+generalizeEvidence :: (Step -> TCM Bool) -> Set.Set A.QName -> InteractionId
+                   -> A.Expr -> I.Type -> TCM (Maybe A.Expr)
+generalizeEvidence allow forbidden point expression ty = runMaybeT $ do
+  charged InspectSignature $ pure ()
+  exposed <- lift $ reduce ty
+  (parameters, arguments, constructor) <- case exposed of
+    I.El _ (I.Def family eliminations) | noMetas exposed -> do
+      definition <- lift $ getConstInfo family
+      case theDef definition of
+        Datatype { dataPars = parameters, dataIxs = indices, dataCons = [constructor] }
+          | indices > 0 -> do
+              arguments <- MaybeT $ pure $ traverse (\case I.Apply a -> Just a; _ -> Nothing) eliminations
+              pure (parameters, arguments, constructor)
+        _ -> MaybeT $ pure Nothing
+    _ -> MaybeT $ pure Nothing
+  scope <- lift getScope
+  guard $ isNameInScope constructor scope && not (Set.member constructor forbidden)
+  -- With-abstraction consumes operands right-to-left. Generalize outer terms
+  -- before their subterms, or a later subterm abstraction hides the occurrence
+  -- of its surrounding expression. Native size provides a stable topological
+  -- order for this strict-subterm dependency (ties keep declaration order).
+  selected <- filterM (\(index, argument) -> if index >= parameters then pure True else do
+    syntax <- charged InspectSignature $ reify $ unArg argument
+    (_, domain) <- charged InspectSignature $ inferExpr syntax
+    exposedDomain <- charged InspectSignature $ reduce domain
+    level <- charged InspectSignature $ isLevelType exposedDomain
+    -- Uniform sort/level parameters describe the evidence's carrier; value
+    -- parameters (including hidden endpoints) participate in its dependence.
+    -- Hiding alone must not decide whether a value can be generalized.
+    pure $ not level && case exposedDomain of
+      I.El _ I.Sort{} -> False
+      _ -> True)
+    (zip [0..] arguments)
+  values <- forM (sortOn I.termSize $ nub $ map (unArg . snd) selected) $ \value ->
+    charged InspectSignature $ reify value
+  let operands = case values of
+        [] -> expression :| []
+        first:rest -> first :| (rest ++ [expression])
+      charge step = do
+        available <- allow step
+        if available then pure () else genericError "native-helper-allowance-spent"
+      clauseCharge step = charge $ case step of
+        Clauses.GenerateClauses -> GenerateClauses
+        Clauses.CheckContext -> InspectSignature
+        Clauses.CheckScaffold -> CheckScaffold
+  (signatureType, application, subject) <- lift $
+    Helpers.abstractOperands (charge InferSignature) point operands
+  lift $ Clauses.prepareAbstraction clauseCharge point signatureType application subject
+ where
+  charged step action = do
+    available <- lift $ allow step
+    guard available
+    lift action
 
 -- Finite existing fragment: split one one-constructor operand and return one
 -- of the resulting available explicit arguments/fields. Agda performs actual

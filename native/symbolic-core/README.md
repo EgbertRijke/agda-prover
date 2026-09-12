@@ -134,6 +134,15 @@ still require independent fresh validation. The autonomous agenda also uses
 Agda-generated local helpers for structural elimination; general arbitrary
 helper-application invention is not implemented.
 
+Closed recursive evidence in an indexed, single-constructor datatype can also
+be generalized autonomously. Agda's with-abstraction infers the helper telescope
+and case splitting produces its open branches for ordinary search. Native
+parameter/index structure, not relation names, determines the proposal. Hidden
+value parameters and complete helper signatures are retained. This shares the
+`recursive_evidence_operands` ablation and normal owner-termination checks.
+Inadmissible generalizations (including without-K restrictions on repeated
+indices) leave ordinary alternatives available; they do not refute the goal.
+
 ## Boundaries
 
 The pure agenda schedules opaque coupled states and typed actions. Stable

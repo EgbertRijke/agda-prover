@@ -521,6 +521,16 @@ printed types. A recursive value may fill one consumer slot, optionally paired
 with one independently authorized goal-mentioned function in another slot.
 It is not an unbounded saturation or enumeration of all operand combinations.
 
+The same option offers a generalized elimination of closed recursive evidence
+in an indexed single-constructor datatype. Agda's with-abstraction supplies the
+dependent helper type and its context permutation; native value parameters and
+indices are operands, while carrier/sort parameters remain fixed. Agda generates
+the case branches and they remain ordinary coupled goals. Hidden parameters
+are retained in the helper signature. Excluded constructors, unsupported views
+and rejected generalizations retain the ordinary catalogue. No identity-type
+recognizer or without-K exception is involved. Helper inference and clause
+preparation use the existing charged helper/inference/check counters.
+
 Before a composed draft is offered, a charged preflight requires no new
 constraints, fully determined types for its interaction operands, and no new
 open metas other than those explicit operands. This positive applicability
@@ -532,7 +542,8 @@ move still owns termination/productivity and proof reconstruction.
 
 The option is independent of `target_function_operands`, strict-boolean parsed,
 recorded in the agenda cost and retained across slices. False skips recursive
-operand observations and compositions; it does not disable recursive calls.
+operand observations, compositions and generalized elimination; it does not
+disable recursive calls.
 Like the function-operand option, it applies to the primitive catalogue, not
 the direct coarse evidence operation. Existing inference/check counters and
 `application_generation_steps` account for all additional work. Both parent

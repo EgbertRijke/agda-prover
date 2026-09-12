@@ -1,7 +1,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.ClauseExecution (Intent (..), PreparationStep (..), prepare, registerDraft, patternLocals) where
+module AgdaProver.Agda28.ClauseExecution (Intent (..), PreparationStep (..), prepare, prepareAbstraction, registerDraft, patternLocals) where
 
 import Control.Monad (forM, void, when)
 import Control.Monad.Except (catchError, throwError)
@@ -64,10 +64,11 @@ prepare chargeStep point action = withInteractionId point $ do
         -- Reification must retain the actual meta argument spines. Reusing a
         -- checkpoint strengthened past the abstracted variables would leave
         -- impossible entries in Agda's identity-substitution comparison.
-        signature <- inTopContext $ addContext (reverse $ drop count context) $
+        signature <- withShowAllArguments $ inTopContext $ addContext (reverse $ drop count context) $
           reify $ telePi suffix target
+        let entries = reverse $ take count $ zip context names
         prepareHelper chargeStep point originalScope signature selected
-          (take count $ zip context names)
+          [(getArgInfo entry, name, A.Var $ ctxEntryName entry) | (entry, name) <- entries]
   if width >= length context then build (length context) else
     build width `catchError` \err -> case err of
       TypeError{} -> restoreAllocations before >> build (length context)
@@ -93,14 +94,31 @@ abstractionWidth chargeStep selectedIndices = do
       _ -> pure []
   pure $ maximum $ 0 : map (+ 1) (selectedIndices ++ concat dependencies)
 
+-- A with-helper has an Agda-inferred closed telescope and an application in
+-- the current context. Reuse the same checked clause preparation as ordinary
+-- elimination; only the telescope/application origin differs.
+prepareAbstraction :: (PreparationStep -> TCM ()) -> InteractionId -> I.Type
+                   -> [Arg A.Expr] -> Int -> TCM A.Expr
+prepareAbstraction chargeStep point ty arguments selected = withInteractionId point $ do
+  chargeStep CheckContext
+  -- This is re-elaborated syntax, not a compact display. A hidden family
+  -- parameter may not be recoverable from its explicit indices.
+  signature <- withShowAllArguments $ inTopContext $ reify ty
+  scope <- getScope
+  entries <- forM (zip [0 :: Int ..] arguments) $ \(index, argument) -> do
+    name <- freshName_ $ "withArgument" ++ show index
+    pure (getArgInfo argument, name, unArg argument)
+  case drop selected entries of
+    (_, subject, _):_ | selected >= 0 ->
+      prepareHelper chargeStep point scope signature (prettyShow $ nameConcrete subject) entries
+    _ -> genericError "native-generalization-invalid-subject"
+
 prepareHelper :: (PreparationStep -> TCM ()) -> InteractionId -> ScopeInfo
-              -> A.Expr -> String -> [(ContextEntry, Name)] -> TCM A.Expr
+              -> A.Expr -> String -> [(ArgInfo, Name, A.Expr)] -> TCM A.Expr
 prepareHelper chargeStep point originalScope signature selected arguments = do
-  let entries = reverse arguments
-      patterns = [Arg (getArgInfo entry) $ unnamed $ A.VarP $ A.mkBindName name
-                 | (entry, name) <- entries]
-      operands = [Arg (getArgInfo entry) $ unnamed $ A.Var $ ctxEntryName entry
-                 | (entry, _) <- entries]
+  let patterns = [Arg info $ unnamed $ A.VarP $ A.mkBindName name
+                 | (info, name, _) <- arguments]
+      operands = [Arg info $ unnamed expression | (info, _, expression) <- arguments]
       scope = setScopeLocals (concatMap patternLocals patterns ++ _scopeLocals originalScope) originalScope
   withFreshName noRange "eliminate" $ \binding -> do
     helper <- qualify <$> currentModule <*> freshName_ "clauses"

@@ -392,7 +392,19 @@ primitiveProposals options stats limits models mode native emit namespace exclud
               if not allowed then pure Nothing else do
                 shape <- reduce closedType >>= outerShape
                 syntax <- reify closed
-                pure $ Just (syntax, shape, picked)
+                pure $ Just (syntax, closedType, shape, picked)
+  generalized <- fmap catMaybes $ forM reusable $ \(expression, ty, _, picked) ->
+    Construction.preservingAllocations $ attempt runtime $ do
+      proposal <- Helper.generalizeEvidence
+        (\step -> charge runtime $ \s -> case step of
+          Helper.InferSignature -> s { inferenceQueries = inferenceQueries s + 1,
+            helperInferenceQueries = helperInferenceQueries s + 1 }
+          Helper.InspectSignature -> s { inferenceQueries = inferenceQueries s + 1 }
+          Helper.CheckScaffold -> s { checkerQueries = checkerQueries s + 1 }
+          Helper.GenerateClauses -> s { checkerQueries = checkerQueries s + 1,
+            helperClauseQueries = helperClauseQueries s + 1 }) forbidden point expression ty
+      modify runtime $ \s -> s { helperProposals = helperProposals s + maybe 0 (const 1) proposal }
+      pure $ fmap (\draft -> (draft, picked)) proposal
   headSignatures <- forM ranked $ \(Seed expression _ _, picked) -> do
     observed <- localTCState $ attempt runtime $
       queryInferWith DontExpandLast runtime expression $ \(value, ty) -> do
@@ -435,7 +447,7 @@ primitiveProposals options stats limits models mode native emit namespace exclud
         functions = [(index, operand) | (index, shape) <- zip [0..] infos,
           argumentDomain shape == Just FunctionShape, operand <- targetOperands]
         evidence = [((index, operand), provenance) | (index, shape) <- zip [0..] infos,
-          (operand, offered, provenance) <- reusable, compatible (argumentDomain shape) offered]
+          (operand, _, offered, provenance) <- reusable, compatible (argumentDomain shape) offered]
     specialized <- specialize
       ([([anchor, known], nub $ picked ++ provenance, True) | (anchor, provenance) <- evidence,
           known <- functions, fst anchor /= fst known] ++
@@ -488,10 +500,10 @@ primitiveProposals options stats limits models mode native emit namespace exclud
       -- otherwise a datatype's constructor fields are scheduled as arbitrary
       -- eliminations, while the equivalent record fields get precedence.
       constructorHeads = [item | item@(expression, _) <- heads, constructorHead expression]
-      eliminationHeads = [item | item@(expression, _) <- heads, not $ constructorHead expression] ++ recursive
+      eliminationHeads = [item | item@(expression, _) <- heads, not $ constructorHead expression] ++ recursive ++ generalized
       ordered = if Classification.constructionFirst classification
         then [(0, item) | item <- constructed ++ constructorHeads] ++ [(1, item) | item <- eliminationHeads]
-        else [(0, item) | item <- heads ++ recursive] ++ [(1, item) | item <- constructed]
+        else [(0, item) | item <- heads ++ recursive ++ generalized] ++ [(1, item) | item <- constructed]
   if not (P.hasDomain models P.Refinements) || mode == P.Symbolic
     then pure $ assignedProposals ++ map snd ordered else do
     context <- getContext
