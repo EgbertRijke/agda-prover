@@ -351,6 +351,15 @@ Native descent facts feed the existing scheduling/NNUE boundary. These moves
 complement the coarse search for wrapped and more elaborate recursive operands;
 they do not establish whole-benchmark coverage or promote the native default.
 
+Recursive templates can also propose a completed call when their coupled
+operands have unambiguous local inhabitants. Agda checks the whole application
+first, so a later argument and the expected result can determine earlier
+dependent domains. This shares the constructor scaffold's local-value check;
+ambiguous or unresolved operands retain the original open template. Only
+meta-free completions leave the speculative transaction, and all inspection
+and checking is charged. Completion does not replace termination or fresh
+validation, nor does it trigger exhaustive argument search during generation.
+
 Expected-result applications are tried before unconstrained operand enumeration.
 Agda relates their inferred result to the goal before arguments are searched,
 preserving dependencies even when constructor elaboration creates fresh hidden

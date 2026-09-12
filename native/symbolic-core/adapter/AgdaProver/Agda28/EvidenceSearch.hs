@@ -299,10 +299,15 @@ primitiveProposals stats limits models mode native emit namespace excluded owner
                   then (:[]) <$> build True anchor infos else pure []
                 pure $ inferred:supplied
         _ -> pure []
-      modify runtime $ \s -> s { recursiveProposals = recursiveProposals s + fromIntegral (length expressions),
+      completed <- fmap catMaybes $ forM expressions $ \expression -> attempt runtime $
+        Construction.completeLocalOperands
+          (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
+          (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }) expression target
+      let proposals = nub $ completed ++ expressions
+      modify runtime $ \s -> s { recursiveProposals = recursiveProposals s + fromIntegral (length proposals),
         copatternProposals = copatternProposals s +
-          if Recursion.copatternCall context then fromIntegral (length expressions) else 0 }
-      described <- mapM (describe runtime "recursive") expressions
+          if Recursion.copatternCall context then fromIntegral (length proposals) else 0 }
+      described <- mapM (describe runtime "recursive") proposals
       ordered <- rankDescribed runtime classification target described
       pure [(expression, picked) | (Seed expression _ _, picked) <- ordered]
   heads <- fmap concat $ forM ranked $ \(Seed expression _ _, picked) -> do

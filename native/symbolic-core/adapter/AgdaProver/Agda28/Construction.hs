@@ -3,10 +3,10 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.Construction
   ( recordPlan, recordExpression, projectedEvidence, omittedField, absurdLambda, eliminateEmpty
-  , constructorClosures, constructionScaffold, emptyResultApplication ) where
+  , constructorClosures, constructionScaffold, emptyResultApplication, completeLocalOperands ) where
 
-import Control.Monad (filterM)
-import Control.Monad.Except (catchError)
+import Control.Monad (filterM, forM)
+import Control.Monad.Except (catchError, throwError)
 import Data.Maybe (catMaybes)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
@@ -14,7 +14,7 @@ import Data.Set qualified as Set
 
 import Agda.Syntax.Abstract qualified as A
 import Agda.Syntax.Abstract.Name (QName)
-import Agda.Syntax.Abstract.Views (traverseExpr)
+import Agda.Syntax.Abstract.Views (foldExpr, traverseExpr)
 import Agda.Syntax.Common
 import Agda.Syntax.Concrete (FieldAssignment' (..))
 import Agda.Syntax.Concrete.Name qualified as C
@@ -132,18 +132,9 @@ constructionScaffold inspect charge forbidden target = do
           _ -> unresolved ty
       _ -> unresolved ty
   unresolved ty = do
-    locals <- if not (noMetas ty) then pure [] else do
-      context <- getContext
-      fmap catMaybes $ mapM (\entry -> localTCState $
-        (do allowed <- charge
-            if not allowed then pure Nothing else do
-              let expression = A.Var $ ctxEntryName entry
-              value <- noConstraints $ dontAssignMetas $ checkExpr expression ty
-              pure $ if noMetas value then Just expression else Nothing)
-        `catchError` (\_ -> pure Nothing)) context
-    case locals of
-      [expression] -> pure (expression, True)
-      _ -> do
+    uniqueLocal charge ty >>= \case
+      Just expression -> pure (expression, True)
+      Nothing -> do
         (expression, _) <- hole ty
         pure (expression, False)
   checked seen ty = do
@@ -200,6 +191,74 @@ constructionScaffold inspect charge forbidden target = do
     rest <- fields seen names (absApp body value)
     pure $ (name, expression):rest
   fields _ _ _ = genericError "native-record-telescope-mismatch"
+
+-- A local is unambiguous only under Agda conversion without new constraints
+-- or meta assignments. Distinct inhabitants of one type remain alternatives.
+-- Unresolved types are not approximated by their heads or printed forms.
+uniqueLocal :: TCM Bool -> I.Type -> TCM (Maybe A.Expr)
+uniqueLocal charge ty
+  | not (noMetas ty) = pure Nothing
+  | otherwise = do
+      context <- getContext
+      matches <- fmap catMaybes $ forM context $ \entry -> localTCState $
+        (do allowed <- charge
+            if not allowed then pure Nothing else do
+              let expression = A.Var $ ctxEntryName entry
+              value <- noConstraints $ dontAssignMetas $ checkExpr expression ty
+              pure $ if noMetas value then Just expression else Nothing)
+        `catchError` (\case
+          TypeError{} -> pure Nothing
+          PatternErr{} -> pure Nothing
+          problem -> throwError problem)
+      pure $ case matches of [expression] -> Just expression; _ -> Nothing
+
+-- Complete a proposed application's coupled holes from unambiguous locals.
+-- Check the whole spine first so expected results and later operands constrain
+-- earlier dependent domains. Each successful pass retires at least one hole;
+-- no recursive argument synthesis or arbitrary iteration cap is hidden here.
+-- Only a closed native expression escapes this transaction. The caller keeps
+-- the original open proposal and still checks/validates any completed one.
+completeLocalOperands :: TCM Bool -> TCM Bool -> A.Expr -> I.Type -> TCM (Maybe A.Expr)
+completeLocalOperands inspect charge expression target = do
+  (result, names, points) <- localTCState $ do
+    allowed <- charge
+    result <- if not allowed then pure Nothing else do
+      value <- checkExpr expression target
+      complete value $ Set.toList $ foldExpr (\case
+        A.QuestionMark _ point -> Set.singleton point
+        _ -> Set.empty) expression
+    names <- useTC stFreshNameId
+    points <- useTC stFreshInteractionId
+    pure (result, names, points)
+  -- Reification may introduce bound names. Keep their allocation watermark,
+  -- never the speculative checking state, alive in the surrounding catalogue.
+  stFreshNameId `modifyTCLens` max names
+  stFreshInteractionId `modifyTCLens` max points
+  pure result
+ where
+  complete value points = do
+    allowed <- inspect
+    if not allowed then pure Nothing else do
+      resolved <- instantiateFull value
+      if noMetas resolved then Just <$> reify resolved else do
+        retired <- forM points $ \point -> lookupInteractionMeta point >>= \case
+          Nothing -> pure False -- Postponed elaboration has not connected it.
+          Just meta -> do
+            variable <- lookupLocalMeta meta
+            case mvInstantiation variable of
+              InstV{} -> pure True
+              _ -> withInteractionId point $ do
+                ty <- instantiateFull =<< getMetaTypeInContext meta
+                uniqueLocal charge ty >>= \case
+                  Nothing -> pure False
+                  Just supplied -> do
+                    available <- charge
+                    if not available then pure False else do
+                      _ <- give_ False WithoutForce point Nothing supplied
+                      pure True
+        let remaining = [point | (point, False) <- zip points retired]
+        if length remaining == length points then pure Nothing
+          else complete value remaining
 
 -- The telescope comes from Agda, already instantiated with this record's
 -- parameters. Search substitutes checked field values into it, never names or
