@@ -270,6 +270,14 @@ ablation disables this whole-search phase; the cost receipt records
 `local_closure_handoffs`. This is the first checked procedure handoff, not
 complete native workflow qualification or a replacement for fresh validation.
 
+The closure phase also tries complete single-subject eliminations under the
+goal's native telescope. A single-constructor input is useful here only if all
+resulting leaves close with available locals or nullary constructors. Agda
+checks indices, relevance and coverage. The first complete closure is an eager
+proposal before later-equation guesses; ordinary case and term alternatives
+remain available. This does not publish arbitrary case trees early or change
+the explicit clause-command catalogue.
+
 Contextual composition also adapts the endpoints of an existing hypothesis,
 including one just exposed by elimination. Supplied laws produce checked paths
 from its endpoints to the goal's endpoints. A changed source endpoint requires
@@ -279,6 +287,11 @@ result is an explicit proof proposal, not a silent conversion of the hypothesis.
 This applies to abstract relations as well as inductive ones, retains distinct
 direct proof alternatives, and shares the existing contextual-evidence switch,
 NNUE ordering, resource ledger and final validation boundary.
+
+Matching a supplied law at its destination requires actually applying a supplied
+inverse before lifting the witness. Within one fixed-context invocation,
+checked closed boundary steps are reused for repeated endpoint pairs; this cache
+never crosses branches or resumed requests. Final checking is still independent.
 
 Scheduling slices keep the queue and alternatives after provisional solutions.
 Coarse evidence search runs in soft, increasing work slices and yields to other

@@ -605,9 +605,14 @@ source changes, stale handles and cancellation use the normal session boundary.
 The cost receipt records the derived `local_closure_handoffs` boolean. Disabling
 `contextual_evidence` or whole-search macros disables this handoff. Explicit
 clause commands and one-step mode retain their semantics. This local-closure
-phase reuses locals only; subsequent contextual composition can use hypotheses
-in the resulting context. Complete cross-procedure/resumable integration remains
-separate work, and resident closure never replaces fresh validation.
+phase also introduces the native Pi telescope and tries one introduced
+single-constructor subject at a time. A draft is published only if every leaf
+closes with an available local or nullary constructor; the first complete draft
+is an eager hint, with ordinary alternatives retained. The existing explicit
+`ClosingSubjects` clause action remains local-only. Subsequent contextual
+composition can use hypotheses in the resulting context. Complete
+cross-procedure/resumable integration remains separate work, and resident closure
+never replaces fresh validation.
 
 With `contextual_evidence`, the primitive inventory specializes authorized
 heads by available locals and dependent record projections, retaining only
@@ -639,6 +644,12 @@ existing NNUE ordering within that class. Disabling the switch removes this
 additional candidate class and its preference without changing allowances.
 Reification does not grant visibility: unnameable, explicitly excluded, or
 declaration-generating context drafts are deferred to ordinary scoped search.
+
+Destination matches use an actual supplied inverse, not an endpoint swap.
+Checked closed steps for an exact current/destination pair are reused only
+within the same proposal invocation, whose parent, scope and seed inventory
+are fixed. Cache access remains charged; no cache survives a branch change or
+resumed request, and ordinary candidate checking is unchanged.
 
 Inspections, inference and conversion/checking consume the existing work ledger.
 Speculative native assignments are rolled back; complete proposals still pass

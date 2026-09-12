@@ -7,7 +7,9 @@ module AgdaProver.Agda28.ContextualEvidence (propose, Event (..)) where
 
 import Control.Monad (forM, guard)
 import Control.Monad.Except (catchError, throwError)
+import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (toList)
+import Data.IORef (newIORef, readIORef, modifyIORef')
 import Data.IntSet qualified as IntSet
 import Data.List (nubBy)
 import Data.Maybe (catMaybes, maybeToList)
@@ -225,16 +227,30 @@ propose excluded observe inspect check supplied seeds = do
               joins = [(e,p) | (e,p,Just Algebra.Transitivity) <- roles]
               inverses = [(e,p) | (e,p,Just Algebra.Symmetry) <- roles]
           observe $ Inventory (length seeds) (length maps) (length joins)
-          templates <- if null maps && null joins then pure [] else fmap catMaybes $
+          templates <- if null maps && null joins && null inverses then pure [] else fmap catMaybes $
             forM [(seed, side) | seed <- seeds, side <- [Source, Destination]] $ \(seed@(_, ty, _), side) -> do
               shape <- Construction.preservingAllocations $ attempt $ template inspect side ty
               pure $ fmap (\form -> (seed, side, form)) shape
+          -- Every probe below restores this exact context. Reusing a checked,
+          -- closed edge avoids walking the same boundary for each hypothesis.
+          -- This cache belongs only to this invocation, never another branch
+          -- or resumed request; final proposals are still ordinarily checked.
+          stepCache <- liftIO $ newIORef []
           -- Compare checked proof terms, not endpoints: two different proofs
           -- of the same relation must remain alternatives. This removes only
           -- duplicate discoveries (for example from opposite endpoints).
           let uniqueSteps = map (\(_,e,t,p) -> (e,t,p)) .
                 nubBy (\(v,_,_,_) (w,_,_,_) -> v == w)
-              steps destination current = fmap (uniqueSteps . concat) $
+              steps destination current = do
+                allowed <- inspect
+                cached <- liftIO $ readIORef stepCache
+                if not allowed then pure [] else case lookup (destination, current) cached of
+                  Just found -> pure found
+                  Nothing -> do
+                    found <- generateSteps destination current
+                    liftIO $ modifyIORef' stepCache (((destination, current), found):)
+                    pure found
+              generateSteps destination current = fmap (uniqueSteps . concat) $
                forM templates $ \((expression, _, provenance), side, Template sourceHead) ->
                fmap concat $ forM (sites current) $ \(_, source) -> do
                 if maybe False (\h -> headAt 0 source /= Just h) sourceHead
@@ -244,19 +260,26 @@ propose excluded observe inspect check supplied seeds = do
                     case fact of
                       Nothing -> pure []
                       Just (proof, factType) -> case Algebra.binary $ I.unEl factType of
-                        Just (_, original, replacement) | original /= replacement -> fmap concat $
+                        Just (_, a, b) | a /= b -> fmap concat $
+                         -- Matching a destination does not reverse a witness.
+                         -- Apply an available inverse, then check the actual
+                         -- oriented/lifted edge in this same native context.
+                         forM (case side of
+                           Source -> [(proof, a, b, [])]
+                           Destination -> [(app inverse [proof], b, a, [label])
+                             | (inverse, label) <- inverses]) $ \(oriented, original, replacement, orientation) -> fmap concat $
                          forM [path | (path, value) <- sites current, value == original] $ \path -> do
                           observe Grounded
                           let changed = replaceAt path replacement current
                           next <- traverse (contextView inspect) changed
                           if not (maybe False (\t -> t == destination || I.termSize t < I.termSize current) next)
                             then pure [] else do
-                              lifted <- if null path then pure [(proof, [])] else
+                              lifted <- if null path then pure [(oriented, [])] else
                                 case replaceAt path (I.Var 0 []) $ raise 1 current of
                                   Nothing -> pure []
                                   Just body -> do
                                     context <- reify $ I.Lam defaultArgInfo $ I.Abs "value" body
-                                    pure [(app lift [context, proof], [p]) | (lift,p) <- maps]
+                                    pure [(app lift [context, oriented], [p]) | (lift,p) <- maps]
                               fmap concat $ forM lifted $ \(edge, picked) ->
                                 Construction.preservingAllocations $ attemptList $ do
                                   allowed <- check
@@ -268,14 +291,14 @@ propose excluded observe inspect check supplied seeds = do
                                     closedEdge <- instantiateFull checkedEdge
                                     edgeNormal <- contextType inspect =<< instantiateFull edgeType
                                     case Algebra.binary $ I.unEl edgeNormal of
-                                      Just (r,a,_) | noMetas closedEdge, noMetas edgeNormal, r == relation, a == current -> do
+                                      Just (r,edgeSource,_) | noMetas closedEdge, noMetas edgeNormal, r == relation, edgeSource == current -> do
                                         observe Lifted
                                         -- Keep the checkpoint-owned endpoint,
                                         -- not a type reconstructed while
                                         -- checking an expanded case lambda.
                                         -- The complete proposal still passes
                                         -- through the source-owner checker.
-                                        pure [(closedEdge, edge, maybe current id next, provenance:picked)]
+                                        pure [(closedEdge, edge, maybe current id next, provenance:orientation ++ picked)]
                                       _ -> pure []
                         _ -> pure []
               -- One deterministic normalization lane is an additional closure

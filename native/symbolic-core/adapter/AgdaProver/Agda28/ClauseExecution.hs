@@ -1,7 +1,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.ClauseExecution (Intent (..), PreparationStep (..), prepare, prepareAbstraction, registerDraft, patternLocals) where
+module AgdaProver.Agda28.ClauseExecution (Intent (..), PreparationStep (..), prepare, prepareClosing, prepareAbstraction, registerDraft, patternLocals) where
 
 import Control.Monad (forM, void, when)
 import Control.Monad.Except (catchError, throwError)
@@ -86,8 +86,12 @@ prepareTarget introduced chargeStep point action = withInteractionId point $ do
       pure $ A.QuestionMark (Info.emptyMetaInfo { Info.metaScope = scope }) point
     _ -> prepareBody chargeStep point action
 
-prepareBody :: (PreparationStep -> TCM ()) -> InteractionId -> Intent -> TCM A.Expr
-prepareBody chargeStep point (ClosingSubjects chosen) = trySubjects $ NE.toList chosen
+-- The caller may add finite terminal inhabitants, but cannot accept them.
+-- All leaves still require non-instantiating, constraint-free native checks.
+-- The ordinary ClosingSubjects action supplies no extra candidates.
+prepareClosing :: (PreparationStep -> TCM ()) -> (I.Type -> TCM [A.Expr])
+               -> InteractionId -> NonEmpty Name -> TCM A.Expr
+prepareClosing chargeStep terminal point chosen = trySubjects $ NE.toList chosen
  where
   -- A bounded lookahead for an existing inhabitant after one elimination.
   -- The full batch and ordinary single-subject moves remain alternatives.
@@ -106,7 +110,11 @@ prepareBody chargeStep point (ClosingSubjects chosen) = trySubjects $ NE.toList 
               withInteractionId child $ do
                 target <- getMetaTypeInContext =<< lookupInteractionId child
                 context <- getContext
-                close target $ map (A.Var . ctxEntryName) context
+                close target (map (A.Var . ctxEntryName) context) >>= \case
+                  Just expression -> pure expression
+                  Nothing -> terminal target >>= close target >>= \case
+                    Just expression -> pure expression
+                    Nothing -> genericError "native-clause-no-local-inhabitant"
             expression -> pure expression) draft
           restoreAllocations before
           pure result
@@ -114,7 +122,7 @@ prepareBody chargeStep point (ClosingSubjects chosen) = trySubjects $ NE.toList 
       TypeError{} -> restoreAllocations before >> trySubjects rest
       PatternErr{} -> restoreAllocations before >> trySubjects rest
       _ -> throwError err
-  close _ [] = genericError "native-clause-no-local-inhabitant"
+  close _ [] = pure Nothing
   close target (expression:rest) = do
     chargeStep CheckContext
     found <- localTCState $ (do
@@ -123,7 +131,11 @@ prepareBody chargeStep point (ClosingSubjects chosen) = trySubjects $ NE.toList 
         TypeError{} -> pure False
         PatternErr{} -> pure False
         _ -> throwError err
-    if found then pure expression else close target rest
+    if found then pure $ Just expression else close target rest
+
+prepareBody :: (PreparationStep -> TCM ()) -> InteractionId -> Intent -> TCM A.Expr
+prepareBody chargeStep point (ClosingSubjects chosen) =
+  prepareClosing chargeStep (const $ pure []) point chosen
 prepareBody chargeStep point action = withInteractionId point $ do
   context <- getContext
   target <- getMetaTypeInContext =<< lookupInteractionId point

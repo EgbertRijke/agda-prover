@@ -3,7 +3,7 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.Construction
   ( recordPlan, recordExpression, projectedEvidence, omittedField, absurdLambda, eliminateEmpty
-  , constructorClosures, constructionScaffold, emptyResultApplication, completeLocalOperands
+  , constructorClosures, localEliminationClosures, constructionScaffold, emptyResultApplication, completeLocalOperands
   , determinedOperands, ArgumentWrapper (..), argumentWrappers, preservingAllocations ) where
 
 import Control.Monad (filterM, forM)
@@ -110,6 +110,69 @@ constructorClosures charge forbidden target = charge >>= \allowed ->
         (filter availableName constructors)
       pure [A.Con $ I.AmbQ (name :| []) | name <- names]
     _ -> pure []
+
+-- A closed elimination is different from publishing arbitrary case branches.
+-- Introduce the actual telescope and try one single-constructor argument at a
+-- time. Only local or nullary-constructor leaf closures escape; no recursive
+-- search or later specification is used. This gives the
+-- agenda a computationally useful definition before speculative equations,
+-- while all ordinary introductions, equations and eliminations remain available.
+localEliminationClosures :: TCM Bool -> TCM Bool
+                        -> (ClauseExecution.PreparationStep -> TCM ())
+                        -> Set.Set QName -> I.Type -> TCM [A.Expr]
+localEliminationClosures inspect charge clauseStep forbidden = introduce []
+ where
+  introduce inputs ty = do
+    allowed <- inspect
+    if not allowed || not (noMetas ty) then pure [] else reduce ty >>= \case
+      I.El _ (I.Pi domain body) -> do
+        let hint = if I.absName body `elem` ["", "_"] then "x" else I.absName body
+        withFreshName noRange hint $ \name -> do
+          drafts <- addContext (name, domain) $
+            locallyScope scopeLocals ((A.nameConcrete name, LocalVar name LambdaBound []) :) $
+              introduce (inputs ++ [name]) (absApp (raise 1 body) $ I.Var 0 [])
+          pure [A.Lam exprNoRange
+            (A.mkDomainFree $ Arg (getArgInfo domain) $ unnamed $ A.mkBinder_ name) draft
+            | draft <- drafts]
+      _ -> firstClosure inputs ty
+  -- This is the same deterministic local-closure lane as ClosingSubjects, not
+  -- a second enumeration of case choices. Stop after useful computation;
+  -- ordinary clause proposals retain every other subject and the full batch.
+  firstClosure [] _ = pure []
+  firstClosure (name:rest) ty = do
+      found <- preservingAllocations $
+        (do
+          context <- getContext
+          case [index | (index, entry) <- zip [0..] context, ctxEntryName entry == name] of
+            [index] -> do
+              available <- inspect
+              eligible <- if not available then pure False else typeOfBV index >>= reduce >>= \case
+                I.El _ (I.Def family _) -> do
+                  scope <- getScope
+                  definition <- getConstInfo family
+                  let usable constructor = isNameInScope constructor scope && not (Set.member constructor forbidden)
+                  pure $ case theDef definition of
+                    Datatype { dataCons = [constructor] } -> usable constructor
+                    RecordDefn record -> _recInduction record /= Just CoInductive &&
+                      usable (I.conName $ _recConHead record) &&
+                      all (usable . I.unDom) (_recFields record)
+                    _ -> False
+                _ -> pure False
+              if not eligible then pure Nothing else do
+                scope <- getScope
+                point <- registerInteractionPoint False noRange Nothing
+                let hole = A.QuestionMark (Info.emptyMetaInfo { Info.metaScope = scope }) point
+                checked <- charge
+                if not checked then pure Nothing else do
+                  _ <- checkExpr hole ty
+                  Just <$> ClauseExecution.prepareClosing clauseStep
+                    (constructorClosures inspect forbidden) point (name :| [])
+            _ -> pure Nothing)
+        `catchError` (\case
+          TypeError{} -> pure Nothing
+          PatternErr{} -> pure Nothing
+          problem -> throwError problem)
+      maybe (firstClosure rest ty) (pure . pure) found
 
 -- Expose a finite introduction tree, closing uniquely matching local leaves.
 -- Unresolved types, nondecreasing repeated families and genuine choices remain

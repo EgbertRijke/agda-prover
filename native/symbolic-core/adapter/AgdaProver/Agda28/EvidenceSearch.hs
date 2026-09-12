@@ -337,7 +337,7 @@ localClosureProposals :: IORef SearchStats -> SearchLimits -> P.Models -> P.Rank
                       -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> [String]
                       -> Maybe Recursion.Owner -> InteractionId -> I.Type
                       -> TCM [(A.Expr, [(T.Text, T.Text)])]
-localClosureProposals stats limits models mode native emit namespace _ _ _ target = do
+localClosureProposals stats limits models mode native emit namespace excluded owner _ target = do
   pruned <- liftIO $ newIORef False
   let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
   context <- getContext
@@ -346,9 +346,23 @@ localClosureProposals stats limits models mode native emit namespace _ _ _ targe
     reallyNoConstraints $ dontAssignMetas $ queryCheck runtime expression target $ \term -> do
       complete <- instantiateFull term
       pure $ if noMetas complete then Just expression else Nothing
+  (forbiddenHere, _) <- excludedGlobals excluded
+  inherited <- maybe (pure Set.empty) Recursion.ownerGroup owner
+  closures <- if not (null matches) then pure [] else Construction.preservingAllocations $
+    Construction.localEliminationClosures
+      (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
+      (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 })
+      (\step -> do
+        available <- charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1,
+          helperClauseQueries = helperClauseQueries s + case step of
+            ClauseExecution.GenerateClauses -> 1
+            _ -> 0 }
+        if available then pure () else genericError "native-local-closure-allowance-spent")
+      (Set.union forbiddenHere inherited) target
   targetText <- prettyShow <$> prettyTCM target
   ranked <- rankDescribed runtime Classification.unknownClassification target
-    [Seed expression "local" targetText Nothing | expression <- matches]
+    ([Seed expression "local" targetText Nothing | expression <- matches] ++
+     [Seed expression "case-split" targetText Nothing | expression <- closures])
   pure [(expression, picked) | (Seed expression _ _ _, picked) <- ranked]
 
 primitiveProposals :: PrimitiveOptions -> IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
