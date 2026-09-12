@@ -4,7 +4,7 @@
 -- Coupled native moves beneath single/joint scheduling. The planner supplies
 -- alternatives; it never supplies a replacement typechecker or proof authority.
 module AgdaProver.Agda28.AgendaExecution
-  ( Move (..), Planning (..), Config (..), Queue, Outcome (..), Interruption (..), start, startSelected, startOneMove, frontier, step, stepWithDepth ) where
+  ( Move (..), Planning (..), Config (..), Queue, Outcome (..), Interruption (..), start, startSelected, startOneMove, prioritizeProgress, frontier, step, stepWithDepth ) where
 
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
@@ -59,8 +59,8 @@ data Outcome s
   = Progress (Queue s) | Candidate (S.StateRef s) (Queue s)
   | Paused (Queue s) | DepthPaused (Queue s) | Interrupted Interruption (Queue s) | Exhausted
 
-start :: S.StateRef s -> Queue s
-start state = A.start $ SearchState state Nothing [] Nothing
+start :: S.StateRef s -> [Int] -> Queue s
+start state obligations = A.start $ SearchState state Nothing obligations Nothing
 
 startSelected :: S.StateRef s -> [Int] -> [Int] -> Queue s
 startSelected state selected allGoals = A.start $
@@ -72,6 +72,14 @@ startSelected state selected allGoals = A.start $
 startOneMove :: S.StateRef s -> Int -> [Int] -> Queue s
 startOneMove state selected allGoals = A.start $
   SearchState state (Just $ Set.singleton selected) allGoals (Just $ S.stateKey state)
+
+-- An inspect/apply pair costs two agenda steps. Estimate remaining work from
+-- native live obligations only; no type names, independence claim, pruning or
+-- fresh checking is involved. One-step search deliberately retains its order.
+prioritizeProgress :: Queue s -> Queue s
+prioritizeProgress = A.prioritize $ \(SearchState _ selected order stepParent) ->
+  if stepParent /= Nothing then 0 else 2 * fromIntegral
+    (length $ maybe order (\chosen -> filter (`Set.member` chosen) order) selected)
 
 frontier :: Queue s -> (Int, Maybe (S.StateRef s, Natural, Natural))
 frontier queue = (A.pending queue, fmap unwrap $ A.principal queue)

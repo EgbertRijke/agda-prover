@@ -396,11 +396,11 @@ still requires no interactions, open metas or constraints.
 evidence search. `ranker` is `nnue` or `symbolic`; model/native paths are explicit
 nullable paths. Models are loaded once for this run. `focused_search` is boolean
 and `exclude_names` is the existing list of forbidden premise names. The optional
-`scheduling` object has the first four required fields below and an optional
-`dependency_ordering` boolean (defaults shown):
+`scheduling` object has the first four required fields below and optional
+`dependency_ordering` and `progress_ordering` booleans (defaults shown):
 
 ```json
-{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true}
+{"structural_delay":2,"macro_delay":8,"initial_macro_work":64,"evidence_macro":true,"dependency_ordering":true,"progress_ordering":true}
 ```
 
 Delays are nonnegative scheduling priorities, not proof-depth restrictions.
@@ -409,6 +409,15 @@ feature flag for the coarse fallback; disabling it restricts the configured
 fragment and must not be confused with a general impossibility result.
 `dependency_ordering` enables the conservative read described below. It changes
 goal order, never the authorized selection or coupled-state semantics.
+`progress_ordering` orders branches by spent scheduling cost plus two units per
+remaining selected native interaction (one inspect/apply pair). It does not
+infer independence, remove obligations, rebate work or prune alternatives.
+The estimate is not an admissible proof-cost bound. Stable serial ties, finite
+alternative costs and increasing spent cost preserve fallback fairness. One-step
+search uses zero remaining-work estimate and keeps its previous ordering.
+The cost receipt records `ordering: cost-plus-obligations-v1`; disabling the
+switch records `cost-only-v1`. This is an internal native scheduling option,
+not a change to Python defaults or the public task's resource envelope.
 
 Success returns `status: ready`, `run`, `cost`, `proof_authority: false`.
 A run key has exactly `{session, epoch, run, revision}`; all counters are

@@ -29,7 +29,7 @@ data Settings = Settings
   -- Soft priorities, not cutoffs: structural and macro alternatives stay queued.
   , structuralDelay :: Natural, macroDelay :: Natural
   , initialMacroWork :: Natural, evidenceMacro :: Bool, actionLimit :: Maybe Integer
-  , dependencyOrdering :: Bool, depthLimit :: Maybe Natural }
+  , dependencyOrdering :: Bool, depthLimit :: Maybe Natural, progressOrdering :: Bool }
 
 data Metrics = Metrics
   { schedulerSteps :: !Integer, modelItems :: !Integer, modelNanoseconds :: !Integer
@@ -70,9 +70,9 @@ beginWithStep oneMove selection session state supplied trace accepted = S.pendin
     metrics <- newIORef $ Metrics 0 0 0 0 0 0 0
     owner <- newMVar ()
     let settings = if oneMove then supplied { evidenceMacro = False } else supplied
-        queue = case selection of
+        queue = (if progressOrdering settings then N.prioritizeProgress else id) $ case selection of
           Just points | oneMove -> N.startOneMove state (interactionId $ NE.head points) (pendingGoals pending)
-          _ -> maybe (N.start state)
+          _ -> maybe (N.start state $ pendingGoals pending)
             (\points -> N.startSelected state (map interactionId $ NE.toList points) (pendingGoals pending)) selection
         selected = maybe (pendingGoals pending) (map interactionId . NE.toList) selection
         refutationGoal = case selected of
@@ -112,6 +112,7 @@ cost (Run session settings _ baseline metrics _ _ _ _) = do
     "action_limit" .= actionLimit settings,
     "depth_limit" .= depthLimit settings, "depth_deferred" .= depthDeferred measured,
     "depth_unit" .= ("accepted-native-branch-transition" :: String),
+    "ordering" .= (if progressOrdering settings then "cost-plus-obligations-v1" else "cost-only-v1" :: String),
     "model_items_scored" .= modelItems measured, "model_elapsed_ns" .= modelNanoseconds measured,
     "models" .= P.modelIdentities (models settings), "session_cost" .= physical]
 
