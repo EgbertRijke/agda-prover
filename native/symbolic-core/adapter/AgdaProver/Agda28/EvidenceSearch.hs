@@ -633,6 +633,11 @@ primitiveTask options streaming excluded owner point target = do
                   pure $ Just (expression, closedType, shape, picked)
           _ -> pure Nothing
     let reusable = recursiveResults ++ contextualOperands
+    -- Generalization can expose leaves already inhabited by their contexts or
+    -- terminal constructors. Reuse the clause closer before yielding the draft
+    -- to broad application search. Keep both proposals: the complete one joins
+    -- the contextual handoff, while the open one remains an ordinary alternative.
+    -- Neither is accepted here; applying it still checks the source owner.
     generalized <- fmap catMaybes $ forM recursiveResults $ \(expression, ty, _, picked) ->
       nativeOperation $ \runtime -> Construction.preservingAllocations $ attempt runtime $ do
         proposal <- Helper.generalizeEvidence
@@ -644,7 +649,19 @@ primitiveTask options streaming excluded owner point target = do
             Helper.GenerateClauses -> s { checkerQueries = checkerQueries s + 1,
               helperClauseQueries = helperClauseQueries s + 1 }) forbidden point expression ty
         modify runtime $ \s -> s { helperProposals = helperProposals s + maybe 0 (const 1) proposal }
-        pure $ fmap (\draft -> (draft, picked)) proposal
+        completed <- case proposal of
+          Nothing -> pure Nothing
+          Just draft -> attempt runtime $ Just <$> ClauseExecution.closeDraft
+            (\step -> do
+              available <- charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1,
+                helperClauseQueries = helperClauseQueries s + case step of
+                  ClauseExecution.GenerateClauses -> 1
+                  _ -> 0 }
+              if available then pure () else genericError "native-helper-closure-allowance-spent")
+            (Construction.constructorClosures
+              (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }) forbidden)
+            point draft
+        pure $ fmap (\draft -> ((draft, picked), fmap (\closed -> (closed, picked)) completed)) proposal
     headSignatures <- forM ranked $ \(seed@(Seed expression _ _ _), picked) -> nativeOperation $ \runtime -> do
       observed <- localTCState $ attempt runtime $
         querySeed runtime seed $ \(value, ty) -> do
@@ -690,7 +707,7 @@ primitiveTask options streaming excluded owner point target = do
       modify runtime $ \s -> s { applicationProposals = applicationProposals s + fromIntegral (length proposals) }
       pure [(e, nub $ concat picked) | (e, picked) <- proposals]
     composed <- if not streaming then pure [] else service $ \runtime ->
-      rankPrimitive runtime target [(0, item) | item <- contextual]
+      rankPrimitive runtime target [(0, item) | item <- catMaybes (map snd generalized) ++ contextual]
     publishPrimitive streaming composed $ do
       heads <- fmap concat $ forM headSignatures $ \(expression, picked, observed) -> do
         let (result, infos, closedType, _) = maybe (Nothing, [], Nothing, Set.empty) id observed
@@ -770,13 +787,13 @@ primitiveTask options streaming excluded owner point target = do
           -- otherwise a datatype's constructor fields are scheduled as arbitrary
           -- eliminations, while the equivalent record fields get precedence.
           constructorHeads = [item | item@(expression, _) <- heads, constructorHead expression]
-          eliminationHeads = [item | item@(expression, _) <- heads, not $ constructorHead expression] ++ recursive ++ generalized
+          eliminationHeads = [item | item@(expression, _) <- heads, not $ constructorHead expression] ++ recursive ++ map fst generalized
           ordered = if Classification.constructionFirst classification
             then [(0, item) | item <- constructed ++ constructorHeads] ++ [(1, item) | item <- eliminationHeads]
-            else [(0, item) | item <- heads ++ recursive ++ generalized] ++ [(1, item) | item <- constructed]
+            else [(0, item) | item <- heads ++ recursive ++ map fst generalized] ++ [(1, item) | item <- constructed]
       result <- service $ \runtime -> rankPrimitive runtime target $
         [(0, item) | item <- ready, not streaming] ++
-        [(1, item) | item <- contextual, not streaming] ++
+        [(1, item) | item <- catMaybes (map snd generalized) ++ contextual, not streaming] ++
         [(tier + 2, item) | (tier, item) <- ordered]
       pure $ PrimitiveResult ((if streaming then [] else assignedProposals) ++ result) Nothing
 

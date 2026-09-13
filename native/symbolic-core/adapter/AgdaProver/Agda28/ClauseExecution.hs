@@ -1,7 +1,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.ClauseExecution (Intent (..), PreparationStep (..), prepare, prepareClosing, prepareAbstraction, registerDraft, patternLocals) where
+module AgdaProver.Agda28.ClauseExecution (Intent (..), PreparationStep (..), prepare, prepareClosing, closeDraft, prepareAbstraction, registerDraft, patternLocals) where
 
 import Control.Monad (forM, void, when)
 import Control.Monad.Except (catchError, throwError)
@@ -87,7 +87,7 @@ prepareTarget introduced chargeStep point action = withInteractionId point $ do
     _ -> prepareBody chargeStep point action
 
 -- The caller may add finite terminal inhabitants, but cannot accept them.
--- All leaves still require non-instantiating, constraint-free native checks.
+-- All leaves still require constraint-free checks with existing metas frozen.
 -- The ordinary ClosingSubjects action supplies no extra candidates.
 prepareClosing :: (PreparationStep -> TCM ()) -> (I.Type -> TCM [A.Expr])
                -> InteractionId -> NonEmpty Name -> TCM A.Expr
@@ -100,14 +100,32 @@ prepareClosing chargeStep terminal point chosen = trySubjects $ NE.toList chosen
   trySubjects [] = genericError "native-clause-no-local-closure"
   trySubjects (name:rest) = do
     before <- getTC
-    existing <- getInteractionPoints
     let probe = do
           draft <- prepare chargeStep point $ BoundSubjects (name :| [])
-          chargeStep CheckScaffold
-          void $ give_ False WithoutForce point Nothing draft
-          result <- traverseExpr (\case
-            A.QuestionMark _ child | child `notElem` existing ->
-              withInteractionId child $ do
+          result <- closeDraft chargeStep terminal point draft
+          restoreAllocations before
+          pure result
+    probe `catchError` \err -> case err of
+      TypeError{} -> restoreAllocations before >> trySubjects rest
+      PatternErr{} -> restoreAllocations before >> trySubjects rest
+      _ -> throwError err
+
+-- Close the freshly generated leaves of a native scaffold in their actual
+-- checked contexts. This is finite local/terminal reuse, not recursive search.
+-- Existing source holes cannot be consumed, and only allocation high-water
+-- marks survive the probe. The caller still checks the resulting whole draft.
+closeDraft :: (PreparationStep -> TCM ()) -> (I.Type -> TCM [A.Expr])
+           -> InteractionId -> A.Expr -> TCM A.Expr
+closeDraft chargeStep terminal point draft = do
+  before <- getTC
+  protected <- map fst <$> getInteractionIdsAndMetas
+  let probe = do
+        chargeStep CheckScaffold
+        void $ give_ False WithoutForce point Nothing draft
+        traverseExpr (\case
+          A.QuestionMark _ child
+            | child `elem` protected -> genericError "native-clause-existing-obligation"
+            | otherwise -> withInteractionId child $ do
                 target <- getMetaTypeInContext =<< lookupInteractionId child
                 context <- getContext
                 close target (map (A.Var . ctxEntryName) context) >>= \case
@@ -115,18 +133,18 @@ prepareClosing chargeStep terminal point chosen = trySubjects $ NE.toList chosen
                   Nothing -> terminal target >>= close target >>= \case
                     Just expression -> pure expression
                     Nothing -> genericError "native-clause-no-local-inhabitant"
-            expression -> pure expression) draft
-          restoreAllocations before
-          pure result
-    probe `catchError` \err -> case err of
-      TypeError{} -> restoreAllocations before >> trySubjects rest
-      PatternErr{} -> restoreAllocations before >> trySubjects rest
-      _ -> throwError err
+          expression -> pure expression) draft
+  result <- probe `catchError` \err -> restoreAllocations before >> throwError err
+  restoreAllocations before
+  pure result
+ where
   close _ [] = pure Nothing
   close target (expression:rest) = do
     chargeStep CheckContext
     found <- localTCState $ (do
-      term <- reallyNoConstraints $ dontAssignMetas $ checkExpr expression target
+      -- A constructor can require fresh inferred implicit arguments. Permit
+      -- those, but never solve an existing obligation to manufacture closure.
+      term <- reallyNoConstraints $ withFrozenMetas $ checkExpr expression target
       noMetas <$> instantiateFull term) `catchError` \err -> case err of
         TypeError{} -> pure False
         PatternErr{} -> pure False
