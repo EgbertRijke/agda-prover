@@ -1,14 +1,16 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.ClauseExecution (Intent (..), PreparationStep (..), prepare, prepareClosing, closeDraft, prepareAbstraction, registerDraft, patternLocals) where
+module AgdaProver.Agda28.ClauseExecution (Intent (..), PreparationStep (..), prepare, prepareClosing, closeDraft, completeDrafts, prepareAbstraction, registerDraft, patternLocals) where
 
-import Control.Monad (forM, void, when)
+import Control.Monad (filterM, forM, void, when)
 import Control.Monad.Except (catchError, throwError)
 import Data.List (elemIndex)
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Maybe (isNothing)
+import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 
 import Agda.Interaction.BasicOps (give_, parseExprIn)
 import Agda.Interaction.Base (UseForce (WithoutForce))
@@ -16,7 +18,7 @@ import Agda.Interaction.MakeCase (makeCase, parseVariables, recheckAbstractClaus
 import Agda.Syntax.Abstract qualified as A
 import Agda.Syntax.Abstract.Name (Name, nameConcrete, qualify)
 import Agda.Syntax.Abstract.Pattern (lhsToSpine)
-import Agda.Syntax.Abstract.Views (deepUnscope, traverseExpr)
+import Agda.Syntax.Abstract.Views (deepUnscope, foldExpr, traverseExpr)
 import Agda.Syntax.Common
 import Agda.Syntax.Common.Pretty (prettyShow)
 import Agda.Syntax.Concrete.Name qualified as C
@@ -116,40 +118,79 @@ prepareClosing chargeStep terminal point chosen = trySubjects $ NE.toList chosen
 -- marks survive the probe. The caller still checks the resulting whole draft.
 closeDraft :: (PreparationStep -> TCM ()) -> (I.Type -> TCM [A.Expr])
            -> InteractionId -> A.Expr -> TCM A.Expr
-closeDraft chargeStep terminal point draft = do
+closeDraft chargeStep terminal point draft = withPreparedDraft chargeStep point draft $ \protected ->
+  traverseExpr (\case
+    A.QuestionMark _ child
+      | child `elem` protected -> genericError "native-clause-existing-obligation"
+      | otherwise -> withInteractionId child $ do
+          target <- getMetaTypeInContext =<< lookupInteractionId child
+          context <- getContext
+          close target (map (A.Var . ctxEntryName) context) >>= \case
+            Just expression -> pure expression
+            Nothing -> terminal target >>= close target >>= \case
+              Just expression -> pure expression
+              Nothing -> genericError "native-clause-no-local-inhabitant"
+    expression -> pure expression) draft
+ where
+  close _ [] = pure Nothing
+  close target (expression:rest) = do
+    found <- closedInhabitant chargeStep target expression
+    if found then pure $ Just expression else close target rest
+
+-- Assemble finite, independently checked leaf alternatives into whole drafts.
+-- Frozen sibling metas ensure that a leaf cannot choose another leaf's type.
+-- The caller supplies the proposal inventory; ordinary open clauses remain a
+-- separate alternative. Check the completed draft again at the real parent.
+completeDrafts :: (PreparationStep -> TCM ())
+               -> (InteractionId -> I.Type -> TCM [(A.Expr, a)])
+               -> InteractionId -> A.Expr -> TCM [(A.Expr, [a])]
+completeDrafts chargeStep candidates point draft = withPreparedDraft chargeStep point draft $ \protected -> do
+  let points = Set.toAscList $ foldExpr (\case
+        A.QuestionMark _ child -> Set.singleton child
+        _ -> Set.empty) draft
+      hasQuestions = not . Set.null . foldExpr (\case
+        A.QuestionMark _ child -> Set.singleton child
+        _ -> Set.empty)
+  alternatives <- forM points $ \child ->
+    if child `elem` protected then genericError "native-clause-existing-obligation"
+    else withInteractionId child $ do
+      target <- getMetaTypeInContext =<< lookupInteractionId child
+      proposed <- candidates child target
+      accepted <- filterM (\(expression, _) ->
+        if hasQuestions expression then pure False else closedInhabitant chargeStep target expression) proposed
+      pure [(child, expression, evidence) | (expression, evidence) <- accepted]
+  forM (sequence alternatives) $ \selected -> do
+    chargeStep CheckScaffold
+    let replacements = Map.fromList [(child, expression) | (child, expression, _) <- selected]
+    completed <- traverseExpr (\case
+      expression@(A.QuestionMark _ child) -> pure $ Map.findWithDefault expression child replacements
+      expression -> pure expression) draft
+    pure (completed, [evidence | (_, _, evidence) <- selected])
+
+withPreparedDraft :: (PreparationStep -> TCM ()) -> InteractionId -> A.Expr
+                  -> ([InteractionId] -> TCM a) -> TCM a
+withPreparedDraft chargeStep point draft action = do
   before <- getTC
   protected <- map fst <$> getInteractionIdsAndMetas
   let probe = do
         chargeStep CheckScaffold
         void $ give_ False WithoutForce point Nothing draft
-        traverseExpr (\case
-          A.QuestionMark _ child
-            | child `elem` protected -> genericError "native-clause-existing-obligation"
-            | otherwise -> withInteractionId child $ do
-                target <- getMetaTypeInContext =<< lookupInteractionId child
-                context <- getContext
-                close target (map (A.Var . ctxEntryName) context) >>= \case
-                  Just expression -> pure expression
-                  Nothing -> terminal target >>= close target >>= \case
-                    Just expression -> pure expression
-                    Nothing -> genericError "native-clause-no-local-inhabitant"
-          expression -> pure expression) draft
+        action protected
   result <- probe `catchError` \err -> restoreAllocations before >> throwError err
   restoreAllocations before
   pure result
- where
-  close _ [] = pure Nothing
-  close target (expression:rest) = do
-    chargeStep CheckContext
-    found <- localTCState $ (do
-      -- A constructor can require fresh inferred implicit arguments. Permit
-      -- those, but never solve an existing obligation to manufacture closure.
-      term <- reallyNoConstraints $ withFrozenMetas $ checkExpr expression target
-      noMetas <$> instantiateFull term) `catchError` \err -> case err of
-        TypeError{} -> pure False
-        PatternErr{} -> pure False
-        _ -> throwError err
-    if found then pure $ Just expression else close target rest
+
+closedInhabitant :: (PreparationStep -> TCM ()) -> I.Type -> A.Expr -> TCM Bool
+closedInhabitant chargeStep target expression = do
+  chargeStep CheckContext
+  localTCState $ (do
+    -- A constructor can require fresh inferred implicit arguments. Permit
+    -- those, but never solve an existing obligation to manufacture closure.
+    term <- reallyNoConstraints $ withFrozenMetas $ checkExpr expression target
+    noMetas <$> instantiateFull term) `catchError` \err -> case err of
+      TypeError{} -> pure False
+      PatternErr{} -> pure False
+      _ -> throwError err
 
 prepareBody :: (PreparationStep -> TCM ()) -> InteractionId -> Intent -> TCM A.Expr
 prepareBody chargeStep point (ClosingSubjects chosen) =

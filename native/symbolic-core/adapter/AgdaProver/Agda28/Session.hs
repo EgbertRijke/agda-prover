@@ -18,7 +18,7 @@ module AgdaProver.Agda28.Session
   , ClauseProposal, makeClauses, clauseView, applyClause
   , reconstructGoal, reconstructGoals, exportGoals
   , RetainedGoal, retainGoal, applyRetainedGoal, retainedGoalOrigin
-  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, preferStructures, withoutResultIntroductionOverlap, proposeTerms, proposeTermsWithOptions, proposeLocalClosures, proposeStructures, proposeEquations, proposeConstructors, proposePropagation, applyTerm
+  , TermProposal, TermProposals (..), termProposalGoal, termProposalChoices, preferStructures, withoutResultIntroductionOverlap, proposeTerms, proposeTermsWithOptions, proposeLocalClosures, proposeStructures, proposeStructuresWithOptions, proposeEquations, proposeConstructors, proposePropagation, applyTerm
   , TermPreparation, prepareTermsSlice, resumeTermsSlice
   , ClauseMove, clauseMoveGoal, clauseMoveIsBatch, applyClauseMove, ClauseProposals (..), proposeClauseActions
   , HelperProposal, inferHelper, helperView
@@ -726,7 +726,13 @@ runTermPreparation session goal previous limits native emit beginTask = do
 proposeStructures :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
                   -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())
                   -> IO (Search.SearchStats, Either Failure (TermProposals s))
-proposeStructures = proposeTermsUsing Search.structuralProposals
+proposeStructures = proposeStructuresWithOptions Search.defaultPrimitiveOptions
+
+proposeStructuresWithOptions :: Search.PrimitiveOptions -> Session s -> GoalRef s -> Search.SearchLimits
+                             -> Policy.Models -> Policy.RankingMode -> Maybe (NativeScorer n)
+                             -> [String] -> (Value -> IO ())
+                             -> IO (Search.SearchStats, Either Failure (TermProposals s))
+proposeStructuresWithOptions options = proposeTermsUsing $ Search.structuralProposals options
 
 proposeLocalClosures :: Session s -> GoalRef s -> Search.SearchLimits -> Policy.Models
                     -> Policy.RankingMode -> Maybe (NativeScorer n) -> [String] -> (Value -> IO ())

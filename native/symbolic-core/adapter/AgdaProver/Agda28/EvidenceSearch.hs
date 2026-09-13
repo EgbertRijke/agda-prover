@@ -59,6 +59,7 @@ import AgdaProver.Agda28.SearchTask qualified as Task
 import AgdaProver.Agda28.ObservedEquations qualified as ObservedEquations
 import AgdaProver.Agda28.Observation (openInteractionPoints)
 import AgdaProver.Agda28.Recursion qualified as Recursion
+import AgdaProver.Agda28.RecursivePrograms qualified as RecursivePrograms
 import AgdaProver.Agda28.Scheduling qualified as Scheduling
 import AgdaProver.Agda28.PolicyViews qualified as PolicyViews
 import AgdaProver.Agda28.Focused qualified as NativeFocused
@@ -816,15 +817,41 @@ rankPrimitive runtime@(Runtime _ _ _ models mode _ _ _ _) target entries
 
 -- Compound introductions are a whole-search operation, separate from the
 -- ordinary one-step catalogue and the cheap later-goal closure probe.
-structuralProposals :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
+structuralProposals :: PrimitiveOptions -> IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
                     -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> [String]
                     -> Maybe Recursion.Owner -> InteractionId -> I.Type
                     -> TCM [(A.Expr, [(T.Text, T.Text)])]
-structuralProposals stats limits models mode native emit namespace excluded owner point target = do
+structuralProposals options stats limits models mode native emit namespace excluded owner point target = do
   pruned <- liftIO $ newIORef False
   let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
-  (forbiddenHere, _) <- excludedGlobals excluded
+  (forbiddenHere, userExcluded) <- excludedGlobals excluded
   inherited <- maybe (pure Set.empty) Recursion.ownerGroup owner
+  let forbidden = Set.union forbiddenHere inherited
+      clauseStep step = do
+        available <- charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1,
+          helperClauseQueries = helperClauseQueries s + case step of
+            ClauseExecution.GenerateClauses -> 1
+            _ -> 0 }
+        if available then pure () else genericError "native-construction-allowance-spent"
+  programs <- if not (recursiveEvidenceOperands options) then pure [] else case owner of
+    Just root | Set.notMember (Recursion.ownerName root) userExcluded -> do
+      found <- attempt runtime $ do
+        available <- charge runtime $ \s -> s { recursiveContextQueries = recursiveContextQueries s + 1 }
+        if not available then pure Nothing else do
+          variable <- lookupLocalMeta =<< lookupInteractionId point
+          case mvInstantiation variable of
+            InstV{} -> pure Nothing
+            _ -> do
+              context <- Recursion.inspect point root
+              if not (isNothing context) then pure Nothing else
+                Just <$> RecursivePrograms.propose
+                  (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
+                  clauseStep
+                  (primitiveProposals options stats limits models mode native emit namespace excluded owner)
+                  forbidden root target
+      pure [(expression, nub $ concat picked) | (expression, picked) <- maybe [] id found]
+    _ -> pure []
+  modify runtime $ \s -> s { recursiveProposals = recursiveProposals s + fromIntegral (length programs) }
   proposal <- attempt runtime $ do
     allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
     if not allowed then pure Nothing else do
@@ -836,14 +863,8 @@ structuralProposals stats limits models mode native emit namespace excluded owne
         _ -> Construction.constructionScaffold
           (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
           (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 })
-          (\step -> do
-            available <- charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1,
-              helperClauseQueries = helperClauseQueries s + case step of
-                ClauseExecution.GenerateClauses -> 1
-                _ -> 0 }
-            if available then pure () else genericError "native-construction-allowance-spent")
-          (Set.union forbiddenHere inherited) target
-  pure [(expression, []) | expression <- maybe [] pure proposal]
+          clauseStep forbidden target
+  pure $ programs ++ [(expression, []) | expression <- maybe [] pure proposal]
 
 -- Typed clause candidates from selected later statements. They remain drafts;
 -- source-owner termination and all subsequent goals still require checking.

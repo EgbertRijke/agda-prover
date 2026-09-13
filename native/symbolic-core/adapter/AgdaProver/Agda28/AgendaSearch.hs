@@ -174,6 +174,10 @@ advance native count run@(Run session settings initial baseline metrics owner tr
     pure $ fmap (\limit -> max 0 $ limit - steps - nativeWork physical + baseline) $
       E.workUnitLimit $ limits settings
   moveAllowance = E.SearchLimits . fmap (max 1) <$> allowance
+  operands = E.PrimitiveOptions
+    { E.goalFunctionOperands = targetFunctionOperands settings
+    , E.recursiveEvidenceOperands = recursiveEvidenceOperands settings
+    , E.contextualEvidence = contextualEvidence settings }
   recordSearch stats = modifyIORef' metrics $ \m -> m
     { modelItems = modelItems m + E.modelItems stats
     , modelNanoseconds = modelNanoseconds m + E.modelNanoseconds stats }
@@ -219,17 +223,13 @@ advance native count run@(Run session settings initial baseline metrics owner tr
             (if null reused then 0 else 1)]
       Right goal -> do
         budget <- moveAllowance
-        let operands = E.PrimitiveOptions
-              { E.goalFunctionOperands = targetFunctionOperands settings
-              , E.recursiveEvidenceOperands = recursiveEvidenceOperands settings
-              , E.contextualEvidence = contextualEvidence settings }
         (termCost, atomicTerms) <- S.proposeTermsWithOptions operands session goal budget (models settings)
           (ranking settings) native (excluded settings) trace
         recordSearch termCost
         constructedTerms <- case atomicTerms of
           Right (S.CompleteTerms originals) | evidenceMacro settings -> do
             compoundBudget <- moveAllowance
-            (compoundCost, structures) <- S.proposeStructures session goal compoundBudget (models settings)
+            (compoundCost, structures) <- S.proposeStructuresWithOptions operands session goal compoundBudget (models settings)
               (ranking settings) native (excluded settings) trace
             recordSearch compoundCost
             pure $ case structures of
@@ -304,10 +304,6 @@ advance native count run@(Run session settings initial baseline metrics owner tr
           left <- allowance
           if left == Just 0 then pure $ Right N.PlanningCensored else do
             let budget = E.SearchLimits $ Just $ maybe (toInteger quantum) (min $ toInteger quantum) left
-                operands = E.PrimitiveOptions
-                  { E.goalFunctionOperands = targetFunctionOperands settings
-                  , E.recursiveEvidenceOperands = recursiveEvidenceOperands settings
-                  , E.contextualEvidence = contextualEvidence settings }
             (stats, result) <- case remaining of
               Nothing -> S.prepareTermsSlice operands session goal budget (models settings)
                 (ranking settings) native (excluded settings) trace
@@ -365,7 +361,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
             (\budget -> S.proposePropagation session later budget (models settings)
               (ranking settings) native (excluded settings) trace) $
             continue (N.PreparePropagation rest) . termMoves
-      N.PrepareStructures -> publish (generated S.proposeStructures) $ \terms ->
+      N.PrepareStructures -> publish (generated $ S.proposeStructuresWithOptions operands) $ \terms ->
         continue (N.PrepareTerms terms) $ termMoves terms
       N.PrepareTerms structures -> prepareTerms structures [] (max 1 $ initialMacroWork settings) Nothing
       N.PrepareMoreTerms structures published quantum cursor ->
