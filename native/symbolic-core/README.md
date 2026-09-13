@@ -455,9 +455,22 @@ an available lemma. Scoped functions and locals use the same path. Leading
 hidden arguments are inferred by Agda, while trailing hidden binders remain
 available for later expected-type inference. The shortcut requires a positive
 native domain-shape match; unknown matches retain ordinary application search.
+It completes the remaining telescope using that fixed operand inventory, so
+later operands can determine indices left unresolved by an earlier operand.
+Closed partial calls remain alternatives; unresolved intermediate types never
+escape the speculative branch. Results do not enlarge the operand inventory.
 It does not eagerly guess implicit carrier/type arguments or recursively
 saturate the inventory. Recursive-result generalization retains its existing
 separate descent checks.
+
+Contextual composition also recognizes supplied operations that carry an edge
+through a fixed application context. They need not accept an arbitrary mapping
+function. Agda checks the supplied edge at its actual telescope position and
+infers all other operands from the requested result; an unresolved additional
+premise prevents this shortcut. Hidden proof arguments survive reification.
+This is signature-directed application over native syntax, not a distinguished
+identity-type or function-name rule. Missing mapping, inverse or composition
+evidence remains missing; ordinary search retains all alternatives.
 
 Known complete inhabitants are checked before unconstrained refinements of
 their heads, preserving NNUE order within each class. The readiness probe

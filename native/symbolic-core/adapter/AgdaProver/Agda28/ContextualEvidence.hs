@@ -26,7 +26,7 @@ import Agda.Syntax.Scope.Base (isNameInScope)
 import Agda.Syntax.Translation.InternalToAbstract (reify)
 import Agda.TypeChecking.Constraints (noConstraints)
 import Agda.TypeChecking.CheckInternal qualified as Internal
-import Agda.TypeChecking.Conversion (compareTerm)
+import Agda.TypeChecking.Conversion (compareTerm, compareType)
 import Agda.TypeChecking.Free (allFreeVars)
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.ProjectionLike (elimView, ProjEliminator (EvenLone))
@@ -125,6 +125,61 @@ replaceAt (i:path) value term = do
       pure $ rebuild $ take i args ++ I.Apply (argument { unArg = changed }) : rest
     _ -> Nothing
 
+-- A supplied operation may map an edge through a fixed context without
+-- accepting an arbitrary function. Retain its native telescope positions:
+-- fixed operands can precede/follow the edge, with hidden binders anywhere.
+-- This is only structural scheduling evidence; application below must infer
+-- every remaining operand and check the complete result in Agda.
+mappingPositions :: TCM Bool -> I.Type -> TCM [Int]
+mappingPositions inspect = go []
+ where
+  go domains ty = inspect >>= \allowed ->
+    if not allowed then pure [] else reduce ty >>= \case
+      I.El _ (I.Pi domain body) -> underAbstractionAbs domain body $ go (domain:domains)
+      -- An already applied fact has no input to carry. Avoid normalizing its
+      -- potentially large endpoints merely to discover an empty telescope.
+      _ | null domains -> pure []
+      I.El _ raw -> do
+        term <- contextView inspect raw
+        case Algebra.binary term of
+          Nothing -> pure []
+          Just (_, left, right) -> fmap concat $ forM (zip [0..] domains) $ \(index, domain) -> do
+            available <- inspect
+            if not available || not (usableModality domain) then pure [] else do
+              I.El _ input <- reduce $ raise (index+1) $ I.unDom domain
+              pure [length domains - index - 1
+                | Just (_, a, b) <- [Algebra.binary input], a /= b
+                , any (\(path, value) -> value == a && replaceAt path b left == Just right) $ sites left]
+
+instantiateMapping :: TCM Bool -> TCM Bool -> Int -> A.Expr -> A.Expr -> I.Type
+                   -> TCM (Maybe A.Expr)
+instantiateMapping inspect check position expression edge target =
+  Construction.preservingAllocations $ attempt $ do
+    allowed <- inspect
+    if not allowed then pure Nothing else do
+      (value, ty) <- inferExpr' DontExpandLast expression
+      fill 0 value ty
+ where
+  fill index value ty = inspect >>= \available ->
+    if not available then pure Nothing else reduce ty >>= \case
+      I.El _ (I.Pi domain body) -> do
+        argument <- if index == position then pure edge else Construction.omittedField $ getHiding domain
+        allowed <- check
+        if not allowed then pure Nothing else do
+          operand <- checkExpr argument $ I.unDom domain
+          fill (index+1) (apply value [Arg (getArgInfo domain) operand]) $ absApp body operand
+      result | index > position -> do
+        allowed <- check
+        if not allowed then pure Nothing else do
+          noConstraints $ compareType CmpEq result target
+          closed <- instantiateFull value
+          closedType <- instantiateFull result
+          -- Hidden evidence may not be inferable from the result type. Retain
+          -- the complete checked spine, not the display view that omits it.
+          if noMetas closed && noMetas closedType
+            then Just <$> withShowAllArguments (reify closed) else pure Nothing
+      _ -> pure Nothing
+
 attempt :: TCM (Maybe a) -> TCM (Maybe a)
 attempt action = action `catchError` \case
   TypeError{} -> pure Nothing
@@ -192,7 +247,7 @@ instantiate inspect check side expression source = Construction.preservingAlloca
                     closed <- instantiateFull value
                     closedType <- contextType inspect =<< instantiateFull result
                     if noMetas closed && noMetas closedType
-                      then (\e -> Just (e, closedType)) <$> reify closed else pure Nothing
+                      then (\e -> Just (e, closedType)) <$> withShowAllArguments (reify closed) else pure Nothing
   endpointDomain :: Side -> I.Type -> I.Term -> TCM (Maybe I.Type)
   endpointDomain selected ty left = reduce ty >>= \case
     I.El _ (I.Pi domain body) -> case selected of
@@ -226,8 +281,12 @@ propose excluded observe inspect check supplied seeds = do
           let maps = [(e,p) | (e,p,Just Algebra.Congruence) <- roles]
               joins = [(e,p) | (e,p,Just Algebra.Transitivity) <- roles]
               inverses = [(e,p) | (e,p,Just Algebra.Symmetry) <- roles]
-          observe $ Inventory (length seeds) (length maps) (length joins)
-          templates <- if null maps && null joins && null inverses then pure [] else fmap catMaybes $
+          fixedMaps <- fmap catMaybes $ forM seeds $ \(expression, ty, provenance) -> do
+            observed <- Construction.preservingAllocations $ attempt $ Just <$> mappingPositions inspect ty
+            let positions = maybe [] id observed
+            pure $ if null positions then Nothing else Just (expression, positions, provenance)
+          observe $ Inventory (length seeds) (length maps + length fixedMaps) (length joins)
+          templates <- if null maps && null fixedMaps && null joins && null inverses then pure [] else fmap catMaybes $
             forM [(seed, side) | seed <- seeds, side <- [Source, Destination]] $ \(seed@(_, ty, _), side) -> do
               shape <- Construction.preservingAllocations $ attempt $ template inspect side ty
               pure $ fmap (\form -> (seed, side, form)) shape
@@ -274,19 +333,24 @@ propose excluded observe inspect check supplied seeds = do
                           next <- traverse (contextView inspect) changed
                           if not (maybe False (\t -> t == destination || I.termSize t < I.termSize current) next)
                             then pure [] else do
+                              let edgeType = I.El (I.getSort target) $
+                                    apply relation [defaultArg current, defaultArg $ maybe current id next]
                               lifted <- if null path then pure [(oriented, [])] else
                                 case replaceAt path (I.Var 0 []) $ raise 1 current of
                                   Nothing -> pure []
                                   Just body -> do
                                     context <- reify $ I.Lam defaultArgInfo $ I.Abs "value" body
-                                    pure [(app lift [context, oriented], [p]) | (lift,p) <- maps]
+                                    specialized <- fmap catMaybes $ forM
+                                      [(lift, position, p) | (lift, positions, p) <- fixedMaps, position <- positions] $
+                                      \(lift, position, p) -> do
+                                        result <- instantiateMapping inspect check position lift oriented edgeType
+                                        pure $ fmap (\term -> (term, [p])) result
+                                    pure $ [(app lift [context, oriented], [p]) | (lift,p) <- maps] ++ specialized
                               fmap concat $ forM lifted $ \(edge, picked) ->
                                 Construction.preservingAllocations $ attemptList $ do
                                   allowed <- check
                                   scoped <- if allowed then replayable excluded edge else pure False
                                   if not scoped then pure [] else do
-                                    let edgeType = I.El (I.getSort target) $
-                                          apply relation [defaultArg current, defaultArg $ maybe current id next]
                                     checkedEdge <- checkExpr edge edgeType
                                     closedEdge <- instantiateFull checkedEdge
                                     edgeNormal <- contextType inspect =<< instantiateFull edgeType

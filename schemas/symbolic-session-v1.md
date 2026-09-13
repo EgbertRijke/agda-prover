@@ -657,6 +657,22 @@ carriers and endpoints remain inferred, not guessed from a pool of types.
 Partial applications retain trailing hidden binders. Unknown matches and
 incomplete applications keep ordinary refinement/AND alternatives. This is
 one inventory handoff, not recursive forward saturation or cross-state caching.
+The eager application path can consume multiple available operands along the
+remaining native telescope, including when a later operand determines hidden
+indices of an earlier one. Closed partial calls remain available, but temporary
+metas/types do not escape the speculative branch. Results never feed back into
+the fixed operand pool, and every inference is charged. The disabled option
+retains the preceding single-operand projection specialization.
+
+Besides universal mapping-function schemas, contextual evidence recognizes
+supplied operations whose input relation endpoints occur in the same native
+application context at the output. It retains the actual telescope position,
+including hidden binders. For a requested edge, Agda checks the supplied proof
+there and infers remaining arguments against the full requested type. Only a
+closed result is proposed: an unresolved extra premise is not assumed.
+Scoped reification retains all hidden arguments, including proof arguments that
+cannot be inferred from the output type. Other ordinary applications remain
+available when this structural accelerator cannot complete the call.
 
 The same switch enables readiness ordering of known complete inhabitants
 before unconstrained head refinements. Agda checks them with existing metas
@@ -691,7 +707,9 @@ the source-owner checker, reconstruction and fresh independent validation.
 The agenda cost reports the switch. Generic observer events use
 `agdaprover.contextual-evidence-observation.v1`, a `goal_id`, and stages
 `inventory`, `matched`, `grounded`, `lifted`, `drafted`, or `completed`.
-Inventory adds `sources`, `mapping_laws`, and `composition_laws` counts.
+Inventory adds `sources`, `mapping_laws`, and `composition_laws` counts. Mapping
+counts include supplied fixed-context operations as well as universal mapping
+schemas; they are not a declaration that the relation has unrestricted congruence.
 These describe proposal generation, not accepted or verified proofs; diagnostics
 and benchmark interpretation remain outside the runtime generator.
 

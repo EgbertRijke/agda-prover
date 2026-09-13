@@ -1163,40 +1163,42 @@ describe runtime origin expression = do
         pure $ Just (display, Nothing)
   pure $ uncurry (Seed expression origin) $ maybe ("unknown", Nothing) id info
 
--- Specialize every authorized function head by one already available operand,
--- not just function-valued record projections. This is an inventory handoff,
--- not recursive forward saturation: residual applications remain ordinary
--- search choices. Native rigid shapes avoid known-incompatible pairs; Agda
--- infers hidden arguments and decides all dependent compatibility. Only the
--- abstract expression escapes speculation, never a type obtained by assigning
--- branch-local metas. Keeping trailing hidden binders is essential for partial
--- applications whose endpoints will be inferred from a subsequent goal.
+-- Specialize authorized heads using the fixed inventory of available operands.
+-- Keep closed partial applications and continue their remaining telescope;
+-- an early operand can leave hidden indices for a later operand to determine.
+-- Intermediate results do not enlarge the operand pool, so this is telescope
+-- completion, not recursive forward saturation. Native shapes avoid known-
+-- incompatible pairs, and every inference is charged. Only closed abstract
+-- proposals escape the branch, never its unresolved types or assignments.
 -- Non-projection heads require a positive shape match for eager specialization;
 -- unknown domains remain available to ordinary expected-type application.
-contextualApplications :: Runtime s -> [Seed] -> [Seed] -> TCM [(String, A.Expr)]
-contextualApplications runtime operands seeds = do
+contextualApplications :: Bool -> Runtime s -> [Seed] -> [Seed] -> TCM [(String, A.Expr)]
+contextualApplications complete runtime operands seeds = do
   arguments <- forM operands $ \seed@(Seed expression _ _ _) -> do
     shape <- localTCState $ attempt runtime $ do
       querySeed runtime seed $ \(_, ty) -> do
         allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
         if allowed then Just <$> (reduce ty >>= outerShape 0) else pure Nothing
     pure (expression, maybe Nothing id shape)
-  fmap concat $ forM seeds $ \seed@(Seed function origin _ _) -> do
-    domain <- localTCState $ attempt runtime $
-      querySeed runtime seed $ \(_, ty) -> firstVisibleDomain 0 ty
-    case domain of
-      Nothing -> pure []
-      Just expected -> fmap catMaybes $ forM arguments $ \(argument, offered) ->
-        if not (compatibleShape expected offered) ||
-            origin /= "projected-field" && (isNothing expected || isNothing offered) then pure Nothing
-        else localTCState $ attempt runtime $ do
-          let expression = A.app function [defaultArg $ unnamed argument]
-          modify runtime $ \s -> s { applicationProposals = applicationProposals s + 1 }
-          queryInferWith DontExpandLast runtime expression $ \(value, ty) -> do
-            completeValue <- instantiateFull value
-            completeType <- instantiateFull ty
-            pure $ if noMetas completeValue && noMetas completeType
-              then Just (if origin == "projected-field" then origin else origin ++ "-application", expression) else Nothing
+  let extend origin function ty = do
+        domain <- firstVisibleDomain 0 ty
+        case domain of
+          Nothing -> pure []
+          Just expected -> fmap (concat . catMaybes) $ forM arguments $ \(argument, offered) ->
+            if not (compatibleShape expected offered) ||
+                origin /= "projected-field" && (isNothing expected || isNothing offered) then pure Nothing
+            else localTCState $ attempt runtime $ do
+              let expression = A.app function [defaultArg $ unnamed argument]
+              modify runtime $ \s -> s { applicationProposals = applicationProposals s + 1 }
+              queryInferWith DontExpandLast runtime expression $ \(value, result) -> do
+                completeValue <- instantiateFull value
+                completeType <- instantiateFull result
+                suffix <- if complete then extend origin expression result else pure []
+                let label = if origin == "projected-field" then origin else origin ++ "-application"
+                pure $ Just $ [(label, expression) | noMetas completeValue && noMetas completeType] ++ suffix
+  fmap (concat . catMaybes) $ forM seeds $ \seed@(Seed function origin _ _) ->
+    localTCState $ attempt runtime $ querySeed runtime seed $ \(_, ty) ->
+      Just <$> extend origin function ty
  where
   firstVisibleDomain introduced ty = do
     allowed <- charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }
@@ -1222,7 +1224,7 @@ rankSeeds specializeHeads runtime classification target globals = do
     [("local", expression) | expression <- locals]
     ++ [("projected-field", expression) | expression <- projections]
     ++ [("visible", expression) | expression <- globals, expression `notElem` locals]
-  applied <- contextualApplications runtime
+  applied <- contextualApplications specializeHeads runtime
     [seed | seed@(Seed _ origin _ _) <- seeds,
       origin == "local" || specializeHeads && origin == "projected-field"]
     [seed | seed@(Seed _ origin _ _) <- seeds, specializeHeads || origin == "projected-field"]
