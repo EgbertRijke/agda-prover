@@ -220,7 +220,13 @@ spine-construction work or alter proof authority.
 
 `recursive_evidence_operands` additionally offers closed native recursive
 results as application operands, optionally together with one goal-mentioned
-function. Both proposal sources retain their existing NNUE provenance. Before
+function. Recursive calls can also complete their visible telescope using the
+fixed typed local operand inventory, retaining alternative arguments of the
+same type. This supplies intermediate recursive evidence when the final goal
+cannot infer its arguments. Only fully applied calls containing an observed
+descendant (or an authorized copattern call) enter this lane; partial calls and
+generated results do not enlarge that inventory. Both proposal sources retain
+their existing NNUE provenance. Before
 offering these compositions, Agda must determine all remaining operand types
 without extra unification metas or blocked constraints. Ordinary applications
 are retained when that condition is not met. This controls speculative fan-out;

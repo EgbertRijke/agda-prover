@@ -790,10 +790,16 @@ raising the allowance never erases already spent work.
 recursive-call generator to the application catalogue. Agda infers a proposed
 recursive value and its type inside rollback; only closed native syntax is
 retained, excluding inference that introduces extended-lambda helper
-declarations. Native domain shapes exclude only rigid mismatches, never compare
+declarations. Alongside expected-result completion, the shared typed application
+producer can fill a recursive call from the fixed local operand inventory.
+Complete descendant-bearing calls supply intermediate evidence even when their
+result differs from the final goal; ambiguous local arguments remain distinct
+proposals. The inventory is not extended with these results, and the existing
+owner-group termination check still governs their eventual use. Native domain
+shapes exclude only rigid mismatches, never compare
 printed types. A recursive value may fill one consumer slot, optionally paired
 with one independently authorized goal-mentioned function in another slot.
-It is not an unbounded saturation or enumeration of all operand combinations.
+These results do not grow the local operand inventory or recursively saturate it.
 
 The same option offers a generalized elimination of closed recursive evidence
 in an indexed single-constructor datatype. Agda's with-abstraction supplies the

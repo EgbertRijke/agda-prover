@@ -574,7 +574,23 @@ primitiveTask options streaming excluded owner point target = do
           Construction.completeLocalOperands
             (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 })
             (charge runtime $ \s -> s { checkerQueries = checkerQueries s + 1 }) expression target
-        let proposals = nub $ completed ++ expressions
+        -- Recursive evidence may be needed under a surrounding application,
+        -- where the final goal cannot infer the call's unchanged arguments.
+        -- Reuse the fixed, typed local operand inventory instead of relying
+        -- solely on target-directed hole completion. The head stays sealed:
+        -- only complete spines containing an observed descendant escape, and
+        -- applying any proposal still checks the owner's termination group.
+        grounded <- if not (recursiveEvidenceOperands options) then pure [] else
+          nativeOperation $ \runtime -> do
+            seed <- describe runtime "recursive" $ Recursion.callHead context
+            candidates <- contextualApplications True runtime
+              [local | (local@(Seed _ origin _ _), _) <- ranked, origin == "local"] [seed]
+            let arity = maybe 0 (length . filter (visible . argumentInfo) . snd . fst) observed
+            pure [expression | (_, expression) <- candidates,
+              let Application _ arguments' = appView expression,
+              length (filter visible arguments') == arity,
+              Recursion.eligibleCall context expression]
+        let proposals = nub $ grounded ++ completed ++ expressions
         modifyS $ \s -> s { recursiveProposals = recursiveProposals s + fromIntegral (length proposals),
           copatternProposals = copatternProposals s +
             if Recursion.copatternCall context then fromIntegral (length proposals) else 0 }
