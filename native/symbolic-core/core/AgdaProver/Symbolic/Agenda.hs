@@ -5,7 +5,7 @@
 -- adapter alone observes, checks and reconstructs them.
 module AgdaProver.Symbolic.Agenda
   ( Agenda, Proposal (..), Inspection (..), Transition (..), Outcome (..)
-  , Event (..), Hooks (..), rankedProposals, dependentFirst, start, prioritize, pending, principal, step, stepWithDepth ) where
+  , Event (..), Hooks (..), rankedProposals, dependentFirst, start, prioritize, localize, pending, principal, step, stepWithDepth ) where
 
 import Data.Map.Strict qualified as Map
 import Data.List (foldl')
@@ -91,10 +91,20 @@ data Work state action continuation
 -- permanently starve a finite-cost alternative in this finitely branching queue.
 -- Keep spent scheduling cost separate from the nonnegative estimate. The
 -- estimate orders work; it never rebates actual work or authorizes pruning.
-type Entries state action continuation =
-  Map.Map (Natural, Integer) (Natural, Work state action continuation)
-data Agenda state action continuation = Agenda Integer (state -> Natural)
-  (Entries state action continuation) (Entries state action continuation) (Maybe Natural)
+type Priority = (Natural, Integer)
+type Scope = (Natural, Integer)
+type Entry state action continuation = (Natural, Scope, Work state action continuation)
+type Entries state action continuation = Map.Map Priority (Entry state action continuation)
+type FocusPriority = (Natural, Integer, Natural, Integer)
+data Agenda state action continuation = Agenda
+  { nextSerial :: Integer
+  , estimateCost :: state -> Natural
+  , activeEntries :: Entries state action continuation
+  , heldEntries :: Entries state action continuation
+  , heldDepth :: Maybe Natural
+  , entryOrder :: Maybe (state -> Natural)
+  , focusedEntries :: Map.Map FocusPriority Priority
+  , focusTurn :: Bool }
 
 data Outcome state action continuation result
   = Progress (Agenda state action continuation)
@@ -104,16 +114,52 @@ data Outcome state action continuation result
   | Exhausted
 
 start :: state -> Agenda state action continuation
-start state = insert 0 (Inspect state []) $ Agenda 0 (const 0) Map.empty Map.empty Nothing
+start state = insert 0 (0, 0) (Inspect state []) $
+  Agenda 0 (const 0) Map.empty Map.empty Nothing Nothing Map.empty True
 
 -- Reordering is explicit and deterministic, retaining serial tie breaks,
 -- spent cost, held work and every alternative. No admissibility claim is made.
 prioritize :: (state -> Natural) -> Agenda state action continuation -> Agenda state action continuation
-prioritize estimate (Agenda serial _ queue held limit) =
-  Agenda serial estimate (rekey queue) (rekey held) limit
+prioritize estimate agenda = reindex agenda
+  { estimateCost = estimate, activeEntries = rekey $ activeEntries agenda,
+    heldEntries = rekey $ heldEntries agenda }
  where
-  rekey = Map.fromList . map (\((_, number), item@(spent, work)) ->
+  rekey = Map.fromList . map (\((_, number), item@(spent, _, work)) ->
     ((spent + estimate (parentOf work), number), item)) . Map.toList
+
+-- Alternate focused local work with the existing global cost order, using two
+-- indexes over ONE queue. A checkpoint opens a new local scope. Within equally
+-- advanced scopes, the oldest scope gets the focused turn; NNUE-derived local
+-- penalties still order its alternatives. Global turns retain fair access to
+-- every finite-cost fallback, including revisions of an unsuccessful prefix.
+-- The adapter supplies progress only at original-entry boundaries, never from
+-- a provisional decrease in visible holes or from a theorem's identity.
+localize :: (state -> Natural) -> Agenda state action continuation -> Agenda state action continuation
+localize order agenda = reindex agenda
+  { entryOrder = Just order, focusTurn = True,
+    activeEntries = Map.map assign $ activeEntries agenda,
+    heldEntries = Map.map assign $ heldEntries agenda }
+ where
+  assign (spent, (_, scope), work) = (spent, (order $ parentOf work, scope), work)
+
+focusKey :: Priority -> Entry state action continuation -> FocusPriority
+focusKey (priority, number) (_, (progress, scope), _) = (progress, scope, priority, number)
+
+reindex :: Agenda state action continuation -> Agenda state action continuation
+reindex agenda = agenda { focusedEntries = case entryOrder agenda of
+  Nothing -> Map.empty
+  Just _ -> Map.fromList [(focusKey key item, key) | (key, item) <- Map.toList $ activeEntries agenda] }
+
+nextEntry :: Agenda state action continuation -> Maybe (Priority, Entry state action continuation)
+nextEntry agenda = do
+  key <- if focusTurn agenda && entryOrderEnabled agenda
+    then snd <$> Map.lookupMin (focusedEntries agenda)
+    else fst <$> Map.lookupMin (activeEntries agenda)
+  item <- Map.lookup key $ activeEntries agenda
+  pure (key, item)
+
+entryOrderEnabled :: Agenda state action continuation -> Bool
+entryOrderEnabled = maybe False (const True) . entryOrder
 
 parentOf :: Work state action continuation -> state
 parentOf (Inspect state _) = state
@@ -121,25 +167,33 @@ parentOf (Apply state _ _) = state
 parentOf (Resume state _ _) = state
 
 pending :: Agenda state action continuation -> Int
-pending (Agenda _ _ queue held _) = Map.size queue + Map.size held
+pending agenda = Map.size (activeEntries agenda) + Map.size (heldEntries agenda)
 
 -- Read-only presentation of the next scheduled branch, not a solved path.
 -- Queued applications and continuations expose their parent without forcing
 -- the operation or invoking a checker. Proof authority remains elsewhere.
 principal :: Agenda state action continuation -> Maybe (state, Natural, Natural)
-principal (Agenda _ _ queue held _) = do
-  ((priority, _), (_, work)) <- Map.lookupMin $ if Map.null queue then held else queue
+principal agenda = do
+  ((priority, _), (_, _, work)) <- if Map.null (activeEntries agenda)
+    then Map.lookupMin (heldEntries agenda) else nextEntry agenda
   let position state ancestors = (state, priority, fromIntegral $ length ancestors)
   pure $ case work of
     Inspect state ancestors -> position state ancestors
     Apply state _ ancestors -> position state ancestors
     Resume state _ ancestors -> position state ancestors
 
-insert :: Natural -> Work state action continuation -> Agenda state action continuation
+insert :: Natural -> Scope -> Work state action continuation -> Agenda state action continuation
        -> Agenda state action continuation
-insert spent work (Agenda serial estimate queue held limit) =
-  Agenda (serial + 1) estimate
-    (Map.insert (spent + estimate (parentOf work), serial) (spent, work) queue) held limit
+insert spent scope work agenda = agenda
+  { nextSerial = serial + 1
+  , activeEntries = Map.insert key item $ activeEntries agenda
+  , focusedEntries = if entryOrderEnabled agenda
+      then Map.insert (focusKey key item) key $ focusedEntries agenda
+      else focusedEntries agenda }
+ where
+  serial = nextSerial agenda
+  key = (spent + estimateCost agenda (parentOf work), serial)
+  item = (spent, scope, work)
 
 -- One scheduling step. Exhausted means only an empty finite frontier, never
 -- logical impossibility. Found retains the other alternatives for fresh-check
@@ -154,43 +208,49 @@ step = stepWithDepth Nothing
 -- A changed limit restores the exact priority/serial order of all alternatives.
 stepWithDepth :: Monad m => Maybe Natural -> Hooks m state action continuation result
               -> Agenda state action continuation -> m (Outcome state action continuation result)
-stepWithDepth requested hooks input = case Map.minViewWithKey queue of
-  Nothing -> pure $ if Map.null held then Exhausted else DepthCensored original
-  Just ((key, item@(spent, work)), rest) -> do
+stepWithDepth requested hooks input = case nextEntry original of
+  Nothing -> pure $ if Map.null (heldEntries original) then Exhausted else DepthCensored original
+  Just (key, item@(spent, scope, work)) -> do
+    let remaining = original
+          { activeEntries = Map.delete key $ activeEntries original
+          , focusedEntries = Map.delete (focusKey key item) $ focusedEntries original
+          , focusTurn = not $ focusTurn original }
     allowed <- charge hooks
     if not allowed then pure $ Censored original
     else if blocked work then observe hooks DepthDeferred >> pure
-      (Progress $ Agenda serial estimate rest (Map.insert key item held) requested)
+      (Progress remaining { heldEntries = Map.insert key item $ heldEntries original })
     else
-      let remaining = Agenda serial estimate rest held requested
-          event = observe hooks
+      let event = observe hooks
           transition parent ancestors result = case result of
             Declined -> event Rejected >> pure (Progress remaining)
             Planned proposals -> do
               event $ Expanded $ length proposals
               pure $ Progress $ foldl'
                 (\agenda proposal -> insert (spent + 1 + penalty proposal)
-                  (Apply parent (action proposal) ancestors) agenda) remaining proposals
+                  scope (Apply parent (action proposal) ancestors) agenda) remaining proposals
             Deferred extra continuation -> event Yielded >> pure
-              (Progress $ insert (spent+1+extra) (Resume parent continuation ancestors) remaining)
+              (Progress $ insert (spent+1+extra) scope (Resume parent continuation ancestors) remaining)
             AdvancedWithRemainder next extra continuation -> do
-              let retain = insert (spent+1+extra) (Resume parent continuation ancestors)
+              let retain = insert (spent+1+extra) scope (Resume parent continuation ancestors)
               cyclic <- anyM (sameState hooks next) (parent:ancestors)
               if cyclic then event CyclePruned >> pure (Progress $ retain remaining)
               else event AdvancedState >> pure
-                (Progress $ retain $ insert (spent+1) (Inspect next $ parent:ancestors) remaining)
+                (Progress $ retain $ insert (spent+1) scope (Inspect next $ parent:ancestors) remaining)
             Checkpoint next remainder -> do
               let retain = maybe id (\(extra, continuation) ->
-                    insert (spent+1+extra) (Resume parent continuation ancestors)) remainder
+                    insert (spent+1+extra) scope (Resume parent continuation ancestors)) remainder
+                  localScope = case entryOrder remaining of
+                    Nothing -> scope
+                    Just order -> (order next, nextSerial remaining)
               cyclic <- anyM (sameState hooks next) (parent:ancestors)
               if cyclic then event CyclePruned >> pure (Progress $ retain remaining)
               else event AdvancedState >> pure
-                (Progress $ retain $ insert 0 (Inspect next $ parent:ancestors) remaining)
+                (Progress $ retain $ insert 0 localScope (Inspect next $ parent:ancestors) remaining)
             Advanced next -> do
               cyclic <- anyM (sameState hooks next) (parent:ancestors)
               if cyclic then event CyclePruned >> pure (Progress remaining)
               else event AdvancedState >> pure
-                (Progress $ insert (spent+1) (Inspect next $ parent:ancestors) remaining)
+                (Progress $ insert (spent+1) scope (Inspect next $ parent:ancestors) remaining)
       in case work of
         Inspect state ancestors -> inspect hooks state >>= \result -> case result of
           Candidate value -> event Proposed >> pure (Found value remaining)
@@ -199,7 +259,7 @@ stepWithDepth requested hooks input = case Map.minViewWithKey queue of
             event $ Expanded $ length proposals
             pure $ Progress $ foldl'
               (\agenda proposal -> insert (spent + 1 + penalty proposal)
-                (Apply state (action proposal) ancestors) agenda) remaining proposals
+                scope (Apply state (action proposal) ancestors) agenda) remaining proposals
         Apply state operation ancestors -> do
           event Attempted
           result <- apply hooks state operation
@@ -209,10 +269,10 @@ stepWithDepth requested hooks input = case Map.minViewWithKey queue of
           result <- resume hooks continuation
           transition state ancestors result
  where
-  original@(Agenda serial estimate queue held _) = case input of
-    Agenda n estimation active parked previous | requested /= previous ->
-      Agenda n estimation (Map.union active parked) Map.empty requested
-    _ -> input
+  original | requested /= heldDepth input = reindex input
+               { activeEntries = Map.union (activeEntries input) (heldEntries input),
+                 heldEntries = Map.empty, heldDepth = requested }
+           | otherwise = input
   blocked work = maybe False (\limit -> case work of
     Inspect _ ancestors -> fromIntegral (length ancestors) > limit
     Apply _ _ ancestors -> fromIntegral (length ancestors) >= limit

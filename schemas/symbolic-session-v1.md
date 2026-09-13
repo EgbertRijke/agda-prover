@@ -573,9 +573,23 @@ resets that descendant's scheduling cost to zero when no hidden debt remains.
 Only the finite original-entry set grants these checkpoints; arbitrary partial
 refinements do not. Parent alternatives, cumulative work and accepted depth
 survive unchanged. The cost receipt records
-`ordering: entry-local-pending-obligations-v4` and `entry_checkpoints`; disabling the
+`ordering: fair-entry-local-v5` and `entry_checkpoints`; disabling the
 switch records `cost-only-v1`. This is an internal native scheduling option,
 not a change to Python defaults or the public task's resource envelope.
+
+When `entry_checkpoints` is enabled, queue visits alternate between local
+entry order and the global cost order. Local order is lexicographic: remaining
+original entries at the last checkpoint, checkpoint insertion serial, ordinary
+cost priority, insertion serial. It does not count provisional visible-hole
+decreases as completed entries. Equally advanced sibling prefixes cannot
+continually displace the first prefix's more expensive local continuation.
+Global visits preserve access to earlier finite-cost alternatives. There is
+one set of queued work with two indexes, not two independently charged searches.
+Lane position survives slices and allowance changes; parked depth-limited work
+is reindexed when restored. The principal variation exposes the actual next
+scheduled parent. Its numeric `priority` remains the cost component, not the
+entire local lexicographic key. Single-goal, eager and one-step modes retain
+ordinary ordering. This is a fairness heuristic, not a completeness theorem.
 
 With staged planning, the same option retains one recently assembled native
 draft per completed original entry. It is a proposal, not transferable checked

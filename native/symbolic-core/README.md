@@ -692,6 +692,13 @@ generated children, starts the next entry with fresh scheduling priority when
 no hidden checking debt remains. It resets neither the physical ledger nor
 accepted proof depth; earlier alternatives keep their original priorities.
 
+At these entry boundaries the agenda alternates local and global queue visits.
+Local visits prefer the most advanced completed prefix, then its oldest local
+search scope, with ordinary cost/model priorities within that scope. Global
+visits retain cost-ordered access to earlier alternatives. Both are indexes of
+one queue: no actions are duplicated, and an unsuccessful local attempt cannot
+exclude earlier revisions. Pause/resume retains the next lane and exact work.
+
 In staged joint search, completed entries also supply one recent assembled
 proposal per original goal. A sibling branch can reuse that proposal only by
 checking it again in its own Agda state, with other pre-existing metas frozen.
@@ -700,7 +707,7 @@ reuse; normal alternatives remain available. The guard survives replay.
 No resident states are merged, and fresh source validation remains mandatory.
 This is conservative checked reuse, not an incremental declaration editor or a
 claim that the entire joint-search problem is solved. Receipts identify
-`entry-local-pending-obligations-v4` and whether `entry_checkpoints` is enabled;
+`fair-entry-local-v5` and whether `entry_checkpoints` is enabled;
 disabling `progress_ordering` retains `cost-only-v1` and disables this reuse.
 One-step ordering is unchanged. See the [session contract](../../schemas/symbolic-session-v1.md).
 

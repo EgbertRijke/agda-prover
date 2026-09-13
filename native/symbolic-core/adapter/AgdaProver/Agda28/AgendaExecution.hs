@@ -5,7 +5,7 @@
 -- Coupled native moves beneath single/joint scheduling. The planner supplies
 -- alternatives; it never supplies a replacement typechecker or proof authority.
 module AgdaProver.Agda28.AgendaExecution
-  ( Move (..), Planning (..), Preparation (..), PreparationStage (..), Config (..), Queue, Outcome (..), Interruption (..), start, startSelected, startOneMove, prioritizeProgress, frontier, step, stepWithDepth ) where
+  ( Move (..), Planning (..), Preparation (..), PreparationStage (..), Config (..), Queue, Outcome (..), Interruption (..), start, startSelected, startOneMove, prioritizeProgress, localizeEntries, frontier, step, stepWithDepth ) where
 
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
@@ -114,6 +114,12 @@ prioritizeProgress :: Queue s -> Queue s
 prioritizeProgress = A.prioritize $ \(SearchState _ selected order stepParent debt _ _) ->
   if stepParent /= Nothing then 0 else 16 * (debt + fromIntegral
     (length $ maybe order (\chosen -> filter (`Set.member` chosen) order) selected))
+
+localizeEntries :: Queue s -> Queue s
+localizeEntries = A.localize $ \(SearchState _ selected _ _ _ _ owners) ->
+  fromIntegral $ Set.size $ Set.fromList
+    [entry | (point, entry) <- Map.toList owners,
+      maybe True (Set.member point) selected]
 
 frontier :: Queue s -> (Int, Maybe (S.StateRef s, Natural, Natural))
 frontier queue = (A.pending queue, fmap unwrap $ A.principal queue)

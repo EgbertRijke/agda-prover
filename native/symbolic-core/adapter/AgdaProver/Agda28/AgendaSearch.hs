@@ -94,7 +94,8 @@ beginWithStep oneMove selection session state supplied trace accepted = S.pendin
         stagedPlanning settings && length selected > 1
       then Just <$> (JointCache state (Set.fromList selected) <$> newIORef Map.empty <*> newIORef Set.empty)
       else pure Nothing
-    pure $ Right $ Run session settings queue baseline metrics owner trace accepted refutationGoal joint
+    let localized = maybe queue (const $ N.localizeEntries queue) joint
+    pure $ Right $ Run session settings localized baseline metrics owner trace accepted refutationGoal joint
 
 -- Raising an allowance never resets accumulated work or restores spent budget.
 withLimits :: E.SearchLimits -> Run s -> Run s
@@ -127,7 +128,7 @@ cost (Run session settings _ baseline metrics _ _ _ _ joint) = do
     "action_limit" .= actionLimit settings,
     "depth_limit" .= depthLimit settings, "depth_deferred" .= depthDeferred measured,
     "depth_unit" .= ("accepted-native-branch-transition" :: String),
-    "ordering" .= (if progressOrdering settings then "entry-local-pending-obligations-v4" else "cost-only-v1" :: String),
+    "ordering" .= (if progressOrdering settings then "fair-entry-local-v5" else "cost-only-v1" :: String),
     "entry_checkpoints" .= maybe False (const True) joint,
     "retry_ordering" .= (if retryWorkOrdering settings then "spent-work-v1" else "uniform-v1" :: String),
     "evidence_depth_reuse" .= evidenceDepthReuse settings,
