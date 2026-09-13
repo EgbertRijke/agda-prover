@@ -6,7 +6,7 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.EvidenceSearch (run, begin, resume, Pending, runHelper, localClosureProposals, primitiveProposals, beginPrimitive, resumePrimitive, PrimitivePending, structuralProposals, equationProposals, constructorProposals, propagationProposals, clauseProposals, Result (..)) where
 
-import Control.Monad (forM)
+import Control.Monad (forM, filterM)
 import Control.Monad.Except (catchError, runExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (Value (..), toJSON, object, (.=))
@@ -584,8 +584,14 @@ primitiveTask options streaming excluded owner point target = do
         grounded <- if not (recursiveEvidenceOperands options) then pure [] else
           nativeOperation $ \runtime -> do
             seed <- describe runtime "recursive" $ Recursion.callHead context
-            candidates <- contextualApplications True runtime
-              [local | (local@(Seed _ origin _ _), _) <- ranked, origin == "local"] [seed]
+            originalArguments <- Recursion.callOperands
+              (charge runtime $ \s -> s { inferenceQueries = inferenceQueries s + 1 }) context
+            let localOperands = [local | (local@(Seed _ origin _ _), _) <- ranked, origin == "local"]
+                localExpressions = [expression | Seed expression _ _ _ <- localOperands]
+            scopedArguments <- filterM (Construction.replayableOperand forbidden)
+              [expression | expression <- originalArguments, expression `notElem` localExpressions]
+            retained <- mapM (describe runtime "clause-argument") scopedArguments
+            candidates <- contextualApplications True runtime (localOperands ++ retained) [seed]
             let arity = maybe 0 (length . filter (visible . argumentInfo) . snd . fst) observed
             pure [expression | (_, expression) <- candidates,
               let Application _ arguments' = appView expression,

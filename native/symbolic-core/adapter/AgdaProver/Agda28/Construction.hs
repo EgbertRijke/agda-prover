@@ -4,11 +4,12 @@
 module AgdaProver.Agda28.Construction
   ( recordPlan, recordExpression, projectedEvidence, omittedField, absurdLambda, eliminateEmpty
   , constructorClosures, localEliminationClosures, constructionScaffold, emptyResultApplication, completeLocalOperands
-  , determinedOperands, ArgumentWrapper (..), argumentWrappers, preservingAllocations ) where
+  , determinedOperands, ArgumentWrapper (..), argumentWrappers, preservingAllocations, replayableOperand ) where
 
 import Control.Monad (filterM, forM)
 import Control.Monad.Except (catchError, throwError)
 import Data.Maybe (catMaybes)
+import Data.Foldable (toList)
 import Data.Monoid (Any (..))
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict qualified as Map
@@ -39,6 +40,20 @@ import Agda.TypeChecking.Rules.Term (checkExpr, inferExpr')
 import Agda.TypeChecking.Substitute (apply, absApp, raise)
 import Agda.Utils.Null (empty)
 import AgdaProver.Agda28.ClauseExecution qualified as ClauseExecution
+
+-- Native names do not authorize exposing private/excluded implementations or
+-- retaining declarations created inside a speculative expression. Apply this
+-- before admitting recovered syntax to an operand inventory or ranking it.
+replayableOperand :: Set.Set QName -> A.Expr -> TCM Bool
+replayableOperand excluded expression = do
+  scope <- getScope
+  let names = foldExpr (\case
+        A.Def name -> Set.singleton name
+        A.Con (I.AmbQ candidates) -> Set.fromList $ toList candidates
+        A.Proj _ (I.AmbQ candidates) -> Set.fromList $ toList candidates
+        _ -> Set.empty) expression
+      helpers = getAny $ foldExpr (\case A.ExtendedLam{} -> Any True; _ -> Any False) expression
+  pure $ not helpers && all (\name -> isNameInScope name scope && not (Set.member name excluded)) names
 
 -- A shallow constructor context for an actual argument domain. Only native
 -- names and field metadata escape telescope inspection, never types containing

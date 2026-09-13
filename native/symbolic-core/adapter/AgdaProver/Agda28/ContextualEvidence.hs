@@ -8,21 +8,17 @@ module AgdaProver.Agda28.ContextualEvidence (propose, Event (..)) where
 import Control.Monad (forM, guard)
 import Control.Monad.Except (catchError, throwError)
 import Control.Monad.IO.Class (liftIO)
-import Data.Foldable (toList)
 import Data.IORef (newIORef, readIORef, modifyIORef')
 import Data.IntSet qualified as IntSet
 import Data.List (nubBy)
 import Data.Maybe (catMaybes, maybeToList)
-import Data.Monoid (Any (..))
 import Data.Set qualified as Set
 import Agda.Syntax.Abstract qualified as A
-import Agda.Syntax.Abstract.Views (foldExpr)
 import Agda.Syntax.Common
 import Agda.Syntax.Info qualified as Info
 import Agda.Syntax.Internal qualified as I
 import Agda.Syntax.Internal.MetaVars (noMetas)
 import Agda.Syntax.Position (noRange)
-import Agda.Syntax.Scope.Base (isNameInScope)
 import Agda.Syntax.Translation.InternalToAbstract (reify)
 import Agda.TypeChecking.Constraints (noConstraints)
 import Agda.TypeChecking.CheckInternal qualified as Internal
@@ -37,7 +33,7 @@ import AgdaProver.Agda28.Algebra qualified as Algebra
 import AgdaProver.Agda28.Construction qualified as Construction
 
 data Head = DefinitionHead A.QName | ConstructorHead A.QName | LocalHead Int deriving Eq
-data Template = Template (Maybe Head)
+data Template = Template (Maybe Head) Bool
 data Side = Source | Destination
 data Event = Inventory Int Int Int | Matched | Grounded | Lifted | Drafted | Completed
 
@@ -95,7 +91,7 @@ template inspect side = go []
           let endpoint = case side of Source -> left; Destination -> right
               explicit = IntSet.fromList [i | (i, True) <- zip [0..] visibleBinders]
           guard $ explicit `IntSet.isSubsetOf` allFreeVars endpoint
-          pure $ Template $ headAt (length visibleBinders) endpoint
+          pure $ Template (headAt (length visibleBinders) endpoint) (null visibleBinders)
 
 -- Paths traverse real, relevant ordinary operands of definitions, local
 -- functions and constructors (including record constructors). Binders and
@@ -188,21 +184,6 @@ attempt action = action `catchError` \case
 
 app :: A.Expr -> [A.Expr] -> A.Expr
 app function = A.app function . map (defaultArg . unnamed)
-
--- Internal QNames are not permission to print private implementations or to
--- reuse definitions created only while checking a draft. Ordinary search can
--- instead apply the already-scoped public alias. Keep this accelerator's
--- replay terms nameable and free of declaration-generating case expressions.
-replayable :: Set.Set A.QName -> A.Expr -> TCM Bool
-replayable excluded expression = do
-  scope <- getScope
-  let names = foldExpr (\case
-        A.Def name -> Set.singleton name
-        A.Con (I.AmbQ candidates) -> Set.fromList $ toList candidates
-        A.Proj _ (I.AmbQ candidates) -> Set.fromList $ toList candidates
-        _ -> Set.empty) expression
-      helpers = getAny $ foldExpr (\case A.ExtendedLam{} -> Any True; _ -> Any False) expression
-  pure $ not helpers && all (\name -> isNameInScope name scope && not (Set.member name excluded)) names
 
 -- Inference and conversion are charged before use. Instantiation is Agda's:
 -- fresh native metas for the complete telescope, then conversion with the
@@ -310,7 +291,7 @@ propose excluded observe inspect check supplied seeds = do
                     liftIO $ modifyIORef' stepCache (((destination, current), found):)
                     pure found
               generateSteps destination current = fmap (uniqueSteps . concat) $
-               forM templates $ \((expression, _, provenance), side, Template sourceHead) ->
+               forM templates $ \((expression, _, provenance), side, Template sourceHead concrete) ->
                fmap concat $ forM (sites current) $ \(_, source) -> do
                 if maybe False (\h -> headAt 0 source /= Just h) sourceHead
                   then pure [] else do
@@ -331,7 +312,13 @@ propose excluded observe inspect check supplied seeds = do
                           observe Grounded
                           let changed = replaceAt path replacement current
                           next <- traverse (contextView inspect) changed
-                          if not (maybe False (\t -> t == destination || I.termSize t < I.termSize current) next)
+                          -- Ground evidence can rearrange an expression without
+                          -- shrinking it. Retain those edges; the closure lane
+                          -- below detects cycles. Uninstantiated rewrite schemas
+                          -- still use the decreasing hint, and ordinary search
+                          -- retains applications outside this accelerator.
+                          if not (maybe False (\t -> t == destination || I.termSize t < I.termSize current ||
+                              concrete && I.termSize t == I.termSize current) next)
                             then pure [] else do
                               let edgeType = I.El (I.getSort target) $
                                     apply relation [defaultArg current, defaultArg $ maybe current id next]
@@ -349,7 +336,7 @@ propose excluded observe inspect check supplied seeds = do
                               fmap concat $ forM lifted $ \(edge, picked) ->
                                 Construction.preservingAllocations $ attemptList $ do
                                   allowed <- check
-                                  scoped <- if allowed then replayable excluded edge else pure False
+                                  scoped <- if allowed then Construction.replayableOperand excluded edge else pure False
                                   if not scoped then pure [] else do
                                     checkedEdge <- checkExpr edge edgeType
                                     closedEdge <- instantiateFull checkedEdge
@@ -365,20 +352,24 @@ propose excluded observe inspect check supplied seeds = do
                                         pure [(closedEdge, edge, maybe current id next, provenance:orientation ++ picked)]
                                       _ -> pure []
                         _ -> pure []
-              -- One deterministic normalization lane is an additional closure
-              -- proposal, not a replacement search. Strictly smaller native
-              -- terms terminate it; every intermediate check consumes the same
-              -- caller allowance. If it stalls, all one-step alternatives below
-              -- still enter the ordinary AND/OR agenda.
-              complete _ [] = pure Nothing
-              complete destination ((edge, next, picked):_)
+              -- A finite non-growing closure lane is an additional proposal,
+              -- not a replacement search. Ground edges may preserve size, so
+              -- keep native endpoint ancestry and try another edge on cycles.
+              -- Distinct one-step proofs remain ordinary agenda alternatives;
+              -- this lane neither identifies proofs nor proves completeness.
+              -- All probes consume the caller's unchanged physical allowance.
+              complete _ _ [] = pure Nothing
+              complete destination seen ((edge, next, picked):rest)
                 | next == destination = pure $ Just (edge, picked)
+                | next `elem` seen = complete destination seen rest
                 | otherwise = case joins of
                     [] -> pure Nothing
                     (join, provenance):_ -> do
-                      suffix <- steps destination next >>= complete destination
-                      pure $ fmap (\(proof, used) ->
-                        (app join [edge, proof], picked ++ provenance:used)) suffix
+                      suffix <- steps destination next >>= complete destination (next:seen)
+                      case suffix of
+                        Nothing -> complete destination seen rest
+                        Just (proof, used) -> pure $ Just
+                          (app join [edge, proof], picked ++ provenance:used)
               -- Evidence endpoints can hide the useful redex even when the
               -- target is already atomic. Adapt a supplied proof through
               -- checked endpoint paths, rather than changing its type for
@@ -392,7 +383,7 @@ propose excluded observe inspect check supplied seeds = do
                     let direct = [(Just edge, picked) | (edge, next, picked) <- options,
                           next == destination]
                     if not (null direct) then pure direct else do
-                      path <- complete destination options
+                      path <- complete destination [current] options
                       pure [(Just edge, picked) | (edge, picked) <- maybeToList path]
               adapt (proof, ty, provenance) = do
                 factType <- contextType inspect ty
@@ -416,7 +407,7 @@ propose excluded observe inspect check supplied seeds = do
           initial <- steps right left
           completed <- case initial of
             (_, next, _):_ | next == right -> pure Nothing -- already a one-step alternative
-            _ -> complete right initial
+            _ -> complete right [left] initial
           case completed of
             Nothing -> pure ()
             Just _ -> observe Completed

@@ -3,11 +3,13 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.Recursion
   ( Owner, owner, ownerName, ownerGroup, checkOwner, CallContext, inspect, callHead, callType
-  , eligibleCall, callSubjects, copatternCall, descentFacts, usesOwner ) where
+  , eligibleCall, callSubjects, callOperands, copatternCall, descentFacts, usesOwner ) where
 
 import Control.Monad (unless, forM)
-import Data.List (find)
-import Data.Maybe (mapMaybe)
+import Data.List (find, nub)
+import Data.Maybe (mapMaybe, catMaybes)
+import Data.IntSet qualified as IntSet
+import Data.Map.Strict qualified as Map
 import Data.Monoid (Any (..))
 import Data.Set qualified as Set
 
@@ -17,10 +19,15 @@ import Agda.Syntax.Abstract.Name (Name, QName)
 import Agda.Syntax.Abstract.Views (foldExpr)
 import Agda.Syntax.Common
 import Agda.Syntax.Internal qualified as I
+import Agda.Syntax.Internal.MetaVars (noMetas)
+import Agda.Syntax.Internal.Pattern (patternsToElims)
+import Agda.Syntax.Translation.InternalToAbstract (reify)
 import Agda.Termination.TermCheck (termMutual)
 import Agda.TypeChecking.Monad
+import Agda.TypeChecking.Free (allFreeVars)
 import Agda.TypeChecking.Records (getRecordOfField, getRecordDef)
 import Agda.TypeChecking.Reduce (reduceB)
+import Agda.TypeChecking.Substitute (applySubst, parallelS)
 
 -- An owner comes only from a checked source clause, never a supplied string.
 -- Child goals inherit it across generated helpers. It does not make the owner
@@ -30,7 +37,7 @@ data CallAccess
   = ConstructorDescendants (Set.Set Name)
   | WithAncestryUnknown (Set.Set Name)
   | CoinductiveCopattern
-data CallContext = CallContext Owner CallAccess
+data CallContext = CallContext Owner CallAccess [Name] [I.Term]
 
 ownerGroup :: Owner -> TCM (Set.Set QName)
 ownerGroup (Owner function) = do
@@ -91,7 +98,12 @@ inspect point root = do
             | Function { funWith = Just _ } <- theDef definition
             , not (Set.null available) = Just $ WithAncestryUnknown available
             | otherwise = Nothing
-      pure $ CallContext root <$> seeds
+      -- Keep the checked argument structure separately from descent evidence.
+      -- A reconstructed parent argument can fill an unchanged coordinate of a
+      -- recursive call; it is not itself a certificate of strict decrease.
+      let arguments = [unArg argument | I.Apply argument <- patternsToElims $ I.namedClausePats checked,
+            usableModality argument, noMetas $ unArg argument]
+      pure $ (\access -> CallContext root access (map ctxEntryName context) arguments) <$> seeds
  where
   nameAt context index = ctxEntryName . snd <$> find ((== index) . fst) (zip [0..] context)
   descendants proper = \case
@@ -101,10 +113,26 @@ inspect point root = do
     _ -> []
 
 callHead :: CallContext -> A.Expr
-callHead (CallContext (Owner function) _) = A.Def function
+callHead (CallContext (Owner function) _ _ _) = A.Def function
 
 callType :: CallContext -> TCM I.Type
-callType (CallContext (Owner function) _) = typeOfConst function
+callType (CallContext (Owner function) _ _ _) = typeOfConst function
+
+-- Rebase checked clause arguments by binder identity, not de Bruijn position
+-- or display spelling. Generated helpers can remove/reorder the clause context.
+-- Unavailable free variables decline the operand instead of being guessed.
+-- Callers still filter visibility, infer its type and check complete calls.
+callOperands :: TCM Bool -> CallContext -> TCM [A.Expr]
+callOperands charge (CallContext _ _ names arguments) = do
+  current <- getContext
+  let indices = Map.fromList $ zip (map ctxEntryName current) [0..]
+      retained = IntSet.fromList [index | (index, name) <- zip [0..] names, Map.member name indices]
+      -- Missing slots are unreachable after the free-variable check below.
+      substitution = parallelS [I.Var (Map.findWithDefault 0 name indices) [] | name <- names]
+  fmap (nub . catMaybes) $ forM arguments $ \argument -> do
+    allowed <- charge
+    if not allowed || not (allFreeVars argument `IntSet.isSubsetOf` retained)
+      then pure Nothing else Just <$> reify (applySubst substitution argument)
 
 -- Keep proposal subjects as scoped native variables. The agenda may apply a
 -- function-valued child to holes, but neither spelling nor result-type shape
@@ -120,11 +148,11 @@ callSubjects context = do
 -- asserting descent. It does not prove guarding: give and the complete mutual
 -- group's termination/productivity check must still accept the candidate.
 copatternCall :: CallContext -> Bool
-copatternCall (CallContext _ CoinductiveCopattern) = True
+copatternCall (CallContext _ CoinductiveCopattern _ _) = True
 copatternCall _ = False
 
 descentFacts :: CallContext -> TCM (Maybe Bool, Maybe Bool)
-descentFacts (CallContext _ (ConstructorDescendants names)) = do
+descentFacts (CallContext _ (ConstructorDescendants names) _ _) = do
   context <- getContext
   shapes <- forM [index | (index, entry) <- zip [0..] context, Set.member (ctxEntryName entry) names] $ \index ->
     (reduceB =<< typeOfBV index) >>= \case
@@ -140,8 +168,8 @@ descentFacts (CallContext _ (ConstructorDescendants names)) = do
 descentFacts _ = pure (Nothing, Nothing)
 
 eligibleCall :: CallContext -> A.Expr -> Bool
-eligibleCall (CallContext _ CoinductiveCopattern) _ = True
-eligibleCall (CallContext _ seeds) expression = getAny $ foldExpr (\case
+eligibleCall (CallContext _ CoinductiveCopattern _ _) _ = True
+eligibleCall (CallContext _ seeds _ _) expression = getAny $ foldExpr (\case
   A.Var name -> Any $ Set.member name names
   _ -> Any False) expression
  where
