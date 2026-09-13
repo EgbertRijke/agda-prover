@@ -29,7 +29,7 @@ module AgdaProver.Agda28.Session
 import Control.Concurrent (MVar, ThreadId, myThreadId, newMVar, modifyMVar, readMVar, withMVar)
 import Control.Exception qualified as E
 import Control.Monad (unless, when, forM, forM_)
-import Control.Monad.Except (catchError)
+import Control.Monad.Except (catchError, throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (runStateT)
 import Data.Aeson (Value, object, (.=))
@@ -956,6 +956,19 @@ check session owner parent initial (DraftAction point expression) isReplay = do
         IndependentDraft{} -> reallyNoConstraints $ give_ False WithoutForce point Nothing scoped
         _ -> give_ False WithoutForce point Nothing scoped
       maybe (pure ()) (`Recursion.checkOwner` scoped) origin
+      -- A child helper's own patterns do not describe its enclosing splits.
+      -- Retain the checked parent's compact pattern facts before removing its
+      -- interaction. Only new goals inherit them; existing sibling goals keep
+      -- their own provenance. Replay repeats this same checked handoff.
+      points <- openInteractionPoints
+      inherited <- case origin of
+        Just root | any (\p -> p /= point && Map.notMember p previous) points -> do
+          liftIO $ charge (sessionWork session) $ \w -> w { checkingAttempts = checkingAttempts w + 1 }
+          (Just <$> Recursion.remember point root) `catchError` \err -> case err of
+            TypeError{} -> pure origin
+            PatternErr{} -> pure origin
+            _ -> throwError err
+        _ -> pure origin
       removeInteractionPoint point
       display <- prettyShow <$> prettyTCM scoped
       term <- instantiateFull checked
@@ -971,18 +984,18 @@ check session owner parent initial (DraftAction point expression) isReplay = do
       obligations <- pendingTC
       newWarnings <- Set.difference <$> useTC stTCWarnings <*> pure warnings
       let bad = filter (not . expectedWarning) (Set.toAscList newWarnings)
-      pure $ if null bad then Right (scoped, display, term, target, telescope, obligations)
+      pure $ if null bad then Right (scoped, display, term, target, telescope, obligations, inherited)
         else Left $ KernelRejected $ unlines (map tcWarningString bad)
   case result >>= id of
     Left failure -> do
       charge (sessionWork session) $ \w -> w { rejectedChecks = rejectedChecks w + 1 }
       pure (owner, Left failure)
-    Right (scoped, abstract, term, target, telescope, obligations) -> do
+    Right (scoped, abstract, term, target, telescope, obligations, inherited) -> do
       charge (sessionWork session) $ \w -> w { acceptedChecks = acceptedChecks w + 1 }
       let number = ownerNext owner
           ref = StateRef $ StateKey (sessionNonce session) (ownerEpoch owner) number
           origins = Map.fromList
-            [(p, Map.findWithDefault origin p previous)
+            [(p, Map.findWithDefault inherited p previous)
             | number' <- pendingGoals obligations, let p = fromIntegral number']
           sealed = nativeDraft scoped child
           draft = DraftAction point $ case (expression, sealed) of

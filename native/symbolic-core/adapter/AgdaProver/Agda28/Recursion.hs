@@ -2,10 +2,11 @@
 {-# LANGUAGE LambdaCase #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
 module AgdaProver.Agda28.Recursion
-  ( Owner, owner, ownerName, ownerGroup, checkOwner, CallContext, inspect, callHead, callType
+  ( Owner, owner, ownerName, ownerGroup, checkOwner, remember, CallContext, inspect, callHead, callType
   , eligibleCall, callSubjects, callOperands, copatternCall, descentFacts, usesOwner ) where
 
 import Control.Monad (unless, forM)
+import Control.DeepSeq (NFData (..), force)
 import Data.List (find, nub)
 import Data.Maybe (mapMaybe, catMaybes)
 import Data.IntSet qualified as IntSet
@@ -32,20 +33,32 @@ import Agda.TypeChecking.Substitute (applySubst, parallelS)
 -- An owner comes only from a checked source clause, never a supplied string.
 -- Child goals inherit it across generated helpers. It does not make the owner
 -- an ordinary visible premise or certify termination of any application.
-newtype Owner = Owner { ownerName :: QName }
+data Owner = Owner { ownerName :: QName, ownerFrames :: ![CallFrame] }
 data CallAccess
   = ConstructorDescendants (Set.Set Name)
   | WithAncestryUnknown (Set.Set Name)
   | CoinductiveCopattern
-data CallContext = CallContext Owner CallAccess [Name] [I.Term]
+  deriving Eq
+-- Compact native values, never a clause closure or a retained TCState. Each
+-- argument keeps the binder identities of the context in which it was checked.
+data CallFrame = CallFrame (Maybe CallAccess) [Name] [I.Term] deriving Eq
+data CallContext = CallContext Owner CallAccess [CallFrame]
+
+instance NFData CallAccess where
+  rnf (ConstructorDescendants names) = rnf names
+  rnf (WithAncestryUnknown names) = rnf names
+  rnf CoinductiveCopattern = ()
+
+instance NFData CallFrame where
+  rnf (CallFrame access names arguments) = rnf (access, names, arguments)
 
 ownerGroup :: Owner -> TCM (Set.Set QName)
-ownerGroup (Owner function) = do
+ownerGroup (Owner function _) = do
   definition <- getConstInfo function
   mutualNames <$> lookupMutualBlock (defMutual definition)
 
 checkOwner :: Owner -> A.Expr -> TCM ()
-checkOwner (Owner function) expression = do
+checkOwner (Owner function _) expression = do
   block <- defMutual <$> getConstInfo function
   -- give restores a saved meta environment, which can create new lambda
   -- helpers in a separate block. Restore source-equivalent group membership
@@ -64,15 +77,15 @@ owner point = lookupInteractionPoint point >>= \interaction -> case ipClause int
  where
   sourceOwner function = getConstInfo function >>= \definition -> case theDef definition of
     Function { funWith = Just parent } -> sourceOwner parent
-    Function { funExtLam = Nothing } -> pure $ Just $ Owner function
+    Function { funExtLam = Nothing } -> pure $ Just $ Owner function []
     _ -> pure Nothing
 
 -- Reuse Agda's clause recheck, including forcing and dependent substitutions.
 -- Constructor-descendant identity is only a proposal seed. Coinductive
 -- observations are not an inductive descent witness; final give/validation
 -- still owns actual termination, including wrappers and higher-order children.
-inspect :: InteractionId -> Owner -> TCM (Maybe CallContext)
-inspect point root = do
+inspectFrame :: InteractionId -> TCM (Maybe CallFrame)
+inspectFrame point = do
   interaction <- lookupInteractionPoint point
   case ipClause interaction of
     IPNoClause -> pure Nothing
@@ -103,7 +116,10 @@ inspect point root = do
       -- recursive call; it is not itself a certificate of strict decrease.
       let arguments = [unArg argument | I.Apply argument <- patternsToElims $ I.namedClausePats checked,
             usableModality argument, noMetas $ unArg argument]
-      pure $ (\access -> CallContext root access (map ctxEntryName context) arguments) <$> seeds
+          -- Force the projections now: a branch must not retain a lazy lens
+          -- into the rechecked clause/context or its enclosing kernel state.
+          frame = force $ CallFrame seeds (map ctxEntryName context) arguments
+      frame `seq` pure (Just frame)
  where
   nameAt context index = ctxEntryName . snd <$> find ((== index) . fst) (zip [0..] context)
   descendants proper = \case
@@ -112,27 +128,54 @@ inspect point root = do
       | I.conInductive constructor == Inductive -> concatMap (descendants True . namedArg) patterns
     _ -> []
 
+-- Called only at an accepted parent-to-child boundary. Missing observations
+-- preserve older information, not a guessed pattern. The original source
+-- owner and the complete termination check remain unchanged.
+remember :: InteractionId -> Owner -> TCM Owner
+remember point root = localTCState $ do
+  observed <- inspectFrame point
+  pure root { ownerFrames = addFrame observed $ ownerFrames root }
+ where
+  addFrame Nothing frames = frames
+  addFrame (Just frame) frames = if frame `elem` frames then frames else frame : frames
+
+inspect :: InteractionId -> Owner -> TCM (Maybe CallContext)
+inspect point root = do
+  observed <- inspectFrame point
+  current <- Set.fromList . map ctxEntryName <$> getContext
+  let frames = maybe id (:) observed $ ownerFrames root
+      accesses = [entry | CallFrame (Just entry) _ _ <- frames]
+      known = Set.intersection current $ Set.unions [names | ConstructorDescendants names <- accesses]
+      unknown = Set.intersection current $ Set.unions [names | WithAncestryUnknown names <- accesses]
+      access
+        | CoinductiveCopattern `elem` accesses = Just CoinductiveCopattern
+        | not $ Set.null known = Just $ ConstructorDescendants known
+        | not $ Set.null unknown = Just $ WithAncestryUnknown unknown
+        | otherwise = Nothing
+  pure $ (\seeds -> CallContext root seeds frames) <$> access
+
 callHead :: CallContext -> A.Expr
-callHead (CallContext (Owner function) _ _ _) = A.Def function
+callHead (CallContext (Owner function _) _ _) = A.Def function
 
 callType :: CallContext -> TCM I.Type
-callType (CallContext (Owner function) _ _ _) = typeOfConst function
+callType (CallContext (Owner function _) _ _) = typeOfConst function
 
 -- Rebase checked clause arguments by binder identity, not de Bruijn position
 -- or display spelling. Generated helpers can remove/reorder the clause context.
 -- Unavailable free variables decline the operand instead of being guessed.
 -- Callers still filter visibility, infer its type and check complete calls.
 callOperands :: TCM Bool -> CallContext -> TCM [A.Expr]
-callOperands charge (CallContext _ _ names arguments) = do
+callOperands charge (CallContext _ _ frames) = do
   current <- getContext
   let indices = Map.fromList $ zip (map ctxEntryName current) [0..]
-      retained = IntSet.fromList [index | (index, name) <- zip [0..] names, Map.member name indices]
-      -- Missing slots are unreachable after the free-variable check below.
-      substitution = parallelS [I.Var (Map.findWithDefault 0 name indices) [] | name <- names]
-  fmap (nub . catMaybes) $ forM arguments $ \argument -> do
-    allowed <- charge
-    if not allowed || not (allFreeVars argument `IntSet.isSubsetOf` retained)
-      then pure Nothing else Just <$> reify (applySubst substitution argument)
+  fmap (nub . concat) $ forM frames $ \(CallFrame _ names arguments) -> do
+    let retained = IntSet.fromList [index | (index, name) <- zip [0..] names, Map.member name indices]
+        -- Missing slots are unreachable after the free-variable check below.
+        substitution = parallelS [I.Var (Map.findWithDefault 0 name indices) [] | name <- names]
+    fmap catMaybes $ forM arguments $ \argument -> do
+      allowed <- charge
+      if not allowed || not (allFreeVars argument `IntSet.isSubsetOf` retained)
+        then pure Nothing else Just <$> reify (applySubst substitution argument)
 
 -- Keep proposal subjects as scoped native variables. The agenda may apply a
 -- function-valued child to holes, but neither spelling nor result-type shape
@@ -148,11 +191,11 @@ callSubjects context = do
 -- asserting descent. It does not prove guarding: give and the complete mutual
 -- group's termination/productivity check must still accept the candidate.
 copatternCall :: CallContext -> Bool
-copatternCall (CallContext _ CoinductiveCopattern _ _) = True
+copatternCall (CallContext _ CoinductiveCopattern _) = True
 copatternCall _ = False
 
 descentFacts :: CallContext -> TCM (Maybe Bool, Maybe Bool)
-descentFacts (CallContext _ (ConstructorDescendants names) _ _) = do
+descentFacts (CallContext _ (ConstructorDescendants names) _) = do
   context <- getContext
   shapes <- forM [index | (index, entry) <- zip [0..] context, Set.member (ctxEntryName entry) names] $ \index ->
     (reduceB =<< typeOfBV index) >>= \case
@@ -168,8 +211,8 @@ descentFacts (CallContext _ (ConstructorDescendants names) _ _) = do
 descentFacts _ = pure (Nothing, Nothing)
 
 eligibleCall :: CallContext -> A.Expr -> Bool
-eligibleCall (CallContext _ CoinductiveCopattern _ _) _ = True
-eligibleCall (CallContext _ seeds _ _) expression = getAny $ foldExpr (\case
+eligibleCall (CallContext _ CoinductiveCopattern _) _ = True
+eligibleCall (CallContext _ seeds _) expression = getAny $ foldExpr (\case
   A.Var name -> Any $ Set.member name names
   _ -> Any False) expression
  where
@@ -178,6 +221,6 @@ eligibleCall (CallContext _ seeds _ _) expression = getAny $ foldExpr (\case
     WithAncestryUnknown possible -> possible
 
 usesOwner :: Owner -> A.Expr -> Bool
-usesOwner (Owner function) = getAny . foldExpr (\case
+usesOwner (Owner function _) = getAny . foldExpr (\case
   A.Def name -> Any $ name == function
   _ -> Any False)

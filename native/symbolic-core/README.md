@@ -603,6 +603,15 @@ claim. Generated helper goals retain their source owner across branch replay.
 New helpers join that owner's mutual group before Agda checks termination, so
 cycles spanning a helper and the source function cannot evade the check.
 
+Generated children also inherit compact checked parent-pattern frames, so a
+later helper does not lose constructor arguments exposed by an earlier split.
+Operands are rebased by native binder identity; those with unavailable free
+variables are discarded. Existing siblings keep their own provenance, and
+eviction/replay reconstructs the frames. These are proposal seeds, not descent
+certificates or retained kernel-state closures. The ordinary type, scope and
+complete termination checks remain mandatory. This does not imply complete
+recovery of arbitrary pre-existing nested source definitions.
+
 Primitive moves also expose fully applied recursive calls anchored by a scoped
 descendant, including applications of function-valued children. Remaining
 arguments are coupled interaction goals, with inference-first and explicitly
