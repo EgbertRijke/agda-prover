@@ -713,7 +713,9 @@ accepted proof depth; earlier alternatives keep their original priorities.
 
 At these entry boundaries the agenda alternates local and global queue visits.
 Local visits prefer the most advanced completed prefix, then its oldest local
-search scope, with ordinary cost/model priorities within that scope. Global
+search scope, with local cost/model priorities within that scope. Completing
+an entry resets only its local cost. Global branch cost continues to accumulate,
+so repeated completions do not erase the cost of an earlier choice. Global
 visits retain cost-ordered access to earlier alternatives. Both are indexes of
 one queue: no actions are duplicated, and an unsuccessful local attempt cannot
 exclude earlier revisions. Pause/resume retains the next lane and exact work.
@@ -726,7 +728,7 @@ reuse; normal alternatives remain available. The guard survives replay.
 No resident states are merged, and fresh source validation remains mandatory.
 This is conservative checked reuse, not an incremental declaration editor or a
 claim that the entire joint-search problem is solved. Receipts identify
-`fair-entry-local-v5` and whether `entry_checkpoints` is enabled;
+`fair-entry-local-v6` and whether `entry_checkpoints` is enabled;
 disabling `progress_ordering` retains `cost-only-v1` and disables this reuse.
 One-step ordering is unchanged. See the [session contract](../../schemas/symbolic-session-v1.md).
 

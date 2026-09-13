@@ -93,7 +93,14 @@ data Work state action continuation
 -- estimate orders work; it never rebates actual work or authorizes pruning.
 type Priority = (Natural, Integer)
 type Scope = (Natural, Integer)
-type Entry state action continuation = (Natural, Scope, Work state action continuation)
+-- Entry completion resets only the focused lane. Rebating the global branch
+-- cost would repeatedly prefer new proofs of a bad prefix over revisiting the
+-- original definition. Neither score is the owner's physical resource ledger.
+data BranchCost = BranchCost { globalCost :: !Natural, localCost :: !Natural }
+advanceCost :: Natural -> BranchCost -> BranchCost
+advanceCost amount (BranchCost global local) = BranchCost (global + amount) (local + amount)
+
+type Entry state action continuation = (BranchCost, Scope, Work state action continuation)
 type Entries state action continuation = Map.Map Priority (Entry state action continuation)
 type FocusPriority = (Natural, Integer, Natural, Integer)
 data Agenda state action continuation = Agenda
@@ -114,7 +121,7 @@ data Outcome state action continuation result
   | Exhausted
 
 start :: state -> Agenda state action continuation
-start state = insert 0 (0, 0) (Inspect state []) $
+start state = insert (BranchCost 0 0) (0, 0) (Inspect state []) $
   Agenda 0 (const 0) Map.empty Map.empty Nothing Nothing Map.empty True
 
 -- Reordering is explicit and deterministic, retaining serial tie breaks,
@@ -125,7 +132,7 @@ prioritize estimate agenda = reindex agenda
     heldEntries = rekey $ heldEntries agenda }
  where
   rekey = Map.fromList . map (\((_, number), item@(spent, _, work)) ->
-    ((spent + estimate (parentOf work), number), item)) . Map.toList
+    ((globalCost spent + estimate (parentOf work), number), item)) . Map.toList
 
 -- Alternate focused local work with the existing global cost order, using two
 -- indexes over ONE queue. A checkpoint opens a new local scope. Within equally
@@ -143,7 +150,9 @@ localize order agenda = reindex agenda
   assign (spent, (_, scope), work) = (spent, (order $ parentOf work, scope), work)
 
 focusKey :: Priority -> Entry state action continuation -> FocusPriority
-focusKey (priority, number) (_, (progress, scope), _) = (progress, scope, priority, number)
+focusKey (priority, number) (spent, (progress, scope), _) =
+  -- Every global key contains globalCost plus the current state estimate.
+  (progress, scope, localCost spent + (priority - globalCost spent), number)
 
 reindex :: Agenda state action continuation -> Agenda state action continuation
 reindex agenda = agenda { focusedEntries = case entryOrder agenda of
@@ -182,7 +191,7 @@ principal agenda = do
     Apply state _ ancestors -> position state ancestors
     Resume state _ ancestors -> position state ancestors
 
-insert :: Natural -> Scope -> Work state action continuation -> Agenda state action continuation
+insert :: BranchCost -> Scope -> Work state action continuation -> Agenda state action continuation
        -> Agenda state action continuation
 insert spent scope work agenda = agenda
   { nextSerial = serial + 1
@@ -192,7 +201,7 @@ insert spent scope work agenda = agenda
       else focusedEntries agenda }
  where
   serial = nextSerial agenda
-  key = (spent + estimateCost agenda (parentOf work), serial)
+  key = (globalCost spent + estimateCost agenda (parentOf work), serial)
   item = (spent, scope, work)
 
 -- One scheduling step. Exhausted means only an empty finite frontier, never
@@ -226,31 +235,32 @@ stepWithDepth requested hooks input = case nextEntry original of
             Planned proposals -> do
               event $ Expanded $ length proposals
               pure $ Progress $ foldl'
-                (\agenda proposal -> insert (spent + 1 + penalty proposal)
+                (\agenda proposal -> insert (advanceCost (1 + penalty proposal) spent)
                   scope (Apply parent (action proposal) ancestors) agenda) remaining proposals
             Deferred extra continuation -> event Yielded >> pure
-              (Progress $ insert (spent+1+extra) scope (Resume parent continuation ancestors) remaining)
+              (Progress $ insert (advanceCost (1+extra) spent) scope (Resume parent continuation ancestors) remaining)
             AdvancedWithRemainder next extra continuation -> do
-              let retain = insert (spent+1+extra) scope (Resume parent continuation ancestors)
+              let retain = insert (advanceCost (1+extra) spent) scope (Resume parent continuation ancestors)
               cyclic <- anyM (sameState hooks next) (parent:ancestors)
               if cyclic then event CyclePruned >> pure (Progress $ retain remaining)
               else event AdvancedState >> pure
-                (Progress $ retain $ insert (spent+1) scope (Inspect next $ parent:ancestors) remaining)
+                (Progress $ retain $ insert (advanceCost 1 spent) scope (Inspect next $ parent:ancestors) remaining)
             Checkpoint next remainder -> do
               let retain = maybe id (\(extra, continuation) ->
-                    insert (spent+1+extra) scope (Resume parent continuation ancestors)) remainder
+                    insert (advanceCost (1+extra) spent) scope (Resume parent continuation ancestors)) remainder
                   localScope = case entryOrder remaining of
                     Nothing -> scope
                     Just order -> (order next, nextSerial remaining)
               cyclic <- anyM (sameState hooks next) (parent:ancestors)
               if cyclic then event CyclePruned >> pure (Progress $ retain remaining)
               else event AdvancedState >> pure
-                (Progress $ retain $ insert 0 localScope (Inspect next $ parent:ancestors) remaining)
+                (Progress $ retain $ insert ((advanceCost 1 spent) { localCost = 0 })
+                  localScope (Inspect next $ parent:ancestors) remaining)
             Advanced next -> do
               cyclic <- anyM (sameState hooks next) (parent:ancestors)
               if cyclic then event CyclePruned >> pure (Progress remaining)
               else event AdvancedState >> pure
-                (Progress $ insert (spent+1) scope (Inspect next $ parent:ancestors) remaining)
+                (Progress $ insert (advanceCost 1 spent) scope (Inspect next $ parent:ancestors) remaining)
       in case work of
         Inspect state ancestors -> inspect hooks state >>= \result -> case result of
           Candidate value -> event Proposed >> pure (Found value remaining)
@@ -258,7 +268,7 @@ stepWithDepth requested hooks input = case nextEntry original of
           Open proposals -> do
             event $ Expanded $ length proposals
             pure $ Progress $ foldl'
-              (\agenda proposal -> insert (spent + 1 + penalty proposal)
+              (\agenda proposal -> insert (advanceCost (1 + penalty proposal) spent)
                 scope (Apply state (action proposal) ancestors) agenda) remaining proposals
         Apply state operation ancestors -> do
           event Attempted
