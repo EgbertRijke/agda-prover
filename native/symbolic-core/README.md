@@ -324,6 +324,28 @@ retains completed work and the drafts needed for overlap checks; proposals
 compete with the continuation in the same agenda. Preparation consumes scheduler
 and physical work, not proof-action allowance or accepted proof depth.
 The `staged_planning=false` scheduling ablation restores all-at-once preparation.
+Case ordering also observes Agda's reduction blockers on the actual goal
+applications. A unique nearest demanded local receives an initial preference;
+blocked metas, ties and unavailable observations keep the existing order.
+The observation stops at unintroduced binders and does not treat their indices
+as context variables. Once a redex reports its demanded subject, unrelated
+operands of that redex do not add competing demands. Constructor-contained
+redexes have lower immediacy than an outer one. All single-subject and compound
+alternatives remain available, and ordinary closure runs in each successor.
+`computation_directed_splits=false` disables this preference and its queries.
+The agenda cost reports that switch. Observations use the existing charged
+`classification_queries`; no new action, work or time cap is introduced.
+
+The generic `agdaprover.symbolic-computation-demand.v1` event links a
+`decision_id` to `enabled`, the display-only `preferred_subject` (or null), and
+`proof_authority: false`. Selection itself uses Agda binder identities.
+Case-variable candidates carry `reduction-demand-v1=preferred|alternative`
+through the existing extensible OR-policy metadata feature slot, and structural
+tiers preserve the preference while NNUE orders alternatives within a tier.
+No additional metadata token is emitted when no preference is available.
+This does not change model format, fixed classification fields or weights;
+it is a search observation, not a claim of training on this new vocabulary.
+
 One-step mode keeps its original complete catalogue. Ordinary term preparation
 now retains inventory and per-head progress within the generator as well, and
 publishes complete ready/composition tiers before finishing all refinements.

@@ -956,13 +956,16 @@ propagationProposals stats limits models mode native emit namespace excluded own
 -- Clause subjects come from native context identities and datatype/record
 -- metadata. Generated actions retain those identities through the session;
 -- Agda decides whether splitting, coverage and without-K are admissible.
-clauseProposals :: IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
+clauseProposals :: Bool -> IORef SearchStats -> SearchLimits -> P.Models -> P.RankingMode
                 -> Maybe (NativeScorer s) -> (Value -> IO ()) -> String -> [String] -> I.Type
                 -> TCM [(ClauseExecution.Intent, [(T.Text, T.Text)])]
-clauseProposals stats limits models mode native emit namespace excluded target = do
+clauseProposals computationDirected stats limits models mode native emit namespace excluded target = do
   pruned <- liftIO $ newIORef False
   let runtime = Runtime limits stats pruned models mode native emit (T.pack namespace) False
   (forbidden, _) <- excludedGlobals excluded
+  demanded <- if not computationDirected then pure Nothing else attempt runtime $
+    Scheduling.computationSubject
+      (charge runtime $ \s -> s { classificationQueries = classificationQueries s + 1 }) forbidden target
   context <- getContext
   let nativeBindings = Map.fromList $ zip [0..] $ map ctxEntryName context
   observed <- fmap catMaybes $ forM (zip [0..] context) $ \(index, entry) -> attempt runtime $ do
@@ -987,13 +990,28 @@ clauseProposals stats limits models mode native emit namespace excluded target =
       pure $ Just (rendered, subject, (ctxEntryName entry, dependencies))
   targetText <- T.pack . prettyShow <$> prettyTCM target
   let subjects = [subject | (_, Just subject, _) <- observed]
+      preferred = case demanded of
+        Just name | any (\(_, _, _, action) -> action == ClauseExecution.BoundSubjects (name :| [])) subjects -> Just name
+        _ -> Nothing
+      preferredAction action = case (preferred, action) of
+        (Just name, ClauseExecution.BoundSubjects (subject :| [])) -> name == subject
+        _ -> False
       dependencies = Map.fromList [edge | (_, _, edge) <- observed]
       goal = F.GoalView targetText [T.pack ty | (ty, _, _) <- observed] Nothing
       decision = T.pack namespace <> ":case"
-      candidates = [P.Candidate (T.pack $ show index) (T.pack name) 0
+      tier action = if preferred == Nothing || preferredAction action then 0 else 1
+      metadata action = case preferred of
+        Nothing -> []
+        Just _ -> [("reduction-demand-v1", if preferredAction action then "preferred" else "alternative")]
+      candidates = sortOn P.priorityTier [P.Candidate (T.pack $ show index) (T.pack name) (tier action)
         (Right $ F.candidateTokens goal $ F.CandidateView "case-variable" "split"
-          (T.pack ty) (T.pack name) 1 []) action
+          (T.pack ty) (T.pack name) 1 (metadata action)) action
         | (index, (name, ty, _, action)) <- zip [0 :: Int ..] subjects]
+  liftIO $ emit $ object
+    ["schema_version" .= ("agdaprover.symbolic-computation-demand.v1" :: String)
+    ,"decision_id" .= decision, "enabled" .= computationDirected
+    ,"preferred_subject" .= fmap (prettyShow . A.nameConcrete) preferred
+    ,"proof_authority" .= False]
   ordered <- if null candidates then pure [] else do
     ranked <- liftIO $ P.rankBatch native models mode (P.ORFamily "case-variable") decision
       (F.policyStateTokens goal Classification.unknownClassification) candidates
@@ -1026,9 +1044,13 @@ clauseProposals stats limits models mode native emit namespace excluded target =
       features action = case [(ty) | (_, ty, _, proposed) <- subjects, proposed == action] of
         ty:_ -> Just $ F.refinementTokens goal "case-split" (Just $ T.pack ty)
         [] -> Just $ F.refinementTokens goal "case-split" Nothing
+      refinementTier action
+        | preferredAction action = 0
+        | ClauseExecution.ClosingSubjects{} <- action = if preferred == Nothing then 0 else 1
+        | otherwise = if preferred == Nothing then 1 else 2
   refinements <- rankCompatible runtime P.Refinements goal
-    [(case action of ClauseExecution.ClosingSubjects{} -> 0; _ -> 1,
-      features action, item) | item@(action, _) <- batches ++ ordered]
+    (sortOn (\(priority, _, _) -> priority)
+      [(refinementTier action, features action, item) | item@(action, _) <- batches ++ ordered])
   -- Result splitting also exposes binders that are absent from the local
   -- context. Keep that Agda operation; do not guess a telescope from text.
   resultAvailable <- attempt runtime $ do

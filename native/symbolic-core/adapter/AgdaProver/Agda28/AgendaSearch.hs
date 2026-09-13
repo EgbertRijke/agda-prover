@@ -33,7 +33,8 @@ data Settings = Settings
   , dependencyOrdering :: Bool, depthLimit :: Maybe Natural, progressOrdering :: Bool
   , retryWorkOrdering :: Bool, jointConstructorPropagation :: Bool, multiSubjectClauses :: Bool
   , evidenceDepthReuse :: Bool, coalesceIntroductions :: Bool, targetFunctionOperands :: Bool
-  , recursiveEvidenceOperands :: Bool, contextualEvidence :: Bool, stagedPlanning :: Bool }
+  , recursiveEvidenceOperands :: Bool, contextualEvidence :: Bool, stagedPlanning :: Bool
+  , computationDirectedSplits :: Bool }
 
 data Metrics = Metrics
   { schedulerSteps :: !Integer, modelItems :: !Integer, modelNanoseconds :: !Integer
@@ -137,6 +138,7 @@ cost (Run session settings _ baseline metrics _ _ _ _ joint) = do
     "target_function_operands" .= targetFunctionOperands settings,
     "recursive_evidence_operands" .= recursiveEvidenceOperands settings,
     "contextual_evidence" .= contextualEvidence settings,
+    "computation_directed_splits" .= computationDirectedSplits settings,
     "staged_planning" .= (evidenceMacro settings && stagedPlanning settings),
     "local_closure_handoffs" .= (evidenceMacro settings && contextualEvidence settings),
     "joint_constructor_propagation" .= jointConstructorPropagation settings,
@@ -258,7 +260,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
             remaining <- allowance
             if remaining == Just 0 then pure $ Right N.PlanningCensored else do
               nextBudget <- moveAllowance
-              (clauseCost, clauses) <- S.proposeClauseActions session goal nextBudget
+              (clauseCost, clauses) <- S.proposeClauseActions (computationDirectedSplits settings) session goal nextBudget
                 (models settings) (ranking settings) native (excluded settings) trace
               recordSearch clauseCost
               case clauses of
@@ -368,7 +370,7 @@ advance native count run@(Run session settings initial baseline metrics owner tr
         prepareTerms structures published quantum (Just cursor)
       N.PrepareClauses terms -> do
         budget <- moveAllowance
-        (stats, result) <- S.proposeClauseActions session goal budget
+        (stats, result) <- S.proposeClauseActions (computationDirectedSplits settings) session goal budget
           (models settings) (ranking settings) native (excluded settings) trace
         recordSearch stats
         pure $ case result of

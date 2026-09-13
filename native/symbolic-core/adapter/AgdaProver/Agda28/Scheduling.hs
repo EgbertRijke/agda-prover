@@ -1,11 +1,12 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 -- SPDX-License-Identifier: GPL-3.0-or-later
-module AgdaProver.Agda28.Scheduling (classify) where
+module AgdaProver.Agda28.Scheduling (classify, computationSubject) where
 
 import Control.Monad (forM)
+import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Agda.Syntax.Abstract.Name (QName)
+import Agda.Syntax.Abstract.Name (Name, QName)
 import Agda.Syntax.Common
 import Agda.Syntax.Internal qualified as I
 import Agda.TypeChecking.Monad
@@ -13,6 +14,44 @@ import Agda.TypeChecking.Records (isRecordType)
 import Agda.TypeChecking.Reduce (reduce, reduceB)
 import AgdaProver.Agda28.Recursion qualified as Recursion
 import AgdaProver.Symbolic.Classification
+
+-- Observe the evaluation demand of actual applications, not an argument
+-- number copied from a definition. The native blocker propagates through
+-- nested calls. Once an application reports its demand, do not add demands
+-- from operands it has not needed yet. Else descend through relevant spines;
+-- a demand beneath a constructor is less immediate than an outer redex.
+-- Unintroduced binders are opaque here: their indices are not current locals.
+-- An unresolved meta, unavailable allowance or tied nearest demands leaves
+-- the existing case order intact. This is never an admissibility decision.
+computationSubject :: TCM Bool -> Set.Set QName -> I.Type -> TCM (Maybe Name)
+computationSubject charge forbidden (I.El _ target) = localTCState $ dontAssignMetas $ do
+  context <- getContext
+  let names = Map.fromList $ zip [0..] $ map ctxEntryName context
+      walk depth term = do
+        allowed <- charge
+        if not allowed then pure Nothing else case term of
+          I.Def name _ | Set.member name forbidden -> pure Nothing
+          _ -> reduceB term >>= \case
+            I.Blocked{} -> pure Nothing
+            I.NotBlocked (I.StuckOn (I.Apply argument)) _
+              | usableModality argument, I.Var index [] <- unArg argument ->
+                  pure $ fmap (\name -> [(name, depth)]) $ Map.lookup index names
+            I.NotBlocked _ value -> case value of
+              I.Def _ es -> children depth es
+              I.Con _ _ es -> children depth es
+              I.Var _ es -> children depth es
+              I.MetaV{} -> pure Nothing
+              _ -> pure $ Just []
+      children depth es = fmap (fmap concat . sequence) $ forM
+        [unArg argument | I.Apply argument <- es, usableModality argument] $ walk (depth + 1)
+  observed <- walk (0 :: Int) target
+  pure $ case observed of
+    Just facts@(_:_) ->
+      let nearest = minimum $ map snd facts
+      in case Set.toList $ Set.fromList [name | (name, depth) <- facts, depth == nearest] of
+        [name] -> Just name
+        _ -> Nothing
+    _ -> Nothing
 
 data Head = Global QName | Local Int deriving (Eq)
 
